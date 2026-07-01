@@ -1,17 +1,20 @@
 """Shared fixtures and helpers for memex tests."""
 from __future__ import annotations
 
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
+from memex.fetcher import FetchResult, FetchError
+from memex.store import Store
+
 
 class FakeFetcher:
     """Deterministic fetcher for tests."""
     def fetch(self, url: str):
-        from memex.fetcher import FetchResult, FetchError
         if "fail.example.com" in url:
             raise FetchError(f"Simulated fetch failure for {url}")
         return FetchResult(
@@ -22,8 +25,6 @@ class FakeFetcher:
 
 FAKE_FETCHER = "tests.conftest:FakeFetcher"
 WORKTREE = Path(__file__).resolve().parent.parent
-
-
 SRC_DIR = str(WORKTREE / "src")
 
 
@@ -46,8 +47,17 @@ def run_memex():
 
 
 @pytest.fixture()
+def db_store(tmp_path):
+    """In-memory Store with schema initialised (for direct unit tests)."""
+    con = sqlite3.connect(":memory:")
+    store = Store(con)
+    store.init_schema()
+    return store
+
+
+@pytest.fixture()
 def store(tmp_path):
-    """Initialised db + vault."""
+    """Initialised db + vault (for CLI subprocess tests)."""
     db_path = tmp_path / "memex.db"
     vault_path = tmp_path / "vault"
     _run_memex(["init", "--db", str(db_path), "--vault", str(vault_path)], cwd=tmp_path)
