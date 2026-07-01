@@ -305,5 +305,160 @@ def show(db_path: Path, vault_path: Path, node_id: str) -> None:
     click.echo(json.dumps(result))
 
 
+@cli.command()
+@_db_options
+@click.argument("node_id")
+def derive(db_path: Path, vault_path: Path, node_id: str) -> None:
+    """Generate a notes-tier derivation from an L0 node using an LLM.
+
+    Writes derivation prose as <deriv_id>.md in the vault, inserts a node row
+    (kind=summary, tier=notes, trust_state=draft, depth=1), and records a
+    derived_from provenance edge in SQLite.
+    """
+    from memex.llm_client import load_llm_client
+
+    llm_module = os.environ.get("MEMEX_LLM_MODULE")
+    llm_client = load_llm_client(llm_module)
+
+    con = sqlite3.connect(db_path)
+    con.execute("PRAGMA foreign_keys = ON")
+
+    # --- Load the L0 node ---
+    row = con.execute(
+        "SELECT content_path FROM node WHERE id = ?", (node_id,)
+    ).fetchone()
+    if row is None:
+        con.close()
+        click.echo(json.dumps({"error": "not_found", "id": node_id}), err=False)
+        raise SystemExit(1)
+
+    content_path = row[0]
+    if not content_path:
+        con.close()
+        click.echo(json.dumps({"error": "no_content", "id": node_id}), err=False)
+        raise SystemExit(1)
+
+    l0_content = Path(content_path).read_text(encoding="utf-8")
+
+    # --- Derive ---
+    deriv_result = llm_client.derive(l0_content)
+
+    # --- Write derivation markdown file ---
+    deriv_id = str(uuid.uuid4())
+    vault_path.mkdir(parents=True, exist_ok=True)
+    md_path = vault_path / f"{deriv_id}.md"
+    md_path.write_text(deriv_result.prose, encoding="utf-8")
+
+    # --- Insert derivation node row ---
+    now = datetime.now(timezone.utc).isoformat()
+    con.execute(
+        """
+        INSERT INTO node (id, kind, tier, trust_state, depth, content_path, created_at)
+        VALUES (?, 'summary', 'notes', 'draft', 1, ?, ?)
+        """,
+        (deriv_id, str(md_path), now),
+    )
+
+    # --- Insert provenance edge ---
+    edge_id = str(uuid.uuid4())
+    con.execute(
+        """
+        INSERT INTO edge (id, type, relation, from_node, to_node)
+        VALUES (?, 'provenance', 'derived_from', ?, ?)
+        """,
+        (edge_id, deriv_id, node_id),
+    )
+
+    con.commit()
+    con.close()
+
+    click.echo(json.dumps({
+        "id": deriv_id,
+        "status": "derived",
+        "l0_node_id": node_id,
+        "content_path": str(md_path),
+    }))
+
+
+@cli.command()
+@_db_options
+@click.argument("query")
+def search(db_path: Path, vault_path: Path, query: str) -> None:
+    """Keyword search over derivation content. Returns JSON array (read-only).
+
+    Each result has: id, snippet, canonical_key, l0_node_id.
+    """
+    con = sqlite3.connect(db_path)
+
+    # Find all derivation nodes (kind=summary, tier=notes) with content paths
+    rows = con.execute(
+        """
+        SELECT n.id, n.content_path
+        FROM node n
+        WHERE n.kind = 'summary' AND n.tier = 'notes'
+          AND n.content_path IS NOT NULL AND n.content_path != ''
+        """
+    ).fetchall()
+
+    results = []
+    query_lower = query.lower()
+
+    for node_id, content_path in rows:
+        p = Path(content_path)
+        if not p.exists():
+            continue
+        content = p.read_text(encoding="utf-8")
+        if query_lower not in content.lower():
+            continue
+
+        # Build snippet: find the line(s) containing the query
+        snippet = _extract_snippet(content, query_lower)
+
+        # Find the L0 node via provenance edge
+        edge_row = con.execute(
+            """
+            SELECT to_node FROM edge
+            WHERE from_node = ? AND type = 'provenance' AND relation = 'derived_from'
+            """,
+            (node_id,),
+        ).fetchone()
+        l0_node_id = edge_row[0] if edge_row else None
+
+        # Get canonical_key from source table (the L0 source)
+        canonical_key = None
+        if l0_node_id:
+            ck_row = con.execute(
+                "SELECT canonical_key FROM source WHERE node_id = ?",
+                (l0_node_id,),
+            ).fetchone()
+            if ck_row:
+                canonical_key = ck_row[0]
+
+        results.append({
+            "id": node_id,
+            "snippet": snippet,
+            "canonical_key": canonical_key,
+            "l0_node_id": l0_node_id,
+        })
+
+    con.close()
+    click.echo(json.dumps(results))
+
+
+def _extract_snippet(content: str, query_lower: str, context_chars: int = 120) -> str:
+    """Extract a snippet from content around the first occurrence of the query."""
+    idx = content.lower().find(query_lower)
+    if idx == -1:
+        return content[:context_chars]
+    start = max(0, idx - context_chars // 2)
+    end = min(len(content), idx + len(query_lower) + context_chars // 2)
+    snippet = content[start:end].strip()
+    if start > 0:
+        snippet = "..." + snippet
+    if end < len(content):
+        snippet = snippet + "..."
+    return snippet
+
+
 if __name__ == "__main__":
     cli()
