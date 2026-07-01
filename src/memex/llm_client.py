@@ -61,7 +61,7 @@ class AnthropicLLMClient(LLMClient):
             data = _json.loads(raw)
             prose = data.get("prose", raw)
             synthesis_statements = data.get("synthesis_statements", [])
-        except (_json.JSONDecodeError, (AttributeError, KeyError)):
+        except (_json.JSONDecodeError, AttributeError, KeyError):
             prose = raw
             synthesis_statements = []
 

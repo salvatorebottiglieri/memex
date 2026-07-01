@@ -338,6 +338,24 @@ def derive(db_path: Path, vault_path: Path, node_id: str) -> None:
         click.echo(json.dumps({"error": "no_content", "id": node_id}), err=False)
         raise SystemExit(1)
 
+    # --- Idempotency check ---
+    existing_edge = con.execute(
+        """
+        SELECT from_node FROM edge
+        WHERE to_node = ? AND type = 'provenance' AND relation = 'derived_from'
+        LIMIT 1
+        """,
+        (node_id,),
+    ).fetchone()
+    if existing_edge is not None:
+        con.close()
+        click.echo(json.dumps({
+            "id": existing_edge[0],
+            "status": "already_derived",
+            "l0_node_id": node_id,
+        }))
+        return
+
     l0_content = Path(content_path).read_text(encoding="utf-8")
 
     # --- Derive ---

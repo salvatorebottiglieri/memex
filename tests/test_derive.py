@@ -142,6 +142,34 @@ class TestDerive:
         data = json.loads(result.stdout)
         assert data["l0_node_id"] == l0_id
 
+    def test_derive_is_idempotent(self, store):
+        """Deriving the same L0 twice produces exactly one summary node and one edge."""
+        ingested = ingest(store, "https://example.com/article")
+        l0_id = ingested["id"]
+
+        first = derive(store, l0_id)
+        assert first.returncode == 0, first.stderr
+        first_data = json.loads(first.stdout)
+        assert first_data["status"] == "derived"
+
+        second = derive(store, l0_id)
+        assert second.returncode == 0, second.stderr
+        second_data = json.loads(second.stdout)
+        assert second_data["status"] == "already_derived"
+
+        con = sqlite3.connect(store["db"])
+        node_count = con.execute(
+            "SELECT COUNT(*) FROM node WHERE kind = 'summary' AND tier = 'notes'"
+        ).fetchone()[0]
+        edge_count = con.execute(
+            "SELECT COUNT(*) FROM edge WHERE to_node = ? AND type = 'provenance' AND relation = 'derived_from'",
+            (l0_id,),
+        ).fetchone()[0]
+        con.close()
+
+        assert node_count == 1
+        assert edge_count == 1
+
 
 class TestSearch:
     def test_search_returns_json_array(self, store):
@@ -198,7 +226,7 @@ class TestSearch:
         )
         data = json.loads(result.stdout)
         item = data[0]
-        assert "broader pattern" in item["snippet"].lower() or len(item["snippet"]) > 0
+        assert "broader pattern" in item["snippet"].lower()
 
     def test_search_returns_empty_array_for_no_match(self, store):
         """search returns [] when no derivations match."""
