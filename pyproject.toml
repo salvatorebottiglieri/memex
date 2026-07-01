@@ -1,0 +1,27 @@
+[project]
+name = "memex"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Salvatore Bottiglieri", email = "sasibottiglieri0@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "click>=8.4.2",
+]
+
+[project.scripts]
+memex = "memex.cli:cli"
+
+[build-system]
+requires = ["uv_build>=0.11.15,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
