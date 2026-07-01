@@ -1,9 +1,27 @@
 """Tests for `memex init` command."""
 import json
 import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+
+FAKE_FETCHER = "tests.fake_fetcher:FakeFetcher"
+WORKTREE = Path("/home/sbottiglieri/memex-issue-3")
+
+
+def run_memex_full(args: list[str], env: dict | None = None) -> subprocess.CompletedProcess:
+    """Run the memex CLI with optional env overrides (used for migration test)."""
+    import os
+    full_env = {**os.environ, **(env or {})}
+    return subprocess.run(
+        [sys.executable, "-m", "memex.cli"] + args,
+        capture_output=True,
+        text=True,
+        cwd=WORKTREE,
+        env=full_env,
+    )
 
 
 def test_init_outputs_json(tmp_path, run_memex):
@@ -70,6 +88,72 @@ def test_init_is_idempotent(tmp_path, run_memex):
 
     assert tables == {"node", "source", "edge", "cursor"}
     assert vault_path.is_dir()
+
+
+def test_init_migrates_missing_failed_column_in_source(tmp_path):
+    """init adds the `failed` column to an existing source table that lacks it.
+
+    Simulates an old-schema DB (from before issue-3) by creating the table
+    without `failed`, then re-running init, then running ingest — asserting
+    no crash and the column is present.
+    """
+    db_path = tmp_path / "memex.db"
+    vault_path = tmp_path / "vault"
+
+    # Create DB with old schema (source table without `failed` column)
+    con = sqlite3.connect(db_path)
+    con.executescript("""
+        PRAGMA foreign_keys = ON;
+        CREATE TABLE IF NOT EXISTS node (
+            id           TEXT PRIMARY KEY,
+            kind         TEXT NOT NULL,
+            tier         TEXT,
+            trust_state  TEXT NOT NULL,
+            depth        INTEGER NOT NULL,
+            content_path TEXT NOT NULL,
+            created_at   TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS source (
+            node_id       TEXT PRIMARY KEY REFERENCES node(id),
+            canonical_key TEXT NOT NULL UNIQUE,
+            source_url    TEXT NOT NULL,
+            title         TEXT,
+            fetched_at    TEXT
+        );
+        CREATE TABLE IF NOT EXISTS edge (
+            id        TEXT PRIMARY KEY,
+            type      TEXT NOT NULL,
+            relation  TEXT NOT NULL,
+            from_node TEXT NOT NULL REFERENCES node(id),
+            to_node   TEXT NOT NULL REFERENCES node(id)
+        );
+        CREATE TABLE IF NOT EXISTS cursor (
+            source_name TEXT PRIMARY KEY,
+            value       TEXT NOT NULL
+        );
+    """)
+    con.commit()
+    con.close()
+    vault_path.mkdir(parents=True, exist_ok=True)
+
+    # Run init on the existing old-schema DB — should add the missing column
+    result = run_memex_full(["init", "--db", str(db_path), "--vault", str(vault_path)])
+    assert result.returncode == 0, result.stderr
+
+    # ingest must not crash (OperationalError: no column named failed)
+    result2 = run_memex_full(
+        ["ingest", "--db", str(db_path), "--vault", str(vault_path), "https://example.com/article"],
+        env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
+    )
+    assert result2.returncode == 0, result2.stderr
+    data = json.loads(result2.stdout)
+    assert data["status"] == "ingested"
+
+    # Confirm the column now exists
+    con = sqlite3.connect(db_path)
+    cols = [row[1] for row in con.execute("PRAGMA table_info(source)").fetchall()]
+    con.close()
+    assert "failed" in cols
 
 
 def test_init_created_flags_reflect_actual_creation(tmp_path, run_memex):

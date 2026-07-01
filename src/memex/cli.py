@@ -84,6 +84,13 @@ def init(db_path: Path, vault_path: Path) -> None:
     con = sqlite3.connect(db_path)
     con.executescript(SCHEMA_SQL)
     con.commit()
+    # Migration: add `failed` column to source table if it does not exist yet
+    # (CREATE TABLE IF NOT EXISTS is a no-op on existing DBs, so ALTER TABLE is needed).
+    try:
+        con.execute("ALTER TABLE source ADD COLUMN failed INTEGER NOT NULL DEFAULT 0")
+        con.commit()
+    except sqlite3.OperationalError:
+        pass  # column already exists
     con.close()
 
     vault_path.mkdir(parents=True, exist_ok=True)
@@ -132,11 +139,16 @@ def ingest(db_path: Path, vault_path: Path, url: str) -> None:
 
     # --- Ledger check ---
     existing = con.execute(
-        "SELECT node_id FROM source WHERE canonical_key = ?", (ckey,)
+        "SELECT node_id, failed FROM source WHERE canonical_key = ?", (ckey,)
     ).fetchone()
     if existing is not None:
         con.close()
-        click.echo(json.dumps({"id": existing[0], "status": "already_exists", "canonical_key": ckey}))
+        click.echo(json.dumps({
+            "id": existing[0],
+            "status": "already_exists",
+            "canonical_key": ckey,
+            "failed": bool(existing[1]),
+        }))
         return
 
     # --- Fetch content ---

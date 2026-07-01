@@ -135,6 +135,23 @@ class TestIngestIdempotency:
         data = json.loads(result2.stdout)
         assert data["status"] == "already_exists"
 
+    def test_already_exists_response_includes_failed_false_for_successful_prior_ingest(self, store):
+        """already_exists response includes failed=false when the prior ingest succeeded."""
+        ingest(store, "https://example.com/article")
+        result2 = ingest(store, "https://example.com/article")
+        data = json.loads(result2.stdout)
+        assert data["status"] == "already_exists"
+        assert data["failed"] is False
+
+    def test_already_exists_response_includes_failed_true_for_prior_failed_ingest(self, store):
+        """already_exists response includes failed=true when the prior ingest failed, so the
+        agent knows it should retry rather than assume the node has content."""
+        ingest(store, "https://fail.example.com/article")  # first attempt fails
+        result2 = ingest(store, "https://fail.example.com/article")  # second attempt
+        data = json.loads(result2.stdout)
+        assert data["status"] == "already_exists"
+        assert data["failed"] is True
+
 
 class TestIngestFetchFailure:
     def test_fetch_failure_does_not_crash(self, store):
