@@ -50,7 +50,7 @@ def ingest(store, url: str, extra_env: dict | None = None):
             "--vault", str(store["vault"]),
             url,
         ],
-        cwd=Path("/home/sbottiglieri/memex-issue-3"),
+        cwd=Path(__file__).resolve().parent.parent,
         env=env,
     )
 

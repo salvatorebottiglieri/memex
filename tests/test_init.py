@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 FAKE_FETCHER = "tests.fake_fetcher:FakeFetcher"
-WORKTREE = Path("/home/sbottiglieri/memex-issue-3")
+WORKTREE = Path(__file__).resolve().parent.parent
 
 
 def run_memex_full(args: list[str], env: dict | None = None) -> subprocess.CompletedProcess:
