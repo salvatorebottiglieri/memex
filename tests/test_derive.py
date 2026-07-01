@@ -76,7 +76,11 @@ class TestDerive:
         assert data["status"] == "derived"
 
     def test_derive_inserts_notes_tier_node(self, store):
-        """The derivation node has tier=notes, kind=summary, trust_state=draft, depth=1."""
+        """The derivation node has tier=notes, kind=summary, depth=1.
+
+        The FakeLLMClient produces a valid derivation (has synthesis marker, right length),
+        so trust_state is auto-verified after checks run.
+        """
         ingested = ingest(store, "https://example.com/article")
         l0_id = ingested["id"]
         result = derive(store, l0_id)
@@ -93,7 +97,7 @@ class TestDerive:
         kind, tier, trust_state, depth = row
         assert kind == "summary"
         assert tier == "notes"
-        assert trust_state == "draft"
+        assert trust_state == "auto-verified"
         assert depth == 1
 
     def test_derive_inserts_provenance_edge(self, store):

@@ -17,13 +17,14 @@ SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS node (
-    id           TEXT PRIMARY KEY,
-    kind         TEXT NOT NULL,
-    tier         TEXT,
-    trust_state  TEXT NOT NULL CHECK (trust_state IN ('draft','auto-verified','human-approved','stale')),
-    depth        INTEGER NOT NULL,
-    content_path TEXT NOT NULL,
-    created_at   TEXT NOT NULL
+    id              TEXT PRIMARY KEY,
+    kind            TEXT NOT NULL,
+    tier            TEXT,
+    trust_state     TEXT NOT NULL CHECK (trust_state IN ('draft','auto-verified','human-approved','stale')),
+    depth           INTEGER NOT NULL,
+    content_path    TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    check_failures  TEXT
 );
 
 CREATE TABLE IF NOT EXISTS source (
@@ -88,6 +89,12 @@ def init(db_path: Path, vault_path: Path) -> None:
     # (CREATE TABLE IF NOT EXISTS is a no-op on existing DBs, so ALTER TABLE is needed).
     try:
         con.execute("ALTER TABLE source ADD COLUMN failed INTEGER NOT NULL DEFAULT 0")
+        con.commit()
+    except sqlite3.OperationalError:
+        pass  # column already exists
+    # Migration: add `check_failures` JSON column to node table.
+    try:
+        con.execute("ALTER TABLE node ADD COLUMN check_failures TEXT")
         con.commit()
     except sqlite3.OperationalError:
         pass  # column already exists
@@ -262,7 +269,8 @@ def show(db_path: Path, vault_path: Path, node_id: str) -> None:
         """
         SELECT
             n.id, n.kind, n.tier, n.trust_state, n.depth, n.content_path, n.created_at,
-            s.canonical_key, s.source_url, s.title, s.fetched_at, s.failed
+            s.canonical_key, s.source_url, s.title, s.fetched_at, s.failed,
+            n.check_failures
         FROM node n
         LEFT JOIN source s ON s.node_id = n.id
         WHERE n.id = ?
@@ -278,6 +286,7 @@ def show(db_path: Path, vault_path: Path, node_id: str) -> None:
     (
         nid, kind, tier, trust_state, depth, content_path, created_at,
         canonical_key, source_url, title, fetched_at, failed,
+        check_failures_json,
     ) = row
 
     # Load file content
@@ -286,6 +295,11 @@ def show(db_path: Path, vault_path: Path, node_id: str) -> None:
         p = Path(content_path)
         if p.exists():
             content = p.read_text(encoding="utf-8")
+
+    # Decode check_failures: present (even if empty) for derivation nodes; None for L0 nodes
+    check_failures: list[str] | None = None
+    if check_failures_json is not None:
+        check_failures = json.loads(check_failures_json)
 
     result = {
         "id": nid,
@@ -301,6 +315,7 @@ def show(db_path: Path, vault_path: Path, node_id: str) -> None:
         "fetched_at": fetched_at,
         "failed": bool(failed) if failed is not None else False,
         "l0_path": content_path or None,
+        "check_failures": check_failures,
     }
     click.echo(json.dumps(result))
 
@@ -367,7 +382,7 @@ def derive(db_path: Path, vault_path: Path, node_id: str) -> None:
     md_path = vault_path / f"{deriv_id}.md"
     md_path.write_text(deriv_result.prose, encoding="utf-8")
 
-    # --- Insert derivation node row ---
+    # --- Insert derivation node row (initially draft) ---
     now = datetime.now(timezone.utc).isoformat()
     con.execute(
         """
@@ -388,6 +403,19 @@ def derive(db_path: Path, vault_path: Path, node_id: str) -> None:
     )
 
     con.commit()
+
+    # --- Run deterministic checks → update trust_state ---
+    from memex.checks import run_checks
+
+    check_result = run_checks(con, deriv_id, md_path)
+    trust_state = "auto-verified" if check_result.passed else "draft"
+    failures_json = json.dumps(check_result.failures)
+
+    con.execute(
+        "UPDATE node SET trust_state = ?, check_failures = ? WHERE id = ?",
+        (trust_state, failures_json, deriv_id),
+    )
+    con.commit()
     con.close()
 
     click.echo(json.dumps({
@@ -395,6 +423,8 @@ def derive(db_path: Path, vault_path: Path, node_id: str) -> None:
         "status": "derived",
         "l0_node_id": node_id,
         "content_path": str(md_path),
+        "trust_state": trust_state,
+        "check_failures": check_result.failures,
     }))
 
 
