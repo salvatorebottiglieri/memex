@@ -48,6 +48,15 @@ CREATE TABLE IF NOT EXISTS cursor (
     source_name TEXT PRIMARY KEY,
     value       TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS inbox (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_name TEXT NOT NULL,
+    url         TEXT NOT NULL,
+    timestamp   TEXT NOT NULL,
+    note        TEXT,
+    captured_at TEXT NOT NULL
+);
 """
 
 
@@ -124,39 +133,33 @@ def status(db_path: Path, vault_path: Path) -> None:
     click.echo(json.dumps(result))
 
 
-@cli.command()
-@_db_options
-@click.argument("url")
-def ingest(db_path: Path, vault_path: Path, url: str) -> None:
-    """Ingest a URL: fetch, store L0 markdown, insert node+source rows.
+def _ingest_url_core(
+    con: sqlite3.Connection,
+    vault_path: Path,
+    url: str,
+    fetcher,
+) -> dict:
+    """Ingest a single URL into an already-open DB connection.
 
-    Idempotent — running twice with the same (canonical) URL yields one node.
-    A fetch failure is recorded and does not crash the run.
+    Returns a result dict (same shape as the ingest command's JSON output).
+    Does NOT commit — caller is responsible for con.commit().
     """
     from memex.canonical_key import canonical_key
-    from memex.fetcher import FetchError, load_fetcher
-
-    fetcher_module = os.environ.get("MEMEX_FETCHER_MODULE")
-    fetcher = load_fetcher(fetcher_module)
+    from memex.fetcher import FetchError
 
     ckey = canonical_key(url)
-
-    con = sqlite3.connect(db_path)
-    con.execute("PRAGMA foreign_keys = ON")
 
     # --- Ledger check ---
     existing = con.execute(
         "SELECT node_id, failed FROM source WHERE canonical_key = ?", (ckey,)
     ).fetchone()
     if existing is not None:
-        con.close()
-        click.echo(json.dumps({
+        return {
             "id": existing[0],
             "status": "already_exists",
             "canonical_key": ckey,
             "failed": bool(existing[1]),
-        }))
-        return
+        }
 
     # --- Fetch content ---
     now = datetime.now(timezone.utc).isoformat()
@@ -167,9 +170,9 @@ def ingest(db_path: Path, vault_path: Path, url: str) -> None:
     title: str | None = None
 
     try:
-        result = fetcher.fetch(url)
-        content = result.content
-        title = result.title
+        fetch_result = fetcher.fetch(url)
+        content = fetch_result.content
+        title = fetch_result.title
     except FetchError as exc:
         failed = True
         fetch_error_msg = str(exc)
@@ -203,39 +206,141 @@ def ingest(db_path: Path, vault_path: Path, url: str) -> None:
         (node_id, ckey, url, title, now, 1 if failed else 0),
     )
 
-    con.commit()
-    con.close()
-
     if failed:
-        click.echo(
-            json.dumps(
-                {
-                    "id": node_id,
-                    "status": "fetch_failed",
-                    "canonical_key": ckey,
-                    "error": fetch_error_msg,
-                }
+        return {
+            "id": node_id,
+            "status": "fetch_failed",
+            "canonical_key": ckey,
+            "error": fetch_error_msg,
+        }
+    return {
+        "id": node_id,
+        "status": "ingested",
+        "canonical_key": ckey,
+        "title": title,
+        "content_path": content_path,
+    }
+
+
+@cli.command()
+@_db_options
+@click.argument("url", required=False, default=None)
+@click.option(
+    "--inbox",
+    "inbox_path",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Path to a WhatsApp .txt export to ingest.",
+)
+def ingest(db_path: Path, vault_path: Path, url: str | None, inbox_path: Path | None) -> None:
+    """Ingest a URL or a WhatsApp inbox export.
+
+    Single URL:   memex ingest --db DB --vault V <url>
+    WhatsApp file: memex ingest --db DB --vault V --inbox <file>
+
+    Idempotent — running twice with the same (canonical) URL yields one node.
+    A fetch failure is recorded and does not crash the run.
+    """
+    from memex.fetcher import load_fetcher
+
+    if url is None and inbox_path is None:
+        raise click.UsageError("Provide either a URL argument or --inbox <file>.")
+
+    fetcher_module = os.environ.get("MEMEX_FETCHER_MODULE")
+    fetcher = load_fetcher(fetcher_module)
+
+    if inbox_path is not None:
+        # --- WhatsApp inbox ingestion ---
+        from memex.whatsapp_source import parse_whatsapp_export
+
+        export_text = inbox_path.read_text(encoding="utf-8")
+        source_name = f"whatsapp:{inbox_path}"
+
+        con = sqlite3.connect(db_path)
+        con.execute("PRAGMA foreign_keys = ON")
+
+        # Read cursor — last processed message index (0-based)
+        cursor_row = con.execute(
+            "SELECT value FROM cursor WHERE source_name = ?", (source_name,)
+        ).fetchone()
+        cursor_index = int(cursor_row[0]) if cursor_row else 0
+
+        # Parse all items from the export
+        all_items = list(parse_whatsapp_export(export_text))
+
+        # Only process items past the cursor
+        new_items = all_items[cursor_index:]
+
+        now = datetime.now(timezone.utc).isoformat()
+        results = []
+
+        for item in new_items:
+            # Persist to inbox table
+            con.execute(
+                """
+                INSERT INTO inbox (source_name, url, timestamp, note, captured_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (source_name, item["url"], item["timestamp"], item.get("note"), now),
             )
+            # Ingest into ledger
+            result = _ingest_url_core(con, vault_path, item["url"], fetcher)
+            results.append(result)
+
+        # Advance cursor to end of all items seen
+        new_cursor = len(all_items)
+        con.execute(
+            "INSERT OR REPLACE INTO cursor (source_name, value) VALUES (?, ?)",
+            (source_name, str(new_cursor)),
         )
+
+        con.commit()
+        con.close()
+        click.echo(json.dumps(results))
+
     else:
-        click.echo(
-            json.dumps(
-                {
-                    "id": node_id,
-                    "status": "ingested",
-                    "canonical_key": ckey,
-                    "title": title,
-                    "content_path": content_path,
-                }
-            )
-        )
+        # --- Single URL ingestion ---
+        con = sqlite3.connect(db_path)
+        con.execute("PRAGMA foreign_keys = ON")
+        result = _ingest_url_core(con, vault_path, url, fetcher)
+        con.commit()
+        con.close()
+        click.echo(json.dumps(result))
 
 
 @cli.command("list")
 @_db_options
-def list_nodes(db_path: Path, vault_path: Path) -> None:
-    """Return JSON array of all nodes (read-only)."""
+@click.option(
+    "--pending",
+    "show_pending",
+    is_flag=True,
+    default=False,
+    help="Return canonical keys captured from inbox but not yet ingested.",
+)
+def list_nodes(db_path: Path, vault_path: Path, show_pending: bool) -> None:
+    """Return JSON array of all nodes, or --pending captured-but-not-ingested keys."""
+    from memex.canonical_key import canonical_key
+
     con = sqlite3.connect(db_path)
+
+    if show_pending:
+        # Derive pending: inbox urls whose canonical_key is absent from source ledger
+        inbox_rows = con.execute("SELECT url FROM inbox").fetchall()
+        ingested_keys = {
+            row[0]
+            for row in con.execute("SELECT canonical_key FROM source").fetchall()
+        }
+        pending = []
+        seen = set()
+        for (url,) in inbox_rows:
+            ckey = canonical_key(url)
+            if ckey not in ingested_keys and ckey not in seen:
+                pending.append(ckey)
+                seen.add(ckey)
+        con.close()
+        click.echo(json.dumps(pending))
+        return
+
     rows = con.execute(
         """
         SELECT n.id, n.kind, n.tier, n.trust_state, s.canonical_key

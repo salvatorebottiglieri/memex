@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 FAKE_FETCHER = "tests.fake_fetcher:FakeFetcher"
-WORKTREE = Path("/home/sbottiglieri/memex-issue-3")
+WORKTREE = Path(__file__).resolve().parent.parent
 
 
 def run_memex_full(args: list[str], env: dict | None = None) -> subprocess.CompletedProcess:
@@ -38,7 +38,7 @@ def test_init_outputs_json(tmp_path, run_memex):
 
 
 def test_init_creates_sqlite_db_with_all_tables(tmp_path, run_memex):
-    """memex init creates the SQLite DB with all four required tables."""
+    """memex init creates the SQLite DB with all required tables."""
     db_path = tmp_path / "memex.db"
     vault_path = tmp_path / "vault"
 
@@ -50,10 +50,10 @@ def test_init_creates_sqlite_db_with_all_tables(tmp_path, run_memex):
     con = sqlite3.connect(db_path)
     cur = con.cursor()
     cur.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
-    tables = {row[0] for row in cur.fetchall()}
+    tables = {row[0] for row in cur.fetchall() if not row[0].startswith("sqlite_")}
     con.close()
 
-    assert tables == {"node", "source", "edge", "cursor"}
+    assert tables == {"node", "source", "edge", "cursor", "inbox"}
 
 
 def test_init_creates_vault_directory(tmp_path, run_memex):
@@ -79,14 +79,14 @@ def test_init_is_idempotent(tmp_path, run_memex):
     assert first.returncode == 0, first.stderr
     assert second.returncode == 0, second.stderr
 
-    # DB still has all four tables after second run
+    # DB still has all required tables after second run
     con = sqlite3.connect(db_path)
     cur = con.cursor()
     cur.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
-    tables = {row[0] for row in cur.fetchall()}
+    tables = {row[0] for row in cur.fetchall() if not row[0].startswith("sqlite_")}
     con.close()
 
-    assert tables == {"node", "source", "edge", "cursor"}
+    assert tables == {"node", "source", "edge", "cursor", "inbox"}
     assert vault_path.is_dir()
 
 
