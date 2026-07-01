@@ -70,3 +70,24 @@ def test_init_is_idempotent(tmp_path, run_memex):
 
     assert tables == {"node", "source", "edge", "cursor"}
     assert vault_path.is_dir()
+
+
+def test_init_created_flags_reflect_actual_creation(tmp_path, run_memex):
+    """db_created and vault_created are True on first run, False on second run."""
+    db_path = tmp_path / "memex.db"
+    vault_path = tmp_path / "vault"
+    args = ["init", "--db", str(db_path), "--vault", str(vault_path)]
+
+    first = run_memex(args)
+    second = run_memex(args)
+
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+
+    first_data = json.loads(first.stdout)
+    second_data = json.loads(second.stdout)
+
+    assert first_data["db_created"] is True
+    assert first_data["vault_created"] is True
+    assert second_data["db_created"] is False
+    assert second_data["vault_created"] is False

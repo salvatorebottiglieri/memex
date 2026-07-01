@@ -6,17 +6,18 @@ from __future__ import annotations
 
 import json
 import sqlite3
-import sys
 from pathlib import Path
 
 import click
 
 SCHEMA_SQL = """
+PRAGMA foreign_keys = ON;
+
 CREATE TABLE IF NOT EXISTS node (
     id           TEXT PRIMARY KEY,
     kind         TEXT NOT NULL,
     tier         TEXT,
-    trust_state  TEXT NOT NULL,
+    trust_state  TEXT NOT NULL CHECK (trust_state IN ('draft','auto-verified','human-approved','stale')),
     depth        INTEGER NOT NULL,
     content_path TEXT NOT NULL,
     created_at   TEXT NOT NULL
@@ -32,8 +33,8 @@ CREATE TABLE IF NOT EXISTS source (
 
 CREATE TABLE IF NOT EXISTS edge (
     id        TEXT PRIMARY KEY,
-    type      TEXT NOT NULL,
-    relation  TEXT NOT NULL,
+    type      TEXT NOT NULL CHECK (type IN ('provenance','association')),
+    relation  TEXT NOT NULL CHECK (relation IN ('derived_from','related','contradicts','refines')),
     from_node TEXT NOT NULL REFERENCES node(id),
     to_node   TEXT NOT NULL REFERENCES node(id)
 );
@@ -67,6 +68,9 @@ def cli() -> None:
 )
 def init(db_path: Path, vault_path: Path) -> None:
     """Create the SQLite DB and vault directory (idempotent)."""
+    db_existed = db_path.exists()
+    vault_existed = vault_path.exists()
+
     db_path.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(db_path)
     con.executescript(SCHEMA_SQL)
@@ -78,8 +82,8 @@ def init(db_path: Path, vault_path: Path) -> None:
     result = {
         "db_path": str(db_path),
         "vault_path": str(vault_path),
-        "db_created": True,
-        "vault_created": True,
+        "db_created": not db_existed,
+        "vault_created": not vault_existed,
     }
     click.echo(json.dumps(result))
 
