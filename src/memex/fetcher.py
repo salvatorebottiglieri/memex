@@ -1,7 +1,4 @@
-"""ContentFetcher interface and real HTTP implementation.
-
-Tests inject FakeFetcher via MEMEX_FETCHER_MODULE env var.
-"""
+"""Content fetcher: HttpFetcher + load_fetcher for test injection."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -19,17 +16,7 @@ class FetchResult:
     title: str | None = None
 
 
-class ContentFetcher:
-    """Protocol / base class for content fetchers.
-
-    Implementations must provide a fetch(url) -> FetchResult method.
-    """
-
-    def fetch(self, url: str) -> FetchResult:
-        raise NotImplementedError
-
-
-class HttpFetcher(ContentFetcher):
+class HttpFetcher:
     """Real HTTP fetcher — extracts article text from HTML."""
 
     def fetch(self, url: str) -> FetchResult:
@@ -70,7 +57,7 @@ def _html_to_markdown(html: str, title: str | None = None) -> str:
     return text
 
 
-def load_fetcher(module_path: str | None = None) -> ContentFetcher:
+def load_fetcher(module_path: str | None = None):
     """Load a fetcher from a 'module:Class' string, or return the default HttpFetcher.
 
     Used by the CLI to allow test injection via MEMEX_FETCHER_MODULE env var.

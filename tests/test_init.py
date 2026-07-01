@@ -1,27 +1,9 @@
 """Tests for `memex init` command."""
 import json
 import sqlite3
-import subprocess
-import sys
 from pathlib import Path
 
-import pytest
-
-FAKE_FETCHER = "tests.fake_fetcher:FakeFetcher"
-WORKTREE = Path("/home/sbottiglieri/memex-issue-3")
-
-
-def run_memex_full(args: list[str], env: dict | None = None) -> subprocess.CompletedProcess:
-    """Run the memex CLI with optional env overrides (used for migration test)."""
-    import os
-    full_env = {**os.environ, **(env or {})}
-    return subprocess.run(
-        [sys.executable, "-m", "memex.cli"] + args,
-        capture_output=True,
-        text=True,
-        cwd=WORKTREE,
-        env=full_env,
-    )
+from tests.conftest import FAKE_FETCHER
 
 
 def test_init_outputs_json(tmp_path, run_memex):
@@ -90,7 +72,7 @@ def test_init_is_idempotent(tmp_path, run_memex):
     assert vault_path.is_dir()
 
 
-def test_init_migrates_missing_failed_column_in_source(tmp_path):
+def test_init_migrates_missing_failed_column_in_source(tmp_path, run_memex):
     """init adds the `failed` column to an existing source table that lacks it.
 
     Simulates an old-schema DB (from before issue-3) by creating the table
@@ -137,11 +119,11 @@ def test_init_migrates_missing_failed_column_in_source(tmp_path):
     vault_path.mkdir(parents=True, exist_ok=True)
 
     # Run init on the existing old-schema DB — should add the missing column
-    result = run_memex_full(["init", "--db", str(db_path), "--vault", str(vault_path)])
+    result = run_memex(["init", "--db", str(db_path), "--vault", str(vault_path)])
     assert result.returncode == 0, result.stderr
 
     # ingest must not crash (OperationalError: no column named failed)
-    result2 = run_memex_full(
+    result2 = run_memex(
         ["ingest", "--db", str(db_path), "--vault", str(vault_path), "https://example.com/article"],
         env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
     )
