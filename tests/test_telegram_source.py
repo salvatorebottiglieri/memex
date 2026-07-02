@@ -11,7 +11,7 @@ import sqlite3
 
 import pytest
 
-from memex.telegram_source import _extract_urls, _message_note, load_telegram_source
+from memex.telegram_source import _split_urls_and_note, load_telegram_source
 from tests.conftest import _run_memex
 
 FAKE_TELEGRAM_SOURCE = "tests.fake_telegram_source:FakeTelegramSource"
@@ -51,26 +51,26 @@ class TestTelegramSourceUnit:
             if old_api_hash:
                 os.environ["MEMEX_TELEGRAM_API_HASH"] = old_api_hash
 
-    def test_extract_urls_finds_urls(self):
-        """_extract_urls finds all URLs in text."""
+    def test_split_urls_and_note_finds_urls(self):
+        """_split_urls_and_note finds all URLs and strips them from note."""
         text = "Check this out https://example.com/article and https://x.com/foo"
-        urls = _extract_urls(text)
+        urls, note = _split_urls_and_note(text)
         assert len(urls) == 2
         assert urls[0] == "https://example.com/article"
-
-    def test_extract_urls_returns_empty_for_no_urls(self):
-        """_extract_urls returns empty list for text without URLs."""
-        assert _extract_urls("Just some text without links") == []
-
-    def test_message_note_strips_url(self):
-        """_message_note strips URLs from text."""
-        note = _message_note("Check this https://example.com/article interesting read")
-        assert "interesting read" in note
+        assert "Check this out" in note
         assert "example.com" not in note
 
-    def test_message_note_returns_empty_for_only_url(self):
-        """_message_note returns empty string when text is only a URL."""
-        assert _message_note("https://example.com/article") == ""
+    def test_split_urls_and_note_no_urls(self):
+        """No URLs returns empty list and original text."""
+        urls, note = _split_urls_and_note("Just some text without links")
+        assert urls == []
+        assert note == "Just some text without links"
+
+    def test_split_urls_and_note_only_url(self):
+        """Text that is only a URL returns an empty note."""
+        urls, note = _split_urls_and_note("https://example.com/article")
+        assert len(urls) == 1
+        assert note == ""
 
     def test_load_telegram_source_returns_real_with_creds(self):
         """load_telegram_source without module path but with API creds returns RealTelegramSource."""

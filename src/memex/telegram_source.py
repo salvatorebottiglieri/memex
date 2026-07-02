@@ -17,6 +17,7 @@ class CapturedMessage:
     url: str
     timestamp: str  # ISO-8601
     note: str | None = None
+    id: int | None = None  # Telegram message ID for cursor tracking
 
 
 class TelegramSourceError(Exception):
@@ -41,43 +42,27 @@ class TelegramSource(Protocol):
     Implementations must provide a capture() -> list[CapturedMessage] method.
     """
 
-    def capture(self) -> list[CapturedMessage]:
+    def capture(self, cursor: int | None = None) -> list[CapturedMessage]:
         ...
 
 
-def _extract_urls(text: str) -> list[str]:
-    """Extract all URLs from a text string."""
+def _split_urls_and_note(text: str) -> tuple[list[str], str]:
+    """Extract URLs and produce a note (text with URLs stripped)."""
     import re
-    return re.findall(r"https?://\S+", text)
-
-
-def _message_note(text: str) -> str:
-    """Strip URLs from a message text to produce a note."""
-    import re
-    return re.sub(r"https?://\S+\s*", "", text).strip()
+    urls = re.findall(r"https?://\S+", text)
+    note = re.sub(r"https?://\S+\s*", "", text).strip()
+    return urls, note
 
 
 def load_telegram_source(module_path: str | None = None) -> TelegramSource:
-    """Load a Telegram source from a 'module:Class' string.
+    """Load a Telegram source from a ``module:Class`` string.
 
-    If no ``module_path`` is provided, attempts to create a
-    ``RealTelegramSource`` from ``MEMEX_TELEGRAM_API_ID`` and
-    ``MEMEX_TELEGRAM_API_HASH`` env vars. Falls back to
-    ``ImportError`` with instructions.
-
-    Returns:
-        An instance of the requested TelegramSource class.
-
-    Raises:
-        ImportError: If no source can be loaded (no module_path and
-                     missing credentials, or bad module/class path).
+    Falls back to ``RealTelegramSource`` from ``MEMEX_TELEGRAM_API_ID``
+    and ``MEMEX_TELEGRAM_API_HASH`` env vars if no override is provided.
     """
     if module_path:
-        module_name, _, class_name = module_path.partition(":")
-        import importlib
-        mod = importlib.import_module(module_name)
-        cls = getattr(mod, class_name)
-        return cls()
+        from memex.plugin import load_class
+        return load_class(module_path)
 
     # No override — try real Telegram source
     import os as _os
@@ -108,14 +93,14 @@ class RealTelegramSource:
         self.api_hash = api_hash
         self.session_path = session_path or "~/.memex/telegram.session"
 
-    def capture(self) -> list[CapturedMessage]:
-        """Fetch messages from Telegram Saved Messages.
+    def capture(self, cursor: int | None = None) -> list[CapturedMessage]:
+        """Fetch messages from Telegram Saved Messages after the given cursor.
 
-        Returns all recent messages containing URLs. Does NOT filter by
-        cursor — that is the CLI's responsibility using the cursor table.
+        Args:
+            cursor: Last seen Telegram message ID; only newer messages are fetched.
 
         Returns:
-            List of ``CapturedMessage`` for each URL found.
+            List of ``CapturedMessage`` with ``id`` set to the Telegram message ID.
         """
         import asyncio
         import os
@@ -131,7 +116,7 @@ class RealTelegramSource:
             client = TelegramClient(session, self.api_id, self.api_hash)
             try:
                 await client.start()
-                msgs = await client.get_messages("me", limit=100)
+                msgs = await client.get_messages("me", limit=100, offset_id=cursor or 0)
             except AuthError as e:
                 raise AuthFailedError(f"Telegram authentication failed: {e}") from e
             except RPCError as e:
@@ -146,17 +131,17 @@ class RealTelegramSource:
                 text = msg.text
                 if not text:
                     continue
-                urls = _extract_urls(text)
+                urls, note = _split_urls_and_note(text)
                 if not urls:
                     continue
-                note = _message_note(text)
                 ts = msg.date.isoformat() if msg.date else ""
                 for url in urls:
                     result.append(CapturedMessage(
                         url=url,
                         timestamp=ts,
                         note=note or None,
+                        id=msg.id,
                     ))
             return result
 
-        return asyncio.get_event_loop().run_until_complete(_fetch())
+        return asyncio.run(_fetch())

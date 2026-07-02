@@ -69,14 +69,8 @@ class AnthropicLLMClient(LLMClient):
 
 
 def load_llm_client(module_path: str | None = None) -> LLMClient:
-    """Load an LLM client from a 'module:Class' string, or return the default AnthropicLLMClient.
-
-    Used by the CLI to allow test injection via MEMEX_LLM_MODULE env var.
-    """
+    """Load an LLM client from a 'module:Class' string, or return the default AnthropicLLMClient."""
     if not module_path:
         return AnthropicLLMClient()
-    module_name, _, class_name = module_path.partition(":")
-    import importlib
-    mod = importlib.import_module(module_name)
-    cls = getattr(mod, class_name)
-    return cls()
+    from memex.plugin import load_class
+    return load_class(module_path)
