@@ -20,10 +20,12 @@ memex exposes a JSON-only CLI (one command per operation, all output is structur
 | `memex ingest --db <path> --vault <path> --inbox <file>` | Ingest a WhatsApp `.txt` export, advancing a per-file cursor |
 | `memex list --db <path> --vault <path>` | List all nodes |
 | `memex list --db <path> --vault <path> --pending` | List canonical keys captured in the inbox but not yet ingested |
+| `memex ingest --db <path> --vault <path> --from-inbox` | Flush all pending inbox items into the ledger (idempotent) |
 | `memex show --db <path> --vault <path> <node-id>` | Show node details including L0 content, trust state, check failures |
 | `memex derive --db <path> --vault <path> <node-id>` | Generate a notes-tier derivation from an L0 (LLM via `MEMEX_LLM_MODULE`) |
 | `memex search --db <path> --vault <path> <query>` | Keyword search over derivation content (read-only) |
 | `memex render --db <path> --vault <path>` | Project SQLite graph → YAML frontmatter + wikilinks on markdown files (slice 1: metadata + tags + aliases) |
+| `memex capture --db <path> --vault <path>` | Poll Telegram Saved Messages and persist new captures to the inbox (env: `MEMEX_TELEGRAM_SOURCE`) |
 
 ## Design
 

@@ -180,27 +180,61 @@ def _ingest_single_url(store, vault_path: Path, url: str, fetcher, *, source_nam
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     help="Path to a WhatsApp .txt export to ingest.",
 )
-def ingest(db_path: Path, vault_path: Path, url: str | None, inbox_path: Path | None) -> None:
-    """Ingest a URL or a WhatsApp inbox export.
+@click.option(
+    "--from-inbox",
+    "from_inbox",
+    is_flag=True,
+    default=False,
+    help="Ingest all pending inbox items (captured but not yet in the ledger).",
+)
+def ingest(db_path: Path, vault_path: Path, url: str | None, inbox_path: Path | None,
+           from_inbox: bool) -> None:
+    """Ingest a URL, a WhatsApp inbox export, or pending inbox items.
 
     Single URL:   memex ingest --db DB --vault V <url>
     WhatsApp file: memex ingest --db DB --vault V --inbox <file>
+    Inbox flush:  memex ingest --db DB --vault V --from-inbox
 
     Idempotent — running twice with the same (canonical) URL yields one node.
     A fetch failure is recorded and does not crash the run.
     """
+    from memex.canonical_key import canonical_key
     from memex.fetcher import load_fetcher
     from memex.store import Store
     from memex.whatsapp_source import parse_whatsapp_export
 
-    if url is None and inbox_path is None:
-        raise click.UsageError("Provide either a URL argument or --inbox <file>.")
+    if not from_inbox and url is None and inbox_path is None:
+        raise click.UsageError(
+            "Provide a URL argument, --inbox <file>, or --from-inbox."
+        )
 
     _require_db(db_path)
     fetcher = load_fetcher(os.environ.get("MEMEX_FETCHER_MODULE"))
 
     with Store.open(db_path) as store:
-        if inbox_path is not None:
+        if from_inbox:
+            # ── From-inbox: ingest all pending inbox items ───────
+            ingested_keys = store.list_ingested_canonical_keys()
+            results = []
+            for item in store.list_inbox():
+                ckey = canonical_key(item["url"])
+                if ckey not in ingested_keys:
+                    result = _ingest_single_url(store, vault_path, item["url"], fetcher)
+                    results.append(result)
+                    # Track newly ingested keys to avoid re-processing
+                    # the same canonical key within this batch
+                    if result.get("canonical_key"):
+                        ingested_keys.add(result["canonical_key"])
+                else:
+                    # Already ingested — report as already_exists
+                    existing = store.lookup_by_canonical_key(ckey)
+                    results.append({
+                        "id": existing["node_id"] if existing else None,
+                        "status": "already_exists",
+                        "canonical_key": ckey,
+                    })
+            click.echo(json.dumps(results))
+        elif inbox_path is not None:
             source_name = f"whatsapp:{inbox_path}"
             export_text = inbox_path.read_text(encoding="utf-8")
             all_items = list(parse_whatsapp_export(export_text))
@@ -436,6 +470,52 @@ def render(db_path: Path, vault_path: Path) -> None:
         raise SystemExit(1)
 
     results = _render(db_path, vault_path)
+    click.echo(json.dumps(results))
+
+
+@cli.command()
+@_db_options
+def capture(db_path: Path, vault_path: Path) -> None:
+    """Poll Telegram Saved Messages and persist new captures to the inbox.
+
+    Reads new messages from the configured Telegram source (via MEMEX_TELEGRAM_SOURCE),
+    writes each to the inbox table, and advances the cursor.
+    Idempotent — re-running only processes messages after the last cursor position.
+    """
+    from memex.telegram_source import load_telegram_source, CapturedMessage
+    from memex.store import Store
+
+    _require_db(db_path)
+    source_module = os.environ.get("MEMEX_TELEGRAM_SOURCE")
+    try:
+        source = load_telegram_source(source_module)
+    except ImportError as e:
+        click.echo(json.dumps({"error": "source_not_found", "detail": str(e)}), err=True)
+        raise SystemExit(1)
+
+    source_name = "telegram:saved_messages"
+
+    with Store.open(db_path) as store:
+        cursor_str = store.get_cursor(source_name)
+        cursor_index = int(cursor_str) if cursor_str is not None else 0
+
+        messages = source.capture()
+        new_messages = messages[cursor_index:]
+
+        now = datetime.now(timezone.utc).isoformat()
+        results = []
+        for msg in new_messages:
+            store.add_inbox_item(
+                source_name=source_name,
+                url=msg.url,
+                timestamp=msg.timestamp,
+                note=msg.note,
+                captured_at=now,
+            )
+            results.append({"url": msg.url, "timestamp": msg.timestamp, "note": msg.note})
+
+        store.set_cursor(source_name, str(len(messages)))
+
     click.echo(json.dumps(results))
 
 
