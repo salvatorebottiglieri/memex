@@ -28,10 +28,12 @@ more conservative on scope (single user, no discovery/web-research subsystem).
 | Derivation (LLM → notes-tier + provenance edge) | **built** | `memex derive <l0-id>` |
 | Deterministic checks (auto-verify gate) | **built** | `memex.checks.run_checks` |
 | Keyword search over derivations | **built** | `memex search <query>` |
-| Pending set (captured-but-not-ingested) | **built (table only)** | `memex list --pending` |
+| Pending set (captured-but-not-ingested) | **built** | `memex list --pending` + `memex ingest --from-inbox` |
+| Inbox flush (inbox → ledger) | **built** | `memex ingest --from-inbox` |
 | Store deep module (CLI is thin) | **built** | `memex.store.Store` |
 | Test injection via env var | **built** | `MEMEX_FETCHER_MODULE`, `MEMEX_LLM_MODULE` |
-| Telegram Saved-Messages capture | planned (ADR-0006) | not implemented |
+| Telegram Saved-Messages capture | **built** (slice 2: protocol + fake) | `memex capture` via `MEMEX_TELEGRAM_SOURCE` |
+| Ingest from inbox (separated from capture) | **built** | `memex ingest --from-inbox` |
 | Lazy density/demand trigger for derivations | manual only (ADR-0003) | `memex derive` is invoked explicitly |
 | Render step (DB → frontmatter + wikilinks for Obsidian) | **built** (slice 1: metadata + tags + aliases) | `memex render` |
 | Per-type extractors (YouTube transcript, PDF) | HTML only | `HttpFetcher` is regex on `<title>` + strip-tags |
@@ -106,7 +108,7 @@ flowchart TB
 - **Staleness propagation:** invalidate-eagerly vs mark-and-regenerate-on-demand — leaning on-demand; confirm during build.
 - **✅-reaction** Telegram confirmation: optional later enhancement (needs write scope).
 - **Confidence scoring:** exact formula from source count + contradictions.
-- **Capture/ingest conflation:** `memex ingest --inbox` currently does capture + ingest atomically, so the inbox table never has *pending* items via the CLI. The pending path exists for a future `memex capture` step that persists without ingesting — see ADR-0006/0007. Test coverage of `--pending` therefore writes to the inbox table directly.
+- **Capture/ingest separation:** `memex ingest --inbox` does capture + ingest atomically. `memex ingest --from-inbox` now provides the pure-ingest side (process pending inbox rows without re-capturing), so a future `memex capture` command can fill the inbox and `--from-inbox` flushes it. `memex list --pending` surfaces what's waiting.
 
 ## Reference: `iusztinpaul/ai-research-os-workshop`
 

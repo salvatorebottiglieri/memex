@@ -21,6 +21,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 FAKE_FETCHER = "tests.conftest:FakeFetcher"
 FAKE_LLM = "tests.fake_llm_client:FakeLLMClient"
+FAKE_TELEGRAM = "tests.fake_telegram_source:FakeTelegramSource"
 FAKE_FAILING_LLM = "tests.fake_llm_client_failing:FakeLLMClientFailing"
 
 
@@ -619,6 +620,92 @@ def smoke_render(tmp: Path) -> None:
     _check("render missing DB exits non-zero", p.returncode != 0)
 
 
+def smoke_capture(tmp: Path) -> None:
+    print("\n[CAPTURE] memex capture + ingest --from-inbox loop")
+    db, vault = _fresh_store(tmp, "capture")
+
+    p = _run(
+        ["capture", "--db", str(db), "--vault", str(vault)],
+        env={"MEMEX_TELEGRAM_SOURCE": FAKE_TELEGRAM},
+    )
+    res = _expect_json("capture", p)
+    _check("capture returns items", len(res) >= 1, f"got {len(res)}")
+
+    # list --pending shows them
+    p = _run(["list", "--db", str(db), "--vault", str(vault), "--pending"])
+    pending = _expect_json("list --pending after capture", p)
+    _check("pending non-empty after capture", len(pending) >= 1, f"got {len(pending)}")
+
+    # ingest --from-inbox flushes them
+    p = _run(
+        ["ingest", "--db", str(db), "--vault", str(vault), "--from-inbox"],
+        env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
+    )
+    res = _expect_json("ingest --from-inbox after capture", p)
+    _check("from-inbox ingested items", len(res) >= 1, f"got {len(res)}")
+    _check("all ingested or already_exists",
+           all(r["status"] in ("ingested", "already_exists") for r in res))
+
+    # pending cleared
+    p = _run(["list", "--db", str(db), "--vault", str(vault), "--pending"])
+    pending = _expect_json("list --pending cleared", p)
+    _check("pending empty after ingest", pending == [], f"got {pending}")
+
+    # Re-run capture is no-op (cursor advanced)
+    p = _run(
+        ["capture", "--db", str(db), "--vault", str(vault)],
+        env={"MEMEX_TELEGRAM_SOURCE": FAKE_TELEGRAM},
+    )
+    res = _expect_json("capture #2", p)
+    _check("capture re-run returns empty", res == [], f"got {len(res)} items")
+
+    # No source configured
+    p = _run(["capture", "--db", str(db), "--vault", str(vault)])
+    _check("capture without source exits non-zero", p.returncode != 0)
+
+
+def smoke_from_inbox(tmp: Path) -> None:
+    print("\n[FROM-INBOX] memex ingest --from-inbox")
+    db, vault = _fresh_store(tmp, "frominbox")
+
+    # Pre-fill inbox with a few URLs
+    con = sqlite3.connect(db)
+    now = "2024-06-01T09:00:00"
+    for url in ["https://example.com/alpha", "https://example.com/beta"]:
+        con.execute(
+            "INSERT INTO inbox (source_name, url, timestamp, note, captured_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("smoke:test", url, now, None, now),
+        )
+    con.commit()
+    con.close()
+
+    p = _run(
+        ["ingest", "--db", str(db), "--vault", str(vault), "--from-inbox"],
+        env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
+    )
+    res = _expect_json("ingest --from-inbox", p)
+    _check("returns 2 results", len(res) == 2, f"got {len(res)}")
+    _check("both ingested", all(r["status"] in ("ingested", "already_exists") for r in res))
+
+    # Re-run is idempotent
+    p = _run(
+        ["ingest", "--db", str(db), "--vault", str(vault), "--from-inbox"],
+        env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
+    )
+    res = _expect_json("ingest --from-inbox #2", p)
+    _check("re-run still returns 2", len(res) == 2, f"got {len(res)}")
+    _check("re-run shows already_exists", all(r["status"] == "already_exists" for r in res))
+
+    # Inbox rows preserved
+    con = sqlite3.connect(db)
+    inbox_count = con.execute("SELECT COUNT(*) FROM inbox").fetchone()[0]
+    node_count = con.execute("SELECT COUNT(*) FROM node").fetchone()[0]
+    con.close()
+    _check("inbox rows preserved", inbox_count == 2, f"got {inbox_count}")
+    _check("2 nodes created", node_count == 2, f"got {node_count}")
+
+
 def smoke_help(tmp: Path) -> None:
     print("\n[HELP] every command has --help")
     for cmd in ["init", "status", "ingest", "list", "show", "derive", "search", "render"]:
@@ -681,6 +768,8 @@ def main() -> int:
         smoke_youtube(tmp)
         smoke_l0_immutable(tmp)
         smoke_render(tmp)
+        smoke_from_inbox(tmp)
+        smoke_capture(tmp)
         smoke_help(tmp)
         smoke_full_e2e(tmp)
 
