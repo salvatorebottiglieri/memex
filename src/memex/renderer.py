@@ -29,11 +29,10 @@ def render(db_path: str | Path, vault_path: str | Path) -> list[dict[str, str]]:
     vault_path = Path(vault_path)
 
     with Store.open(db_path) as store:
-        for node_row in store.list_nodes():
-            node_id = node_row["id"]
-            node = store.get_node(node_id)
+        for node in store.list_nodes():
+            node_id = node["id"]
 
-            if node is None or not node.get("content_path"):
+            if not node.get("content_path"):
                 results.append({"node_id": node_id, "status": "skipped"})
                 continue
 
@@ -42,15 +41,15 @@ def render(db_path: str | Path, vault_path: str | Path) -> list[dict[str, str]]:
                 results.append({"node_id": node_id, "status": "skipped"})
                 continue
 
-            frontmatter = _build_frontmatter(node, md_path, store)
             body = _extract_body(md_path)
+            frontmatter = _build_frontmatter(node, body, store)
             _write_file(md_path, frontmatter, body)
             results.append({"node_id": node_id, "status": "rendered"})
 
     return results
 
 
-def _build_frontmatter(node: dict[str, Any], md_path: Path, store: Store) -> dict[str, Any]:
+def _build_frontmatter(node: dict[str, Any], body: str, store: Store) -> dict[str, Any]:
     """Construct the YAML-serializable frontmatter dict for a node."""
     fm: dict[str, Any] = {}
 
@@ -71,7 +70,7 @@ def _build_frontmatter(node: dict[str, Any], md_path: Path, store: Store) -> dic
     fm["tags"] = tags
 
     # ── Aliases ──────────────────────────────────────────────────
-    alias = _resolve_alias(node, md_path)
+    alias = _resolve_alias(node, body)
     if alias:
         fm["aliases"] = [alias]
 
@@ -111,7 +110,7 @@ def _build_frontmatter(node: dict[str, Any], md_path: Path, store: Store) -> dic
     return fm
 
 
-def _resolve_alias(node: dict[str, Any], md_path: Path) -> str | None:
+def _resolve_alias(node: dict[str, Any], body: str) -> str | None:
     """Determine the display alias for a node.
 
     Priority:
@@ -123,13 +122,6 @@ def _resolve_alias(node: dict[str, Any], md_path: Path) -> str | None:
     if title:
         return title
 
-    try:
-        text = md_path.read_text(encoding="utf-8")
-    except OSError:
-        return None
-
-    # Strip existing frontmatter before looking for H1
-    body = _extract_body(md_path)
     m = re.search(r"^# (.+)$", body, re.MULTILINE)
     if m:
         return m.group(1).strip()

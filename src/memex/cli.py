@@ -31,6 +31,13 @@ def _db_options(fn):
     return fn
 
 
+def _require_db(db_path: Path) -> None:
+    """Exit with clean JSON error if the database file doesn't exist."""
+    if not db_path.exists():
+        click.echo(json.dumps({"error": "db_not_found", "db_path": str(db_path)}), err=True)
+        raise SystemExit(1)
+
+
 @click.group()
 def cli() -> None:
     """memex — personal second-brain CLI."""
@@ -189,6 +196,7 @@ def ingest(db_path: Path, vault_path: Path, url: str | None, inbox_path: Path | 
     if url is None and inbox_path is None:
         raise click.UsageError("Provide either a URL argument or --inbox <file>.")
 
+    _require_db(db_path)
     fetcher = load_fetcher(os.environ.get("MEMEX_FETCHER_MODULE"))
 
     with Store.open(db_path) as store:
@@ -234,6 +242,7 @@ def list_nodes(db_path: Path, vault_path: Path, show_pending: bool) -> None:
     from memex.canonical_key import canonical_key
     from memex.store import Store
 
+    _require_db(db_path)
     with Store.open(db_path) as store:
         if show_pending:
             ingested = store.list_ingested_canonical_keys()
@@ -255,11 +264,12 @@ def show(db_path: Path, vault_path: Path, node_id: str) -> None:
     """Return JSON with a node's content, metadata, trust state, and provenance (read-only)."""
     from memex.store import Store
 
+    _require_db(db_path)
     with Store.open(db_path) as store:
         node = store.get_node(node_id)
 
     if node is None:
-        click.echo(json.dumps({"error": "not_found", "id": node_id}), err=False)
+        click.echo(json.dumps({"error": "not_found", "id": node_id}), err=True)
         raise SystemExit(1)
 
     # Load file content (stays in CLI — ADR-0008: markdown owns content)
@@ -288,16 +298,17 @@ def derive(db_path: Path, vault_path: Path, node_id: str) -> None:
     from memex.llm_client import load_llm_client
     from memex.store import Store
 
+    _require_db(db_path)
     llm = load_llm_client(os.environ.get("MEMEX_LLM_MODULE"))
 
     with Store.open(db_path) as store:
         # --- Load the L0 node ---
         l0 = store.get_node(node_id)
         if l0 is None:
-            click.echo(json.dumps({"error": "not_found", "id": node_id}), err=False)
+            click.echo(json.dumps({"error": "not_found", "id": node_id}), err=True)
             raise SystemExit(1)
         if not l0.get("content_path"):
-            click.echo(json.dumps({"error": "no_content", "id": node_id}), err=False)
+            click.echo(json.dumps({"error": "no_content", "id": node_id}), err=True)
             raise SystemExit(1)
 
         # --- Idempotency check ---
@@ -367,6 +378,7 @@ def search(db_path: Path, vault_path: Path, query: str) -> None:
     """
     from memex.store import Store
 
+    _require_db(db_path)
     CONTEXT_CHARS = 120
     query_lower = query.lower()
 
@@ -418,11 +430,9 @@ def render(db_path: Path, vault_path: Path) -> None:
     """
     from memex.renderer import render as _render
 
-    if not db_path.exists():
-        click.echo(json.dumps({"error": "db_not_found", "db_path": str(db_path)}), err=False)
-        raise SystemExit(1)
+    _require_db(db_path)
     if not vault_path.exists():
-        click.echo(json.dumps({"error": "vault_not_found", "vault_path": str(vault_path)}), err=False)
+        click.echo(json.dumps({"error": "vault_not_found", "vault_path": str(vault_path)}), err=True)
         raise SystemExit(1)
 
     results = _render(db_path, vault_path)

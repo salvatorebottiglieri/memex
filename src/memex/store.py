@@ -178,16 +178,35 @@ class Store:
     # ── Reads ─────────────────────────────────────────────────────
 
     def list_nodes(self) -> list[dict[str, Any]]:
-        """All nodes with their source info, ordered by created_at."""
+        """All nodes with full metadata, ordered by created_at.
+
+        Returns the same per-node fields as ``get_node``: ``{id, kind, tier,
+        trust_state, depth, content_path, created_at, check_failures,
+        canonical_key, source_url, title, fetched_at, failed}``.
+        """
         rows = self._con.execute(
             """
-            SELECT n.id, n.kind, n.tier, n.trust_state, s.canonical_key
+            SELECT
+                n.id, n.kind, n.tier, n.trust_state, n.depth,
+                n.content_path, n.created_at, n.check_failures,
+                s.canonical_key, s.source_url, s.title, s.fetched_at, s.failed
             FROM node n
             LEFT JOIN source s ON s.node_id = n.id
             ORDER BY n.created_at
             """
         ).fetchall()
-        return [dict(r) for r in rows]
+        result = []
+        for r in rows:
+            d = dict(r)
+            if d.get("failed") is not None:
+                d["failed"] = bool(d["failed"])
+            cf_json = d.pop("check_failures", None)
+            if cf_json is not None:
+                d["check_failures"] = json.loads(cf_json)
+            else:
+                d["check_failures"] = None
+            result.append(d)
+        return result
 
     def get_node(self, node_id: str) -> dict[str, Any] | None:
         """Full node + source by id.

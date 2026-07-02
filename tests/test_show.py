@@ -73,7 +73,7 @@ def test_show_includes_trust_state(store):
 def test_show_returns_error_for_unknown_id(store):
     result = show(store, "00000000-0000-0000-0000-000000000000")
     assert result.returncode == 1
-    data = json.loads(result.stdout)
+    data = json.loads(result.stderr)
     assert data["error"] == "not_found"
 
 

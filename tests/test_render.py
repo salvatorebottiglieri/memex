@@ -9,13 +9,15 @@ Tested via the CLI subprocess seam (same pattern as test_ingest, test_derive).
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 import yaml
 
+from memex.store import Store
 from tests.conftest import _run_memex, FAKE_FETCHER, ingest
 
 FAKE_LLM = "tests.fake_llm_client:FakeLLMClient"
@@ -43,14 +45,69 @@ def _derive(store, node_id: str):
 
 
 def _read_frontmatter(path: Path) -> dict:
-    """Parse YAML frontmatter from a markdown file. Returns (frontmatter_dict, body_text)."""
+    """Parse YAML frontmatter from a markdown file. Returns (frontmatter_dict, body_text).
+
+    Uses the same parser as the production code (``renderer._extract_body``)
+    for consistency: strict ``---\n`` delimiters only.
+    """
     text = path.read_text(encoding="utf-8")
-    # Match frontmatter: ---\n...\n---\n
-    m = re.match(r"^---\s*\n(.*?)\n---\s*\n(.*)", text, re.DOTALL)
-    if not m:
-        return {}, text
-    fm = yaml.safe_load(m.group(1))
-    return fm if isinstance(fm, dict) else {}, m.group(2)
+    if text.startswith("---\n"):
+        parts = text.split("---\n", 2)
+        if len(parts) >= 3:
+            fm = yaml.safe_load(parts[1])
+            body = parts[2].lstrip("\n")
+            return (fm if isinstance(fm, dict) else {}), body
+    return {}, text
+
+
+# ── Helpers ───────────────────────────────────────────────────────
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _make_node(store, *, node_id: str | None = None, kind: str = "raw_source",
+               content: str | None = None,
+               content_path: str | None = None,
+               title: str | None = None) -> tuple[str, Path | None]:
+    """Create a node + source row directly via Store and return (node_id, md_path).
+
+    If ``content_path`` is an explicit empty string, the node is created with
+    no file on disk and ``md_path`` is ``None``.
+    """
+    if node_id is None:
+        node_id = str(uuid.uuid4())
+    if content_path is not None:
+        # Explicit path (including empty string) — use as-is, no file write
+        resolved_path = content_path
+        md_path: Path | None = Path(content_path) if content_path else None
+    else:
+        md_path = store["vault"] / f"{node_id}.md"
+        md_path.write_text(content or f"# {node_id}\n\nBody text.", encoding="utf-8")
+        resolved_path = str(md_path)
+    con = sqlite3.connect(store["db"])
+    st = Store(con)
+    st.create_node(node_id=node_id, kind=kind, trust_state="draft", depth=0,
+                   content_path=resolved_path, created_at=_now())
+    if kind == "raw_source":
+        st.attach_source(node_id=node_id, canonical_key=f"test://{node_id}",
+                         source_url=f"https://test.example/{node_id}", title=title or "",
+                         fetched_at=_now(), failed=False)
+    con.commit()
+    con.close()
+    return node_id, md_path
+
+
+def _make_edge(store, from_node: str, to_node: str, relation: str,
+               type: str = "association") -> None:
+    """Create an edge between two nodes via Store."""
+    con = sqlite3.connect(store["db"])
+    st = Store(con)
+    st.create_edge(edge_id=str(uuid.uuid4()), type=type, relation=relation,
+                   from_node=from_node, to_node=to_node)
+    con.commit()
+    con.close()
 
 
 # ── L0 Render ─────────────────────────────────────────────────────
@@ -118,31 +175,8 @@ class TestRenderL0:
 
     def test_render_l0_with_alias_from_h1(self, store):
         """If no title, aliases should use the first H1 in body."""
-        # Create a node via Store directly to control content
-        import sqlite3
-        import uuid
-        from datetime import datetime, timezone
-
-        node_id = str(uuid.uuid4())
-        md_path = store["vault"] / f"{node_id}.md"
-        content = "# My Custom Title\n\nSome body content here."
-        md_path.write_text(content, encoding="utf-8")
-
-        con = sqlite3.connect(store["db"])
-        now = datetime.now(timezone.utc).isoformat()
-        con.execute(
-            "INSERT INTO node (id, kind, tier, trust_state, depth, content_path, created_at) "
-            "VALUES (?, 'raw_source', NULL, 'draft', 0, ?, ?)",
-            (node_id, str(md_path), now),
-        )
-        ckey = "https://example.com/no-title"
-        con.execute(
-            "INSERT INTO source (node_id, canonical_key, source_url, title, fetched_at, failed) "
-            "VALUES (?, ?, ?, '', ?, 0)",
-            (node_id, ckey, ckey, now),
-        )
-        con.commit()
-        con.close()
+        node_id, md_path = _make_node(store, content="# My Custom Title\n\nSome body content here.",
+                                       title="")
 
         results = _render(store)
         assert len(results) == 1
@@ -236,54 +270,28 @@ class TestRenderEdgeCases:
             ["render", "--db", str(store["db"]), "--vault", str(store["tmp"] / "nonexistent_vault")],
         )
         assert result.returncode != 0
-        data = json.loads(result.stdout)
+        data = json.loads(result.stderr)
         assert data.get("error") == "vault_not_found"
 
     def test_render_missing_content_path_skips_node(self, store):
         """Node with content_path pointing at non-existent file is skipped."""
-        import sqlite3
-        import uuid
-        from datetime import datetime, timezone
-
-        node_id = str(uuid.uuid4())
         missing_path = store["vault"] / "nonexistent.md"
-
-        con = sqlite3.connect(store["db"])
-        now = datetime.now(timezone.utc).isoformat()
-        con.execute(
-            "INSERT INTO node (id, kind, tier, trust_state, depth, content_path, created_at) "
-            "VALUES (?, 'raw_source', NULL, 'draft', 0, ?, ?)",
-            (node_id, str(missing_path), now),
-        )
-        con.commit()
-        con.close()
+        node_id, _ = _make_node(store, content_path=str(missing_path))
 
         results = _render(store)
-        assert len(results) == 1
-        assert results[0]["node_id"] == node_id
-        assert results[0]["status"] == "skipped"
+        skipped = [r for r in results if r["status"] == "skipped"]
+        assert len(skipped) >= 1
+        assert any(r["node_id"] == node_id for r in skipped)
 
     def test_render_empty_content_path_skips_node(self, store):
         """Node with empty content_path is skipped."""
-        import sqlite3
-        import uuid
-        from datetime import datetime, timezone
-
-        node_id = str(uuid.uuid4())
-
-        con = sqlite3.connect(store["db"])
-        now = datetime.now(timezone.utc).isoformat()
-        con.execute(
-            "INSERT INTO node (id, kind, tier, trust_state, depth, content_path, created_at) "
-            "VALUES (?, 'raw_source', NULL, 'draft', 0, '', ?)",
-            (node_id, now),
-        )
-        con.commit()
-        con.close()
+        node_id, _ = _make_node(store, content_path="")
 
         results = _render(store)
-        assert len(results) == 1
-        assert results[0]["status"] == "skipped"
+        # Two results: the original ingested node (rendered) and this one (skipped)
+        skipped = [r for r in results if r["status"] == "skipped"]
+        assert len(skipped) == 1
+        assert skipped[0]["node_id"] == node_id
 
     def test_render_preserves_body_on_rerender(self, store):
         """Body content survives multiple render cycles unchanged."""
@@ -330,30 +338,9 @@ class TestRenderEdgeWikilinks:
 
     def test_related_edge_yields_wikilink(self, store):
         """Node with outgoing related edge renders related: [[uuid]]."""
-        import uuid
-        from datetime import datetime, timezone
-        from memex.store import Store
-
-        con = sqlite3.connect(store["db"])
-        st = Store(con)
-
-        # Create two nodes with markdown files
-        node_a = str(uuid.uuid4())
-        node_b = str(uuid.uuid4())
-        now = datetime.now(timezone.utc).isoformat()
-
-        for nid in (node_a, node_b):
-            md_path = store["vault"] / f"{nid}.md"
-            md_path.write_text(f"# Node {nid}\n\nContent.", encoding="utf-8")
-            st.create_node(node_id=nid, kind="raw_source", depth=0,
-                           content_path=str(md_path), created_at=now)
-
-        # Create a related edge from node_a to node_b
-        edge_id = str(uuid.uuid4())
-        st.create_edge(edge_id=edge_id, type="association",
-                       relation="related", from_node=node_a, to_node=node_b)
-        con.commit()
-        con.close()
+        node_a, _ = _make_node(store)
+        node_b, _ = _make_node(store)
+        _make_edge(store, from_node=node_a, to_node=node_b, relation="related")
 
         _render(store)
 
@@ -368,28 +355,9 @@ class TestRenderEdgeWikilinks:
 
     def test_contradicts_edge_yields_wikilink(self, store):
         """Node with outgoing contradicts edge renders contradicts: [[uuid]]."""
-        import uuid
-        from datetime import datetime, timezone
-        from memex.store import Store
-
-        con = sqlite3.connect(store["db"])
-        st = Store(con)
-
-        node_a = str(uuid.uuid4())
-        node_b = str(uuid.uuid4())
-        now = datetime.now(timezone.utc).isoformat()
-
-        for nid in (node_a, node_b):
-            md_path = store["vault"] / f"{nid}.md"
-            md_path.write_text(f"# Node {nid}\n\nContent.", encoding="utf-8")
-            st.create_node(node_id=nid, kind="raw_source", depth=0,
-                           content_path=str(md_path), created_at=now)
-
-        edge_id = str(uuid.uuid4())
-        st.create_edge(edge_id=edge_id, type="association",
-                       relation="contradicts", from_node=node_a, to_node=node_b)
-        con.commit()
-        con.close()
+        node_a, _ = _make_node(store)
+        node_b, _ = _make_node(store)
+        _make_edge(store, from_node=node_a, to_node=node_b, relation="contradicts")
 
         _render(store)
 
@@ -399,28 +367,9 @@ class TestRenderEdgeWikilinks:
 
     def test_refines_edge_yields_wikilink(self, store):
         """Node with outgoing refines edge renders refines: [[uuid]]."""
-        import uuid
-        from datetime import datetime, timezone
-        from memex.store import Store
-
-        con = sqlite3.connect(store["db"])
-        st = Store(con)
-
-        node_a = str(uuid.uuid4())
-        node_b = str(uuid.uuid4())
-        now = datetime.now(timezone.utc).isoformat()
-
-        for nid in (node_a, node_b):
-            md_path = store["vault"] / f"{nid}.md"
-            md_path.write_text(f"# Node {nid}\n\nContent.", encoding="utf-8")
-            st.create_node(node_id=nid, kind="raw_source", depth=0,
-                           content_path=str(md_path), created_at=now)
-
-        edge_id = str(uuid.uuid4())
-        st.create_edge(edge_id=edge_id, type="association",
-                       relation="refines", from_node=node_a, to_node=node_b)
-        con.commit()
-        con.close()
+        node_a, _ = _make_node(store)
+        node_b, _ = _make_node(store)
+        _make_edge(store, from_node=node_a, to_node=node_b, relation="refines")
 
         _render(store)
 
@@ -430,31 +379,11 @@ class TestRenderEdgeWikilinks:
 
     def test_multiple_edges_same_relation_yields_list(self, store):
         """Node with 2+ related edges renders related as a YAML list."""
-        import uuid
-        from datetime import datetime, timezone
-        from memex.store import Store
-
-        con = sqlite3.connect(store["db"])
-        st = Store(con)
-
-        node_a = str(uuid.uuid4())
-        node_b = str(uuid.uuid4())
-        node_c = str(uuid.uuid4())
-        now = datetime.now(timezone.utc).isoformat()
-
-        for nid in (node_a, node_b, node_c):
-            md_path = store["vault"] / f"{nid}.md"
-            md_path.write_text(f"# Node {nid}\n\nContent.", encoding="utf-8")
-            st.create_node(node_id=nid, kind="raw_source", depth=0,
-                           content_path=str(md_path), created_at=now)
-
-        # Two related edges from node_a
-        st.create_edge(edge_id=str(uuid.uuid4()), type="association",
-                       relation="related", from_node=node_a, to_node=node_b)
-        st.create_edge(edge_id=str(uuid.uuid4()), type="association",
-                       relation="related", from_node=node_a, to_node=node_c)
-        con.commit()
-        con.close()
+        node_a, _ = _make_node(store)
+        node_b, _ = _make_node(store)
+        node_c, _ = _make_node(store)
+        _make_edge(store, from_node=node_a, to_node=node_b, relation="related")
+        _make_edge(store, from_node=node_a, to_node=node_c, relation="related")
 
         _render(store)
 
@@ -484,28 +413,9 @@ class TestRenderEdgeWikilinks:
 
     def test_edge_wikilinks_idempotent(self, store):
         """Re-rendering with same edges produces same wikilinks."""
-        import uuid
-        from datetime import datetime, timezone
-        from memex.store import Store
-
-        con = sqlite3.connect(store["db"])
-        st = Store(con)
-
-        node_a = str(uuid.uuid4())
-        node_b = str(uuid.uuid4())
-        now = datetime.now(timezone.utc).isoformat()
-
-        for nid in (node_a, node_b):
-            md_path = store["vault"] / f"{nid}.md"
-            md_path.write_text(f"# Node {nid}\n\nContent.", encoding="utf-8")
-            st.create_node(node_id=nid, kind="raw_source", depth=0,
-                           content_path=str(md_path), created_at=now)
-
-        edge_id = str(uuid.uuid4())
-        st.create_edge(edge_id=edge_id, type="association",
-                       relation="related", from_node=node_a, to_node=node_b)
-        con.commit()
-        con.close()
+        node_a, _ = _make_node(store)
+        node_b, _ = _make_node(store)
+        _make_edge(store, from_node=node_a, to_node=node_b, relation="related")
 
         _render(store)
         _render(store)

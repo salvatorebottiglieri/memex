@@ -130,7 +130,7 @@ class TestDerive:
     def test_derive_unknown_node_returns_error(self, store):
         result = _derive(store, "does-not-exist")
         assert result.returncode != 0
-        data = json.loads(result.stdout)
+        data = json.loads(result.stderr)
         assert data["error"] == "not_found"
 
 

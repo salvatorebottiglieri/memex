@@ -413,7 +413,7 @@ def smoke_errors(tmp: Path) -> None:
     # show on unknown id
     p = _run(["show", "--db", str(db), "--vault", str(vault), "does-not-exist"])
     _check("show unknown id exits non-zero", p.returncode != 0)
-    out = json.loads(p.stdout)
+    out = json.loads(p.stderr)
     _check("show unknown id error=not_found", out.get("error") == "not_found")
 
     # derive on unknown id
