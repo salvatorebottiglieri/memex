@@ -19,6 +19,22 @@ class CapturedMessage:
     note: str | None = None
 
 
+class TelegramSourceError(Exception):
+    """Base exception for Telegram source errors."""
+
+
+class CredentialsError(TelegramSourceError):
+    """Missing or invalid credentials."""
+
+
+class AuthFailedError(TelegramSourceError):
+    """Telegram authentication failed (expired session, wrong credentials)."""
+
+
+class NetworkError(TelegramSourceError):
+    """Network or Telegram API error."""
+
+
 class TelegramSource(Protocol):
     """Protocol for Telegram message sources.
 
@@ -29,27 +45,118 @@ class TelegramSource(Protocol):
         ...
 
 
+def _extract_urls(text: str) -> list[str]:
+    """Extract all URLs from a text string."""
+    import re
+    return re.findall(r"https?://\S+", text)
+
+
+def _message_note(text: str) -> str:
+    """Strip URLs from a message text to produce a note."""
+    import re
+    return re.sub(r"https?://\S+\s*", "", text).strip()
+
+
 def load_telegram_source(module_path: str | None = None) -> TelegramSource:
     """Load a Telegram source from a 'module:Class' string.
 
-    Args:
-        module_path: A string like 'tests.fake_telegram_source:FakeTelegramSource'.
-                     Must be provided — no default source in slice 2.
+    If no ``module_path`` is provided, attempts to create a
+    ``RealTelegramSource`` from ``MEMEX_TELEGRAM_API_ID`` and
+    ``MEMEX_TELEGRAM_API_HASH`` env vars. Falls back to
+    ``ImportError`` with instructions.
 
     Returns:
         An instance of the requested TelegramSource class.
 
     Raises:
-        ImportError: If module_path is None or the module/class cannot be loaded.
+        ImportError: If no source can be loaded (no module_path and
+                     missing credentials, or bad module/class path).
     """
-    if not module_path:
-        raise ImportError(
-            "MEMEX_TELEGRAM_SOURCE is not set. "
-            "Set it to e.g. 'tests.fake_telegram_source:FakeTelegramSource' "
-            "for testing, or install a real Telegram source for production use."
+    if module_path:
+        module_name, _, class_name = module_path.partition(":")
+        import importlib
+        mod = importlib.import_module(module_name)
+        cls = getattr(mod, class_name)
+        return cls()
+
+    # No override — try real Telegram source
+    import os as _os
+    api_id = _os.environ.get("MEMEX_TELEGRAM_API_ID")
+    api_hash = _os.environ.get("MEMEX_TELEGRAM_API_HASH")
+    if not api_id or not api_hash:
+        raise CredentialsError(
+            "Set MEMEX_TELEGRAM_API_ID and MEMEX_TELEGRAM_API_HASH environment "
+            "variables, or set MEMEX_TELEGRAM_SOURCE for testing."
         )
-    module_name, _, class_name = module_path.partition(":")
-    import importlib
-    mod = importlib.import_module(module_name)
-    cls = getattr(mod, class_name)
-    return cls()
+    session_path = _os.environ.get("MEMEX_TELEGRAM_SESSION")
+    return RealTelegramSource(api_id=int(api_id), api_hash=api_hash,
+                               session_path=session_path)
+
+
+class RealTelegramSource:
+    """Real MTProto-backed Telegram source using Telethon.
+
+    Connects to Telegram, reads Saved Messages, and returns new messages
+    with URLs as ``CapturedMessage`` items.
+
+    Requires ``MEMEX_TELEGRAM_API_ID`` and ``MEMEX_TELEGRAM_API_HASH``
+    environment variables, or pass them directly.
+    """
+
+    def __init__(self, api_id: int, api_hash: str, session_path: str | None = None):
+        self.api_id = api_id
+        self.api_hash = api_hash
+        self.session_path = session_path or "~/.memex/telegram.session"
+
+    def capture(self) -> list[CapturedMessage]:
+        """Fetch messages from Telegram Saved Messages.
+
+        Returns all recent messages containing URLs. Does NOT filter by
+        cursor — that is the CLI's responsibility using the cursor table.
+
+        Returns:
+            List of ``CapturedMessage`` for each URL found.
+        """
+        import asyncio
+        import os
+        from pathlib import Path
+
+        from telethon import TelegramClient
+        from telethon.errors import AuthError, RPCError
+
+        session = os.path.expanduser(self.session_path)
+        Path(session).parent.mkdir(parents=True, exist_ok=True)
+
+        async def _fetch():
+            client = TelegramClient(session, self.api_id, self.api_hash)
+            try:
+                await client.start()
+                msgs = await client.get_messages("me", limit=100)
+            except AuthError as e:
+                raise AuthFailedError(f"Telegram authentication failed: {e}") from e
+            except RPCError as e:
+                raise NetworkError(f"Telegram API error: {e}") from e
+            except OSError as e:
+                raise NetworkError(f"Telegram network error: {e}") from e
+            finally:
+                await client.disconnect()
+
+            result = []
+            for msg in msgs:
+                text = msg.text
+                if not text:
+                    continue
+                urls = _extract_urls(text)
+                if not urls:
+                    continue
+                note = _message_note(text)
+                ts = msg.date.isoformat() if msg.date else ""
+                for url in urls:
+                    result.append(CapturedMessage(
+                        url=url,
+                        timestamp=ts,
+                        note=note or None,
+                    ))
+            return result
+
+        return asyncio.get_event_loop().run_until_complete(_fetch())

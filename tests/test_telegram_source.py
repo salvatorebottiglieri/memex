@@ -1,4 +1,4 @@
-"""Tests for the TelegramSource protocol and the memex capture command.
+"""Tests for the TelegramSource protocol, capture command, and URL extraction.
 
 Tests use a fake Telegram source injected via MEMEX_TELEGRAM_SOURCE env var.
 No real Telegram credentials needed.
@@ -6,8 +6,12 @@ No real Telegram credentials needed.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 
+import pytest
+
+from memex.telegram_source import _extract_urls, _message_note, load_telegram_source
 from tests.conftest import _run_memex
 
 FAKE_TELEGRAM_SOURCE = "tests.fake_telegram_source:FakeTelegramSource"
@@ -32,12 +36,62 @@ class TestTelegramSourceUnit:
         messages = source.capture()
         assert len(messages) > 0
 
-    def test_load_telegram_source_raises_without_module(self):
-        """load_telegram_source without module path raises ImportError."""
-        from memex.telegram_source import load_telegram_source
+    def test_load_telegram_source_raises_without_source_or_creds(self):
+        """load_telegram_source without module path or API creds raises CredentialsError."""
+        from memex.telegram_source import load_telegram_source, CredentialsError
         import pytest
-        with pytest.raises(ImportError):
-            load_telegram_source(None)
+        old_api_id = os.environ.pop("MEMEX_TELEGRAM_API_ID", None)
+        old_api_hash = os.environ.pop("MEMEX_TELEGRAM_API_HASH", None)
+        try:
+            with pytest.raises(CredentialsError):
+                load_telegram_source(None)
+        finally:
+            if old_api_id:
+                os.environ["MEMEX_TELEGRAM_API_ID"] = old_api_id
+            if old_api_hash:
+                os.environ["MEMEX_TELEGRAM_API_HASH"] = old_api_hash
+
+    def test_extract_urls_finds_urls(self):
+        """_extract_urls finds all URLs in text."""
+        text = "Check this out https://example.com/article and https://x.com/foo"
+        urls = _extract_urls(text)
+        assert len(urls) == 2
+        assert urls[0] == "https://example.com/article"
+
+    def test_extract_urls_returns_empty_for_no_urls(self):
+        """_extract_urls returns empty list for text without URLs."""
+        assert _extract_urls("Just some text without links") == []
+
+    def test_message_note_strips_url(self):
+        """_message_note strips URLs from text."""
+        note = _message_note("Check this https://example.com/article interesting read")
+        assert "interesting read" in note
+        assert "example.com" not in note
+
+    def test_message_note_returns_empty_for_only_url(self):
+        """_message_note returns empty string when text is only a URL."""
+        assert _message_note("https://example.com/article") == ""
+
+    def test_load_telegram_source_returns_real_with_creds(self):
+        """load_telegram_source without module path but with API creds returns RealTelegramSource."""
+        from memex.telegram_source import RealTelegramSource, load_telegram_source
+        old_api_id = os.environ.pop("MEMEX_TELEGRAM_API_ID", None)
+        old_api_hash = os.environ.pop("MEMEX_TELEGRAM_API_HASH", None)
+        try:
+            os.environ["MEMEX_TELEGRAM_API_ID"] = "12345"
+            os.environ["MEMEX_TELEGRAM_API_HASH"] = "fakehash"
+            source = load_telegram_source(None)
+            assert isinstance(source, RealTelegramSource)
+            assert source.api_id == 12345
+        finally:
+            if old_api_id:
+                os.environ["MEMEX_TELEGRAM_API_ID"] = old_api_id
+            else:
+                del os.environ["MEMEX_TELEGRAM_API_ID"]
+            if old_api_hash:
+                os.environ["MEMEX_TELEGRAM_API_HASH"] = old_api_hash
+            else:
+                del os.environ["MEMEX_TELEGRAM_API_HASH"]
 
     def test_fake_telegram_source_returns_messages(self):
         """FakeTelegramSource returns the configured messages."""
@@ -138,7 +192,7 @@ class TestCaptureErrors:
         )
         assert result.returncode != 0
         data = json.loads(result.stderr)
-        assert data.get("error") == "source_not_found"
+        assert data.get("error") == "missing_credentials"
 
     def test_capture_missing_db_errors(self, store):
         """capture with missing DB exits non-zero."""
@@ -147,3 +201,17 @@ class TestCaptureErrors:
             env={"MEMEX_TELEGRAM_SOURCE": FAKE_TELEGRAM_SOURCE},
         )
         assert result.returncode != 0
+
+
+@pytest.mark.skipif(
+    not os.environ.get("MEMEX_TELEGRAM_TEST_SKIP_REAL"),
+    reason="Real Telegram integration test — requires MEMEX_TELEGRAM_API_ID and API_HASH",
+)
+def test_real_telegram_source_integration():
+    """RealTelegramSource can connect and fetch messages (manual, gated)."""
+    from memex.telegram_source import RealTelegramSource
+    api_id = int(os.environ["MEMEX_TELEGRAM_API_ID"])
+    api_hash = os.environ["MEMEX_TELEGRAM_API_HASH"]
+    source = RealTelegramSource(api_id=api_id, api_hash=api_hash)
+    messages = source.capture()
+    assert isinstance(messages, list)

@@ -478,17 +478,28 @@ def render(db_path: Path, vault_path: Path) -> None:
 def capture(db_path: Path, vault_path: Path) -> None:
     """Poll Telegram Saved Messages and persist new captures to the inbox.
 
-    Reads new messages from the configured Telegram source (via MEMEX_TELEGRAM_SOURCE),
+    Reads new messages from the configured Telegram source
+    (MEMEX_TELEGRAM_API_ID + MEMEX_TELEGRAM_API_HASH, or MEMEX_TELEGRAM_SOURCE),
     writes each to the inbox table, and advances the cursor.
     Idempotent — re-running only processes messages after the last cursor position.
+
+    First run: Telethon will prompt for phone number + 2FA code interactively.
+    Subsequent runs reuse the session file (default: ~/.memex/telegram.session,
+    override via MEMEX_TELEGRAM_SESSION).
     """
-    from memex.telegram_source import load_telegram_source, CapturedMessage
+    from memex.telegram_source import (
+        load_telegram_source, CapturedMessage,
+        CredentialsError, AuthFailedError, NetworkError,
+    )
     from memex.store import Store
 
     _require_db(db_path)
     source_module = os.environ.get("MEMEX_TELEGRAM_SOURCE")
     try:
         source = load_telegram_source(source_module)
+    except CredentialsError as e:
+        click.echo(json.dumps({"error": "missing_credentials", "detail": str(e)}), err=True)
+        raise SystemExit(1)
     except ImportError as e:
         click.echo(json.dumps({"error": "source_not_found", "detail": str(e)}), err=True)
         raise SystemExit(1)
@@ -499,7 +510,14 @@ def capture(db_path: Path, vault_path: Path) -> None:
         cursor_str = store.get_cursor(source_name)
         cursor_index = int(cursor_str) if cursor_str is not None else 0
 
-        messages = source.capture()
+        try:
+            messages = source.capture()
+        except AuthFailedError as e:
+            click.echo(json.dumps({"error": "auth_failed", "detail": str(e)}), err=True)
+            raise SystemExit(1)
+        except NetworkError as e:
+            click.echo(json.dumps({"error": "network_error", "detail": str(e)}), err=True)
+            raise SystemExit(1)
         new_messages = messages[cursor_index:]
 
         now = datetime.now(timezone.utc).isoformat()
