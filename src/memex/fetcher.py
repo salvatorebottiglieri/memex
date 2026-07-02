@@ -68,14 +68,8 @@ def _html_to_markdown(html: str, title: str | None = None) -> str:
 
 
 def load_fetcher(module_path: str | None = None):
-    """Load a fetcher from a 'module:Class' string, or return the default HttpFetcher.
-
-    Used by the CLI to allow test injection via MEMEX_FETCHER_MODULE env var.
-    """
+    """Load a fetcher from a 'module:Class' string, or return the default HttpFetcher."""
     if not module_path:
         return HttpFetcher()
-    module_name, _, class_name = module_path.partition(":")
-    import importlib
-    mod = importlib.import_module(module_name)
-    cls = getattr(mod, class_name)
-    return cls()
+    from memex.plugin import load_class
+    return load_class(module_path)

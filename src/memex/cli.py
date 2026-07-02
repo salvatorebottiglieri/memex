@@ -12,6 +12,9 @@ from pathlib import Path
 
 import click
 
+from memex.canonical_key import canonical_key
+from memex.ingester import ingest_single_url
+
 
 def _db_options(fn):
     fn = click.option(
@@ -31,11 +34,16 @@ def _db_options(fn):
     return fn
 
 
+def _fail(error: str, **kwargs: Any) -> None:
+    """Emit a JSON error to stderr and exit with code 1."""
+    click.echo(json.dumps({"error": error, **kwargs}), err=True)
+    raise SystemExit(1)
+
+
 def _require_db(db_path: Path) -> None:
     """Exit with clean JSON error if the database file doesn't exist."""
     if not db_path.exists():
-        click.echo(json.dumps({"error": "db_not_found", "db_path": str(db_path)}), err=True)
-        raise SystemExit(1)
+        _fail("db_not_found", db_path=str(db_path))
 
 
 @click.group()
@@ -79,95 +87,7 @@ def status(db_path: Path, vault_path: Path) -> None:
     click.echo(json.dumps(result))
 
 
-def _ingest_single_url(store, vault_path: Path, url: str, fetcher, *, source_name: str | None = None,
-                       item_timestamp: str | None = None, item_note: str | None = None) -> dict:
-    """Ingest one URL through the Store. Optionally records an inbox row first.
 
-    Returns a dict suitable for JSON output (status, id, canonical_key, ...).
-    """
-    from memex.canonical_key import canonical_key
-    from memex.fetcher import FetchError
-
-    ckey = canonical_key(url)
-    now = datetime.now(timezone.utc).isoformat
-
-    # Record the inbox capture if this came from an inbox source
-    if source_name is not None:
-        store.add_inbox_item(
-            source_name=source_name,
-            url=url,
-            timestamp=item_timestamp or now(),
-            note=item_note,
-            captured_at=now(),
-        )
-
-    # --- Ledger check ---
-    existing = store.lookup_by_canonical_key(ckey)
-    if existing is not None:
-        return {
-            "id": existing["node_id"],
-            "status": "already_exists",
-            "canonical_key": ckey,
-            "failed": existing["failed"],
-        }
-
-    # --- Fetch content ---
-    node_id = str(uuid.uuid4())
-    failed = False
-    fetch_error_msg = None
-    content: str | None = None
-    title: str | None = None
-
-    try:
-        result = fetcher.fetch(url)
-        content = result.content
-        title = result.title
-    except FetchError as exc:
-        failed = True
-        fetch_error_msg = str(exc)
-
-    # --- Write L0 markdown file (only on success) ---
-    content_path = ""
-    if not failed and content is not None:
-        vault_path.mkdir(parents=True, exist_ok=True)
-        md_path = vault_path / f"{node_id}.md"
-        # L0 files are immutable — write once, never overwrite
-        if not md_path.exists():
-            md_path.write_text(content, encoding="utf-8")
-        content_path = str(md_path)
-
-    # --- Insert node + source rows ---
-    store.create_node(
-        node_id=node_id,
-        kind="raw_source",
-        trust_state="draft",
-        depth=0,
-        content_path=content_path,
-        created_at=now(),
-    )
-    store.attach_source(
-        node_id=node_id,
-        canonical_key=ckey,
-        source_url=url,
-        title=title,
-        fetched_at=now(),
-        failed=failed,
-    )
-
-    if failed:
-        return {
-            "id": node_id,
-            "status": "fetch_failed",
-            "canonical_key": ckey,
-            "error": fetch_error_msg,
-        }
-    return {
-        "id": node_id,
-        "status": "ingested",
-        "canonical_key": ckey,
-        "title": title,
-        "content_path": content_path,
-    }
 
 
 @cli.command()
@@ -198,7 +118,6 @@ def ingest(db_path: Path, vault_path: Path, url: str | None, inbox_path: Path | 
     Idempotent — running twice with the same (canonical) URL yields one node.
     A fetch failure is recorded and does not crash the run.
     """
-    from memex.canonical_key import canonical_key
     from memex.fetcher import load_fetcher
     from memex.store import Store
     from memex.whatsapp_source import parse_whatsapp_export
@@ -219,7 +138,7 @@ def ingest(db_path: Path, vault_path: Path, url: str | None, inbox_path: Path | 
             for item in store.list_inbox():
                 ckey = canonical_key(item["url"])
                 if ckey not in ingested_keys:
-                    result = _ingest_single_url(store, vault_path, item["url"], fetcher)
+                    result = ingest_single_url(store, vault_path, item["url"], fetcher)
                     results.append(result)
                     # Track newly ingested keys to avoid re-processing
                     # the same canonical key within this batch
@@ -245,7 +164,7 @@ def ingest(db_path: Path, vault_path: Path, url: str | None, inbox_path: Path | 
             new_items = all_items[cursor_index:]
 
             results = [
-                _ingest_single_url(
+                ingest_single_url(
                     store, vault_path, item["url"], fetcher,
                     source_name=source_name,
                     item_timestamp=item["timestamp"],
@@ -259,7 +178,7 @@ def ingest(db_path: Path, vault_path: Path, url: str | None, inbox_path: Path | 
 
             click.echo(json.dumps(results))
         else:
-            click.echo(json.dumps(_ingest_single_url(store, vault_path, url, fetcher)))
+            click.echo(json.dumps(ingest_single_url(store, vault_path, url, fetcher)))
 
 
 @cli.command("list")
@@ -273,7 +192,6 @@ def ingest(db_path: Path, vault_path: Path, url: str | None, inbox_path: Path | 
 )
 def list_nodes(db_path: Path, vault_path: Path, show_pending: bool) -> None:
     """Return JSON array of all nodes, or --pending captured-but-not-ingested keys."""
-    from memex.canonical_key import canonical_key
     from memex.store import Store
 
     _require_db(db_path)
@@ -303,8 +221,7 @@ def show(db_path: Path, vault_path: Path, node_id: str) -> None:
         node = store.get_node(node_id)
 
     if node is None:
-        click.echo(json.dumps({"error": "not_found", "id": node_id}), err=True)
-        raise SystemExit(1)
+        _fail("not_found", id=node_id)
 
     # Load file content (stays in CLI — ADR-0008: markdown owns content)
     content = None
@@ -339,11 +256,9 @@ def derive(db_path: Path, vault_path: Path, node_id: str) -> None:
         # --- Load the L0 node ---
         l0 = store.get_node(node_id)
         if l0 is None:
-            click.echo(json.dumps({"error": "not_found", "id": node_id}), err=True)
-            raise SystemExit(1)
+            _fail("not_found", id=node_id)
         if not l0.get("content_path"):
-            click.echo(json.dumps({"error": "no_content", "id": node_id}), err=True)
-            raise SystemExit(1)
+            _fail("no_content", id=node_id)
 
         # --- Idempotency check ---
         existing = store.find_derived_from(node_id)
@@ -466,8 +381,7 @@ def render(db_path: Path, vault_path: Path) -> None:
 
     _require_db(db_path)
     if not vault_path.exists():
-        click.echo(json.dumps({"error": "vault_not_found", "vault_path": str(vault_path)}), err=True)
-        raise SystemExit(1)
+        _fail("vault_not_found", vault_path=str(vault_path))
 
     results = _render(db_path, vault_path)
     click.echo(json.dumps(results))
@@ -478,33 +392,46 @@ def render(db_path: Path, vault_path: Path) -> None:
 def capture(db_path: Path, vault_path: Path) -> None:
     """Poll Telegram Saved Messages and persist new captures to the inbox.
 
-    Reads new messages from the configured Telegram source (via MEMEX_TELEGRAM_SOURCE),
+    Reads new messages from the configured Telegram source
+    (MEMEX_TELEGRAM_API_ID + MEMEX_TELEGRAM_API_HASH, or MEMEX_TELEGRAM_SOURCE),
     writes each to the inbox table, and advances the cursor.
     Idempotent — re-running only processes messages after the last cursor position.
+
+    First run: Telethon will prompt for phone number + 2FA code interactively.
+    Subsequent runs reuse the session file (default: ~/.memex/telegram.session,
+    override via MEMEX_TELEGRAM_SESSION).
     """
-    from memex.telegram_source import load_telegram_source, CapturedMessage
+    from memex.telegram_source import (
+        load_telegram_source, CapturedMessage,
+        CredentialsError, AuthFailedError, NetworkError,
+    )
     from memex.store import Store
 
     _require_db(db_path)
     source_module = os.environ.get("MEMEX_TELEGRAM_SOURCE")
     try:
         source = load_telegram_source(source_module)
+    except CredentialsError as e:
+        _fail("missing_credentials", detail=str(e))
     except ImportError as e:
-        click.echo(json.dumps({"error": "source_not_found", "detail": str(e)}), err=True)
-        raise SystemExit(1)
+        _fail("source_not_found", detail=str(e))
 
     source_name = "telegram:saved_messages"
 
     with Store.open(db_path) as store:
         cursor_str = store.get_cursor(source_name)
-        cursor_index = int(cursor_str) if cursor_str is not None else 0
+        cursor = int(cursor_str) if cursor_str is not None else None
 
-        messages = source.capture()
-        new_messages = messages[cursor_index:]
+        try:
+            messages = source.capture(cursor=cursor)
+        except AuthFailedError as e:
+            _fail("auth_failed", detail=str(e))
+        except NetworkError as e:
+            _fail("network_error", detail=str(e))
 
         now = datetime.now(timezone.utc).isoformat()
         results = []
-        for msg in new_messages:
+        for msg in messages:
             store.add_inbox_item(
                 source_name=source_name,
                 url=msg.url,
@@ -514,7 +441,9 @@ def capture(db_path: Path, vault_path: Path) -> None:
             )
             results.append({"url": msg.url, "timestamp": msg.timestamp, "note": msg.note})
 
-        store.set_cursor(source_name, str(len(messages)))
+        # Advance cursor to the highest Telegram message ID seen
+        if messages:
+            store.set_cursor(source_name, str(max(msg.id for msg in messages if msg.id)))
 
     click.echo(json.dumps(results))
 
