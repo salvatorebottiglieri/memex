@@ -50,7 +50,7 @@ def render(db_path: str | Path, vault_path: str | Path) -> list[dict[str, str]]:
     return results
 
 
-def _build_frontmatter(node: dict[str, Any], md_path: Path, store: Store | None = None) -> dict[str, Any]:
+def _build_frontmatter(node: dict[str, Any], md_path: Path, store: Store) -> dict[str, Any]:
     """Construct the YAML-serializable frontmatter dict for a node."""
     fm: dict[str, Any] = {}
 
@@ -81,32 +81,32 @@ def _build_frontmatter(node: dict[str, Any], md_path: Path, store: Store | None 
         fm["title"] = node.get("title") or ""
 
     # ── Derivation-specific fields ───────────────────────────────
-    if node.get("kind") == "summary" and trust_state:
+    is_derivation = node.get("kind") != "raw_source"
+    if is_derivation and trust_state:
         fm["trust_state"] = trust_state
-    if tier:
+    if is_derivation and tier:
         fm["tier"] = tier
     cf = node.get("check_failures")
     if cf is not None:
         fm["check_failures"] = cf
 
     # ── Edge wikilinks ────────────────────────────────────────────
-    if store is not None:
-        node_id = node["id"]
-        edges = [
-            e for e in store.list_edges(node_id=node_id)
-            if e["from_node"] == node_id
-        ]
-        rel_groups: dict[str, list[str]] = {}
-        for e in edges:
-            rel = e["relation"]
-            wikilink = f"[[{e['to_node']}]]"
-            rel_groups.setdefault(rel, []).append(wikilink)
+    node_id = node["id"]
+    edges = [
+        e for e in store.list_edges(node_id=node_id)
+        if e["from_node"] == node_id
+    ]
+    rel_groups: dict[str, list[str]] = {}
+    for e in edges:
+        rel = e["relation"]
+        wikilink = f"[[{e['to_node']}]]"
+        rel_groups.setdefault(rel, []).append(wikilink)
 
-        for rel, targets in rel_groups.items():
-            if len(targets) == 1:
-                fm[rel] = targets[0]
-            else:
-                fm[rel] = targets
+    for rel, targets in rel_groups.items():
+        if len(targets) == 1:
+            fm[rel] = targets[0]
+        else:
+            fm[rel] = targets
 
     return fm
 

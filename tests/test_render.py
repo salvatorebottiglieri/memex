@@ -230,6 +230,15 @@ class TestRenderEdgeCases:
         )
         assert result.returncode != 0
 
+    def test_render_missing_vault_returns_error(self, store):
+        """Missing vault path should exit non-zero with clean JSON error."""
+        result = _run_memex(
+            ["render", "--db", str(store["db"]), "--vault", str(store["tmp"] / "nonexistent_vault")],
+        )
+        assert result.returncode != 0
+        data = json.loads(result.stdout)
+        assert data.get("error") == "vault_not_found"
+
     def test_render_missing_content_path_skips_node(self, store):
         """Node with content_path pointing at non-existent file is skipped."""
         import sqlite3

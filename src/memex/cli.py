@@ -421,6 +421,9 @@ def render(db_path: Path, vault_path: Path) -> None:
     if not db_path.exists():
         click.echo(json.dumps({"error": "db_not_found", "db_path": str(db_path)}), err=False)
         raise SystemExit(1)
+    if not vault_path.exists():
+        click.echo(json.dumps({"error": "vault_not_found", "vault_path": str(vault_path)}), err=False)
+        raise SystemExit(1)
 
     results = _render(db_path, vault_path)
     click.echo(json.dumps(results))
