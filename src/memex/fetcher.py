@@ -16,7 +16,17 @@ class FetchResult:
     title: str | None = None
 
 
-class HttpFetcher:
+class ContentFetcher:
+    """Protocol / base class for content fetchers.
+
+    Implementations must provide a fetch(url) -> FetchResult method.
+    """
+
+    def fetch(self, url: str) -> FetchResult:
+        raise NotImplementedError
+
+
+class HttpFetcher(ContentFetcher):
     """Real HTTP fetcher — extracts article text from HTML."""
 
     def fetch(self, url: str) -> FetchResult:

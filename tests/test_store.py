@@ -19,7 +19,8 @@ class TestSchema:
         tables = store._con.execute(
             "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
         ).fetchall()
-        assert {r[0] for r in tables} == {"node", "source", "edge", "cursor"}
+        names = {r[0] for r in tables if not r[0].startswith("sqlite_")}
+        assert names == {"node", "source", "edge", "cursor", "inbox"}
 
     def test_init_schema_is_idempotent(self):
         store = _store()
@@ -27,7 +28,8 @@ class TestSchema:
         tables = store._con.execute(
             "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
         ).fetchall()
-        assert {r[0] for r in tables} == {"node", "source", "edge", "cursor"}
+        names = {r[0] for r in tables if not r[0].startswith("sqlite_")}
+        assert names == {"node", "source", "edge", "cursor", "inbox"}
 
 
 class TestLedger:

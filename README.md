@@ -6,7 +6,7 @@ A personal wiki / second brain.
 
 Inspired by Andrej Karpathy's personal-wiki approach and by `iusztinpaul/ai-research-os-workshop`. Obsidian is a view-only window onto the knowledge, not the engine.
 
-> Status: **ingestion layer implemented.** Core CLI operational.
+> Status: **ingestion + derivation layers implemented.** Core CLI operational.
 
 ## CLI
 
@@ -17,8 +17,12 @@ memex exposes a JSON-only CLI (one command per operation, all output is structur
 | `memex init --db <path> --vault <path>` | Create SQLite DB and vault directory (idempotent) |
 | `memex status --db <path> --vault <path>` | Check if paths exist |
 | `memex ingest --db <path> --vault <path> <url>` | Fetch URL, store L0 markdown, insert node+source rows (idempotent) |
+| `memex ingest --db <path> --vault <path> --inbox <file>` | Ingest a WhatsApp `.txt` export, advancing a per-file cursor |
 | `memex list --db <path> --vault <path>` | List all nodes |
-| `memex show --db <path> --vault <path> <node-id>` | Show node details including L0 content |
+| `memex list --db <path> --vault <path> --pending` | List canonical keys captured in the inbox but not yet ingested |
+| `memex show --db <path> --vault <path> <node-id>` | Show node details including L0 content, trust state, check failures |
+| `memex derive --db <path> --vault <path> <node-id>` | Generate a notes-tier derivation from an L0 (LLM via `MEMEX_LLM_MODULE`) |
+| `memex search --db <path> --vault <path> <query>` | Keyword search over derivation content (read-only) |
 
 ## Design
 

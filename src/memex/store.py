@@ -7,6 +7,7 @@ ADR-0008 boundary: SQLite owns structure (Store), markdown owns content (CLI / V
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -53,6 +54,15 @@ CREATE TABLE IF NOT EXISTS cursor (
     source_name TEXT PRIMARY KEY,
     value       TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS inbox (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_name TEXT NOT NULL,
+    url         TEXT NOT NULL,
+    timestamp   TEXT NOT NULL,
+    note        TEXT,
+    captured_at TEXT NOT NULL
+);
 """
 
 
@@ -92,6 +102,10 @@ class Store:
         self._con.executescript(_SCHEMA_SQL)
         try:
             self._con.execute("ALTER TABLE source ADD COLUMN failed INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+        try:
+            self._con.execute("ALTER TABLE node ADD COLUMN check_failures TEXT")
         except sqlite3.OperationalError:
             pass  # column already exists
 
@@ -185,6 +199,7 @@ class Store:
             """
             SELECT
                 n.id, n.kind, n.tier, n.trust_state, n.depth, n.content_path, n.created_at,
+                n.check_failures,
                 s.canonical_key, s.source_url, s.title, s.fetched_at, s.failed
             FROM node n
             LEFT JOIN source s ON s.node_id = n.id
@@ -197,6 +212,13 @@ class Store:
         d = dict(row)
         if d.get("failed") is not None:
             d["failed"] = bool(d["failed"])
+        # Decode check_failures: present (even if empty list) for derivation nodes;
+        # None for L0 nodes that have never been checked.
+        cf_json = d.pop("check_failures", None)
+        if cf_json is not None:
+            d["check_failures"] = json.loads(cf_json)
+        else:
+            d["check_failures"] = None
         return d
 
     # ── Connection ────────────────────────────────────────────────
@@ -204,19 +226,103 @@ class Store:
     def close(self) -> None:
         self._con.close()
 
-    # ── Edges (stubs — future) ─────────────────────────────────────
+    # ── Edges ──────────────────────────────────────────────────────
 
-    def create_edge(self, *, type: str, relation: str, from_node: str, to_node: str) -> str:
-        raise NotImplementedError
+    def create_edge(self, *, edge_id: str, type: str, relation: str,
+                    from_node: str, to_node: str) -> None:
+        """Insert a typed edge between two nodes."""
+        try:
+            self._con.execute(
+                """
+                INSERT INTO edge (id, type, relation, from_node, to_node)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (edge_id, type, relation, from_node, to_node),
+            )
+        except sqlite3.Error as e:
+            raise StoreError(str(e)) from e
 
     def list_edges(self, *, node_id: str | None = None, type: str | None = None,
                    relation: str | None = None) -> list[dict]:
-        raise NotImplementedError
+        """List edges, optionally filtered. node_id matches from_node or to_node."""
+        clauses, params = [], []
+        if node_id is not None:
+            clauses.append("(from_node = ? OR to_node = ?)")
+            params.extend([node_id, node_id])
+        if type is not None:
+            clauses.append("type = ?")
+            params.append(type)
+        if relation is not None:
+            clauses.append("relation = ?")
+            params.append(relation)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        rows = self._con.execute(
+            f"SELECT id, type, relation, from_node, to_node FROM edge {where}", params
+        ).fetchall()
+        return [dict(r) for r in rows]
 
-    # ── Cursors (stubs — future) ────────────────────────────────────
+    def find_derived_from(self, l0_node_id: str) -> dict | None:
+        """Return the first derivation node with a derived_from edge to ``l0_node_id``."""
+        row = self._con.execute(
+            """
+            SELECT e.from_node FROM edge e
+            WHERE e.to_node = ? AND e.type = 'provenance' AND e.relation = 'derived_from'
+            LIMIT 1
+            """,
+            (l0_node_id,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    # ── Cursors ────────────────────────────────────────────────────
 
     def get_cursor(self, source_name: str) -> str | None:
-        raise NotImplementedError
+        row = self._con.execute(
+            "SELECT value FROM cursor WHERE source_name = ?", (source_name,)
+        ).fetchone()
+        return row["value"] if row else None
 
     def set_cursor(self, source_name: str, value: str) -> None:
-        raise NotImplementedError
+        self._con.execute(
+            "INSERT OR REPLACE INTO cursor (source_name, value) VALUES (?, ?)",
+            (source_name, value),
+        )
+
+    # ── Inbox ──────────────────────────────────────────────────────
+
+    def add_inbox_item(self, *, source_name: str, url: str, timestamp: str,
+                       note: str | None, captured_at: str) -> None:
+        """Persist a captured item to the inbox table."""
+        try:
+            self._con.execute(
+                """
+                INSERT INTO inbox (source_name, url, timestamp, note, captured_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (source_name, url, timestamp, note, captured_at),
+            )
+        except sqlite3.Error as e:
+            raise StoreError(str(e)) from e
+
+    def list_inbox(self) -> list[dict]:
+        """All inbox rows."""
+        rows = self._con.execute(
+            "SELECT id, source_name, url, timestamp, note, captured_at FROM inbox ORDER BY id"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def list_ingested_canonical_keys(self) -> set[str]:
+        """All canonical keys present in the ledger (source table)."""
+        rows = self._con.execute("SELECT canonical_key FROM source").fetchall()
+        return {r["canonical_key"] for r in rows}
+
+    # ── Trust state + check failures ───────────────────────────────
+
+    def update_trust_state(
+        self, *, node_id: str, trust_state: str, check_failures: list[str] | None = None
+    ) -> None:
+        """Set trust_state and (optionally) check_failures JSON for a node."""
+        failures_json = json.dumps(check_failures) if check_failures is not None else None
+        self._con.execute(
+            "UPDATE node SET trust_state = ?, check_failures = ? WHERE id = ?",
+            (trust_state, failures_json, node_id),
+        )
