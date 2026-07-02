@@ -18,3 +18,4 @@ node_modules/
 # Secrets / local config
 secrets/
 *.local
+.pi-subagents/

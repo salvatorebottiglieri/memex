@@ -407,5 +407,24 @@ def search(db_path: Path, vault_path: Path, query: str) -> None:
     click.echo(json.dumps(results))
 
 
+@cli.command()
+@_db_options
+def render(db_path: Path, vault_path: Path) -> None:
+    """Project SQLite graph into markdown frontmatter (ADR-0008).
+
+    Reads every node, computes YAML frontmatter with metadata + tags + aliases,
+    and writes it into the node's markdown file preserving the body.
+    One-way DB → markdown. Idempotent.
+    """
+    from memex.renderer import render as _render
+
+    if not db_path.exists():
+        click.echo(json.dumps({"error": "db_not_found", "db_path": str(db_path)}), err=False)
+        raise SystemExit(1)
+
+    results = _render(db_path, vault_path)
+    click.echo(json.dumps(results))
+
+
 if __name__ == "__main__":
     cli()

@@ -539,9 +539,89 @@ def smoke_l0_immutable(tmp: Path) -> None:
     _check("node still unique", n == 1, f"got {n}")
 
 
+def smoke_render(tmp: Path) -> None:
+    print("\n[RENDER] core render — metadata + tags + aliases")
+    db, vault = _fresh_store(tmp, "render")
+
+    # L0 render
+    _run(["ingest", "--db", str(db), "--vault", str(vault), "https://example.com/article"],
+         env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER})
+
+    p = _run(["render", "--db", str(db), "--vault", str(vault)])
+    res = _expect_json("render L0", p)
+    _check("render returns 1 result", len(res) == 1, f"got {len(res)}")
+    _check("render status=rendered", res[0]["status"] == "rendered")
+
+    # Frontmatter is valid YAML with expected fields
+    md_files = list(vault.glob("*.md"))
+    _check("1 rendered file", len(md_files) == 1)
+    import yaml
+    text = md_files[0].read_text(encoding="utf-8")
+    _check("file starts with ---", text.startswith("---\n"), f"got: {text[:20]!r}")
+    _, fm_raw, _ = text.split("---\n", 2)
+    fm = yaml.safe_load(fm_raw)
+    _check("frontmatter has id", "id" in fm)
+    _check("frontmatter has kind=raw_source", fm.get("kind") == "raw_source")
+    _check("frontmatter has depth=0", fm.get("depth") == 0)
+    _check("frontmatter has tags with kind/raw_source", "kind/raw_source" in fm.get("tags", []))
+    _check("frontmatter has source_url", "source_url" in fm)
+    _check("frontmatter has title", fm.get("title") == "Fake Article Title")
+    _check("frontmatter has aliases", fm.get("aliases") == ["Fake Article Title"])
+
+    # Idempotency
+    p = _run(["render", "--db", str(db), "--vault", str(vault)])
+    res = _expect_json("render idempotent", p)
+    _check("re-render still returns rendered", res[0]["status"] == "rendered")
+    import yaml as _y
+    text2 = md_files[0].read_text(encoding="utf-8")
+    _, fm_raw2, _ = text2.split("---\n", 2)
+    fm2 = _y.safe_load(fm_raw2)
+    _check("idempotent: same kind", fm2.get("kind") == "raw_source")
+    _check("idempotent: same title", fm2.get("title") == "Fake Article Title")
+
+    # Derivation render
+    p = _run(["derive", "--db", str(db), "--vault", str(vault), str(res[0]["node_id"])],
+             env={"MEMEX_LLM_MODULE": FAKE_LLM})
+    d = _expect_json("derive for render", p)
+    deriv_id = d["id"]
+
+    p = _run(["render", "--db", str(db), "--vault", str(vault)])
+    res = _expect_json("render with derivations", p)
+    _check("2 nodes rendered", len(res) == 2, f"got {len(res)}")
+
+    deriv_md = vault / f"{deriv_id}.md"
+    dtext = deriv_md.read_text(encoding="utf-8")
+    _, dfm_raw, _ = dtext.split("---\n", 2)
+    dfm = _y.safe_load(dfm_raw)
+    _check("derivation frontmatter has kind=summary", dfm.get("kind") == "summary")
+    _check("derivation frontmatter has tier=notes", dfm.get("tier") == "notes")
+    _check("derivation frontmatter has trust_state", dfm.get("trust_state") in ("draft", "auto-verified"))
+    _check("derivation frontmatter has check_failures", isinstance(dfm.get("check_failures"), list))
+    _check("derivation tags include kind/summary", "kind/summary" in dfm.get("tags", []))
+    _check("derivation tags include tier/notes", "tier/notes" in dfm.get("tags", []))
+
+    # Derivation render includes derived_from wikilink
+    _check("derived_from wikilink present", "derived_from" in dfm, f"keys: {list(dfm.keys())}")
+    _check("derived_from is scalar [[uuid]]",
+           isinstance(dfm["derived_from"], str),
+           f"got {type(dfm['derived_from']).__name__}: {dfm['derived_from']}")
+    _check("derived_from begins with [[", dfm["derived_from"].startswith("[["),
+           f"got {dfm['derived_from']!r}")
+
+    # Empty vault returns empty
+    db2, vault2 = _fresh_store(tmp, "render-empty")
+    p = _run(["render", "--db", str(db2), "--vault", str(vault2)])
+    res_empty = _expect_json("render empty", p)
+    _check("empty vault returns []", res_empty == [])
+
+    # Missing DB exits error
+    p = _run(["render", "--db", str(tmp / "nope.db"), "--vault", str(vault2)])
+    _check("render missing DB exits non-zero", p.returncode != 0)
+
+
 def smoke_help(tmp: Path) -> None:
     print("\n[HELP] every command has --help")
-    for cmd in ["init", "status", "ingest", "list", "show", "derive", "search"]:
+    for cmd in ["init", "status", "ingest", "list", "show", "derive", "search", "render"]:
         p = _run([cmd, "--help"])
         _check(f"{cmd} --help exits 0", p.returncode == 0)
         _check(f"{cmd} --help mentions usage", "Usage:" in p.stdout, f"got: {p.stdout[:80]}")
@@ -600,6 +680,7 @@ def main() -> int:
         smoke_migration(tmp)
         smoke_youtube(tmp)
         smoke_l0_immutable(tmp)
+        smoke_render(tmp)
         smoke_help(tmp)
         smoke_full_e2e(tmp)
 

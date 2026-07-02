@@ -33,7 +33,7 @@ more conservative on scope (single user, no discovery/web-research subsystem).
 | Test injection via env var | **built** | `MEMEX_FETCHER_MODULE`, `MEMEX_LLM_MODULE` |
 | Telegram Saved-Messages capture | planned (ADR-0006) | not implemented |
 | Lazy density/demand trigger for derivations | manual only (ADR-0003) | `memex derive` is invoked explicitly |
-| Render step (DB → wikilinks for Obsidian) | not started (ADR-0008) | no `memex render` |
+| Render step (DB → frontmatter + wikilinks for Obsidian) | **built** (slice 1: metadata + tags + aliases) | `memex render` |
 | Per-type extractors (YouTube transcript, PDF) | HTML only | `HttpFetcher` is regex on `<title>` + strip-tags |
 | Staleness propagation | not started | no `stale` trust_state writes yet |
 | Human review queue / targeted review | not started (ADR-0004) | no `human-approved` transition yet |
@@ -72,8 +72,9 @@ flowchart TB
   DB --> CHK["Deterministic checks<br/>(checks.py)"]
   CHK -->|"pass → auto-verified<br/>fail → draft + check_failures JSON"| DB
 
-  DB -.render step.-> RMD["Wikilinks in markdown<br/>planned — ADR-0008"]
-  RMD -.-> OBS["Obsidian<br/>view-only — planned"]
+  DB --> RENDER["memex render<br/>(renderer.py)"]
+  RENDER --> MD_WIKI["Markdown with YAML frontmatter<br/>+ [[wikilinks]] for provenance<br/>- slice 1: metadata + tags + aliases<br/>- slice 2: edge wikilinks"]
+  MD_WIKI --> OBS["Obsidian<br/>view-only"]
 
   CLI[["CLI — canonical interface"]] --> DB
   CLI --> L0
