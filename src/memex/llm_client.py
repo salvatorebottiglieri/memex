@@ -4,6 +4,8 @@ Tests inject FakeLLMClient via MEMEX_LLM_MODULE env var.
 """
 from __future__ import annotations
 
+import random
+import time
 from dataclasses import dataclass, field
 
 
@@ -66,6 +68,25 @@ class AnthropicLLMClient(LLMClient):
             synthesis_statements = []
 
         return DerivationResult(prose=prose, synthesis_statements=synthesis_statements)
+
+
+def call_with_retry(fn, max_retries=3, base_delay=1.0):
+    """Call fn() with exponential backoff + jitter.
+
+    Retries up to `max_retries` times with delay = base_delay * (2 ** attempt)
+    plus uniform jitter of ±50%. Raises the last exception if all retries fail.
+    """
+    last_exc = None
+    for attempt in range(max_retries + 1):
+        try:
+            return fn()
+        except Exception as e:
+            last_exc = e
+            if attempt < max_retries:
+                delay = base_delay * (2 ** attempt)
+                jitter = delay * random.uniform(-0.5, 0.5)
+                time.sleep(delay + jitter)
+    raise last_exc
 
 
 def load_llm_client(module_path: str | None = None) -> LLMClient:
