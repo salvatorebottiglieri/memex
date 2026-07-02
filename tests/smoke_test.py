@@ -371,6 +371,49 @@ def smoke_derive_idempotent(tmp: Path) -> None:
     _check("exactly 1 provenance edge", edge_count == 1, f"got {edge_count}")
 
 
+def smoke_derive_all(tmp: Path) -> None:
+    print("\n[DERIVE ALL] derive --all batch mode")
+    db, vault = _fresh_store(tmp, "deriveall")
+    env = {"MEMEX_FETCHER_MODULE": FAKE_FETCHER, "MEMEX_LLM_MODULE": FAKE_LLM}
+
+    # Ingest 3 URLs
+    for i in range(3):
+        p = _run(["ingest", "--db", str(db), "--vault", str(vault),
+                  f"https://example.com/article-{i}"], env=env)
+        _expect_json(f"ingest {i}", p)
+
+    # Derive first one manually
+    p = _run(["list", "--db", str(db), "--vault", str(vault)])
+    lst = _expect_json("list", p)
+    l0_ids = [r["id"] for r in lst]
+    _check("3 L0 nodes", len(l0_ids) == 3)
+
+    p = _run(["derive", "--db", str(db), "--vault", str(vault), l0_ids[0]], env=env)
+    d = _expect_json("manual derive", p)
+    _check("manual derive ok", d["status"] == "derived")
+
+    # derive --all with limit 1: 1 already_derived + 1 new
+    p = _run(["derive", "--db", str(db), "--vault", str(vault), "--all", "--limit", "1"], env=env)
+    res = _expect_json("derive --all limit=1", p)
+    _check("2 results (1 already + 1 new)", len(res) == 2, f"got {len(res)}")
+    statuses = sorted(r["status"] for r in res)
+    _check("statuses: already_derived + derived", statuses == ["already_derived", "derived"])
+
+    # derive --all again: remaining 1
+    p = _run(["derive", "--db", str(db), "--vault", str(vault), "--all"], env=env)
+    res = _expect_json("derive --all #2", p)
+    _check("2 results (2 already + 1 new)", len(res) == 3, f"got {len(res)}")
+    derived_count = sum(1 for r in res if r["status"] == "derived")
+    already_count = sum(1 for r in res if r["status"] == "already_derived")
+    _check("1 new derived", derived_count == 1)
+    _check("2 already_derived", already_count == 2)
+
+    # All derived now
+    p = _run(["derive", "--db", str(db), "--vault", str(vault), "--all"], env=env)
+    res = _expect_json("derive --all #3", p)
+    _check("3 already_derived", len(res) == 3 and all(r["status"] == "already_derived" for r in res))
+
+
 def smoke_search(tmp: Path) -> None:
     print("\n[SEARCH] keyword search over derivations")
     db, vault = _fresh_store(tmp, "search")
@@ -762,6 +805,7 @@ def main() -> int:
         smoke_derive_passing(tmp)
         smoke_derive_failing(tmp)
         smoke_derive_idempotent(tmp)
+        smoke_derive_all(tmp)
         smoke_search(tmp)
         smoke_errors(tmp)
         smoke_migration(tmp)

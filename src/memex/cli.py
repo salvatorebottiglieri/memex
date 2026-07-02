@@ -237,19 +237,38 @@ def show(db_path: Path, vault_path: Path, node_id: str) -> None:
 
 @cli.command()
 @_db_options
-@click.argument("node_id")
-def derive(db_path: Path, vault_path: Path, node_id: str) -> None:
+@click.argument("node_id", required=False)
+@click.option("--all", "derive_all", is_flag=True, default=False, help="Derive all un-derived L0 nodes.")
+@click.option("--limit", "limit", default=10, type=int, help="Max derivations per run (default 10).")
+def derive(db_path: Path, vault_path: Path, node_id: str | None = None,
+           derive_all: bool = False, limit: int = 10) -> None:
     """Generate a notes-tier derivation from an L0 node using an LLM.
+
+    Single node:  memex derive --db DB --vault V <node-id>
+    Batch:        memex derive --db DB --vault V --all [--limit N]
 
     Writes derivation prose as <deriv_id>.md in the vault, inserts a node row
     (kind=summary, tier=notes, trust_state=draft, depth=1), records a derived_from
     provenance edge, and runs deterministic checks to transition draft → auto-verified.
     """
-    from memex.checks import run_checks
     from memex.llm_client import load_llm_client
     from memex.store import Store
 
     _require_db(db_path)
+
+    if derive_all:
+        _derive_all(db_path, vault_path, limit)
+    else:
+        if not node_id:
+            _fail("missing_node_id", detail="Provide a node_id or use --all for batch mode.")
+        _derive_single(db_path, vault_path, node_id)
+
+
+def _derive_single(db_path: Path, vault_path: Path, node_id: str) -> None:
+    """Derive a single L0 node (the original behavior)."""
+    from memex.llm_client import load_llm_client
+    from memex.store import Store
+
     llm = load_llm_client(os.environ.get("MEMEX_LLM_MODULE"))
 
     with Store.open(db_path) as store:
@@ -271,50 +290,129 @@ def derive(db_path: Path, vault_path: Path, node_id: str) -> None:
             return
 
         l0_content = Path(l0["content_path"]).read_text(encoding="utf-8")
-        deriv = llm.derive(l0_content)
+        result = _do_derive(store, vault_path, node_id, l0_content, llm)
 
-        # --- Write derivation markdown file ---
-        deriv_id = str(uuid.uuid4())
-        vault_path.mkdir(parents=True, exist_ok=True)
-        md_path = vault_path / f"{deriv_id}.md"
-        md_path.write_text(deriv.prose, encoding="utf-8")
+    click.echo(json.dumps(result))
 
-        # --- Insert derivation node + provenance edge ---
-        now = datetime.now(timezone.utc).isoformat()
-        store.create_node(
-            node_id=deriv_id,
-            kind="summary",
-            tier="notes",
-            trust_state="draft",
-            depth=1,
-            content_path=str(md_path),
-            created_at=now,
-        )
-        store.create_edge(
-            edge_id=str(uuid.uuid4()),
-            type="provenance",
-            relation="derived_from",
-            from_node=deriv_id,
-            to_node=node_id,
-        )
 
-        # --- Run deterministic checks → update trust_state ---
-        check_result = run_checks(store._con, deriv_id, md_path)
-        trust_state = "auto-verified" if check_result.passed else "draft"
-        store.update_trust_state(
-            node_id=deriv_id,
-            trust_state=trust_state,
-            check_failures=check_result.failures,
-        )
+def _do_derive(store, vault_path, l0_id, l0_content, llm, use_retry=False):
+    """Run LLM derivation, write markdown, create node+edge, run checks.
 
-    click.echo(json.dumps({
+    Returns a result dict with status="derived" on success.
+    Raises on LLM failure (caller catches for batch mode).
+    """
+    from memex.checks import run_checks
+    from memex.llm_client import call_with_retry
+
+    deriv_fn = lambda: llm.derive(l0_content)
+    deriv = call_with_retry(deriv_fn) if use_retry else llm.derive(l0_content)
+
+    deriv_id = str(uuid.uuid4())
+    vault_path.mkdir(parents=True, exist_ok=True)
+    md_path = vault_path / f"{deriv_id}.md"
+    md_path.write_text(deriv.prose, encoding="utf-8")
+
+    now = datetime.now(timezone.utc).isoformat()
+    store.create_node(
+        node_id=deriv_id,
+        kind="summary",
+        tier="notes",
+        trust_state="draft",
+        depth=1,
+        content_path=str(md_path),
+        created_at=now,
+    )
+    store.create_edge(
+        edge_id=str(uuid.uuid4()),
+        type="provenance",
+        relation="derived_from",
+        from_node=deriv_id,
+        to_node=l0_id,
+    )
+
+    check_result = run_checks(store._con, deriv_id, md_path)
+    trust_state = "auto-verified" if check_result.passed else "draft"
+    store.update_trust_state(
+        node_id=deriv_id,
+        trust_state=trust_state,
+        check_failures=check_result.failures,
+    )
+
+    return {
         "id": deriv_id,
         "status": "derived",
-        "l0_node_id": node_id,
-        "content_path": str(md_path),
+        "l0_node_id": l0_id,
         "trust_state": trust_state,
         "check_failures": check_result.failures,
-    }))
+    }
+
+
+def _derive_all(db_path: Path, vault_path: Path, limit: int) -> None:
+    """Derive all un-derived L0 nodes, up to limit."""
+    from memex.llm_client import load_llm_client
+    from memex.store import Store
+
+    if limit <= 0:
+        click.echo(json.dumps([]))
+        return
+
+    llm = load_llm_client(os.environ.get("MEMEX_LLM_MODULE"))
+
+    with Store.open(db_path) as store:
+        # Find un-derived L0s
+        all_nodes = store.list_nodes()
+        un_derived = []
+        for node in all_nodes:
+            if node.get("kind") != "raw_source":
+                continue
+            if store.find_derived_from(node["id"]) is not None:
+                continue
+            un_derived.append(node["id"])
+            if len(un_derived) >= limit:
+                break
+
+        results = []
+
+        # Report already-derived L0s
+        seen_derived = set()
+        for node in all_nodes:
+            if node.get("kind") != "raw_source":
+                continue
+            existing = store.find_derived_from(node["id"])
+            if existing is not None:
+                results.append({
+                    "id": node["id"],
+                    "status": "already_derived",
+                })
+                seen_derived.add(node["id"])
+
+        # Derive un-derived L0s
+        count = 0
+        for node in all_nodes:
+            if node.get("kind") != "raw_source":
+                continue
+            if node["id"] in seen_derived:
+                continue
+            if count >= limit:
+                break
+            count += 1
+
+            l0 = store.get_node(node["id"])
+            if l0 is None or not l0.get("content_path"):
+                continue
+
+            try:
+                l0_content = Path(l0["content_path"]).read_text(encoding="utf-8")
+                result = _do_derive(store, vault_path, node["id"], l0_content, llm, use_retry=True)
+                results.append(result)
+            except Exception as e:
+                results.append({
+                    "id": node["id"],
+                    "status": "error",
+                    "detail": str(e),
+                })
+
+    click.echo(json.dumps(results))
 
 
 @cli.command()

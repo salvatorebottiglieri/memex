@@ -7,10 +7,14 @@ from __future__ import annotations
 
 import json
 
+import sqlite3
+
 from tests.conftest import _run_memex, FAKE_FETCHER
 
 
 FAKE_LLM = "tests.fake_llm_client:FakeLLMClient"
+FAKE_FAILING_LLM = "tests.fake_llm_client_failing:FakeLLMClientFailing"
+FAKE_THROWS_LLM = "tests.fake_llm_client_throws:FakeLLMClientThrows"
 
 
 def _ingest(store, url: str) -> dict:
@@ -132,6 +136,174 @@ class TestDerive:
         assert result.returncode != 0
         data = json.loads(result.stderr)
         assert data["error"] == "not_found"
+
+
+class TestDeriveAll:
+    """Tests for memex derive --all with --limit."""
+
+    def _derive_all(self, store, limit: int | None = None, llm: str = FAKE_LLM):
+        args = [
+            "derive", "--db", str(store["db"]),
+            "--vault", str(store["vault"]), "--all",
+        ]
+        if limit is not None:
+            args.extend(["--limit", str(limit)])
+        return _run_memex(args, env={"MEMEX_LLM_MODULE": llm})
+
+    def _ingest_n(self, store, n: int, prefix: str = "article") -> list[dict]:
+        """Ingest n unique URLs and return their result dicts."""
+        results = []
+        for i in range(n):
+            result = _run_memex(
+                ["ingest", "--db", str(store["db"]), "--vault", str(store["vault"]),
+                 f"https://example.com/{prefix}-{i}"],
+                env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
+            )
+            assert result.returncode == 0, result.stderr
+            results.append(json.loads(result.stdout))
+        return results
+
+    def test_derive_all_capped_by_limit(self, store):
+        """5 L0s, --limit 3 → only 3 derivations created."""
+        l0s = self._ingest_n(store, 5)
+        result = self._derive_all(store, limit=3)
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        # 3 derived, 2 not reached (limit caps before processing them)
+        assert len(data) == 3
+        assert all(r["status"] == "derived" for r in data)
+
+        con = sqlite3.connect(store["db"])
+        count = con.execute(
+            "SELECT COUNT(*) FROM node WHERE kind = 'summary' AND tier = 'notes'"
+        ).fetchone()[0]
+        con.close()
+        assert count == 3, f"expected 3 derivations, got {count}"
+
+    def test_derive_all_skips_already_derived(self, store):
+        """5 L0s, derive 2 manually, then --all → 3 new derivations + 2 already_derived."""
+        l0s = self._ingest_n(store, 5)
+        # Derive first 2 manually
+        for l0 in l0s[:2]:
+            d = _run_memex(
+                ["derive", "--db", str(store["db"]), "--vault", str(store["vault"]), l0["id"]],
+                env={"MEMEX_LLM_MODULE": FAKE_LLM},
+            )
+            assert d.returncode == 0, d.stderr
+
+        # Now --all with limit 10: 2 already_derived + 3 new
+        result = self._derive_all(store, limit=10)
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        assert len(data) == 5
+        already = [r for r in data if r["status"] == "already_derived"]
+        derived = [r for r in data if r["status"] == "derived"]
+        assert len(already) == 2
+        assert len(derived) == 3
+
+        con = sqlite3.connect(store["db"])
+        count = con.execute(
+            "SELECT COUNT(*) FROM node WHERE kind = 'summary' AND tier = 'notes'"
+        ).fetchone()[0]
+        con.close()
+        assert count == 5
+
+    def test_derive_all_no_un_derived(self, store):
+        """All L0s already derived → all reported as already_derived."""
+        l0s = self._ingest_n(store, 3)
+        for l0 in l0s:
+            d = _run_memex(
+                ["derive", "--db", str(store["db"]), "--vault", str(store["vault"]), l0["id"]],
+                env={"MEMEX_LLM_MODULE": FAKE_LLM},
+            )
+            assert d.returncode == 0, d.stderr
+
+        result = self._derive_all(store, limit=10)
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        assert len(data) == 3
+        assert all(r["status"] == "already_derived" for r in data)
+
+    def test_derive_all_output_format(self, store):
+        """Validate JSON output structure — includes already_derived entries too."""
+        l0s = self._ingest_n(store, 2)
+        # Derive one manually so we see already_derived too
+        _run_memex(
+            ["derive", "--db", str(store["db"]), "--vault", str(store["vault"]), l0s[0]["id"]],
+            env={"MEMEX_LLM_MODULE": FAKE_LLM},
+        )
+
+        result = self._derive_all(store, limit=10)
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        assert isinstance(data, list)
+        assert len(data) == 2  # 1 already_derived + 1 derived
+
+        already = [r for r in data if r["status"] == "already_derived"]
+        derived = [r for r in data if r["status"] == "derived"]
+        assert len(already) == 1
+        assert len(derived) == 1
+
+        entry = derived[0]
+        assert "id" in entry
+        assert "l0_node_id" in entry
+        assert "trust_state" in entry
+        assert "check_failures" in entry
+
+    def test_derive_all_limit_zero(self, store):
+        """limit=0 → empty result."""
+        self._ingest_n(store, 3)
+        result = self._derive_all(store, limit=0)
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        assert data == []
+
+    def test_derive_all_handles_errors(self, store):
+        """Failing LLM returns error status without crashing batch."""
+        l0s = self._ingest_n(store, 3)
+        result = self._derive_all(store, limit=10, llm=FAKE_THROWS_LLM)
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        assert len(data) == 3
+        for entry in data:
+            assert entry["status"] == "error"
+            assert "detail" in entry
+            assert "Simulated LLM failure" in entry["detail"]
+
+    def test_derive_all_idempotent(self, store):
+        """Re-run with same state → all reported as already_derived."""
+        l0s = self._ingest_n(store, 3)
+        result = self._derive_all(store, limit=10)
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        assert len(data) == 3
+        assert all(r["status"] == "derived" for r in data)
+
+        # Re-run — all now already_derived
+        result = self._derive_all(store, limit=10)
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        assert len(data) == 3
+        assert all(r["status"] == "already_derived" for r in data)
+
+    def test_derive_all_no_l0s(self, store):
+        """No L0s at all → empty result."""
+        result = self._derive_all(store, limit=10)
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        assert data == []
+
+    def test_single_derive_unchanged(self, store):
+        """Original derive <node-id> still works unchanged."""
+        l0s = self._ingest_n(store, 1)
+        result = _run_memex(
+            ["derive", "--db", str(store["db"]), "--vault", str(store["vault"]), l0s[0]["id"]],
+            env={"MEMEX_LLM_MODULE": FAKE_LLM},
+        )
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        assert data["status"] == "derived"
+        assert data["l0_node_id"] == l0s[0]["id"]
 
 
 class TestSearch:

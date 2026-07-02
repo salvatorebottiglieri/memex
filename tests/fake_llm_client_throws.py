@@ -1,0 +1,13 @@
+"""Fake LLMClient that always raises from derive().
+
+Used to test that _derive_all correctly catches persistent LLM errors
+and reports them as status="error" without crashing the batch.
+"""
+from __future__ import annotations
+
+
+class FakeLLMClientThrows:
+    """Fake LLM client that raises an exception on every derive() call."""
+
+    def derive(self, content: str) -> None:
+        raise RuntimeError("Simulated LLM failure")
