@@ -33,9 +33,21 @@ memex exposes a JSON-only CLI (one command per operation, all output is structur
 ## Develop
 
 ```bash
-uv sync                   # install dependencies
-PYTHONPATH=src memex init --db /tmp/memex.db --vault /tmp/vault  # quick smoke test
-PYTHONPATH=src python3.12 -m pytest  # run tests
+uv sync                       # install dependencies
+uv run memex init --db /tmp/memex.db --vault /tmp/vault  # quick smoke test
+uv run pytest                                                 # run the unit suite
+uv run python tests/smoke_test.py                             # aggressive end-to-end smoke tests (real subprocess, 93 checks)
 ```
 
 All output is JSON (AXI standard) — pipe to `jq` or your agent's tools.
+
+## Test injection (env vars)
+
+Tests inject fake collaborators without touching network or paying for LLM calls:
+
+| Env var | Where | Effect |
+|---|---|---|
+| `MEMEX_FETCHER_MODULE` | `memex ingest` | Replaces `HttpFetcher` with a module:Class string (e.g. `tests.conftest:FakeFetcher`) |
+| `MEMEX_LLM_MODULE` | `memex derive` | Replaces `AnthropicLLMClient` with a module:Class string (e.g. `tests.fake_llm_client:FakeLLMClient`) |
+
+Both follow the `module:Class` import-string convention so the seam is a one-line change with no monkeypatching.

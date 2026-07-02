@@ -18,40 +18,66 @@ Inspired by Karpathy's personal wiki and by `iusztinpaul/ai-research-os-workshop
 More ambitious than the reference on the knowledge model (arbitrary-depth DAG + validation states),
 more conservative on scope (single user, no discovery/web-research subsystem).
 
-## Map
+## Status (what is built vs planned)
+
+| Concern | State | Surface |
+|---|---|---|
+| Ingestion (URL → L0 markdown + node) | **built** | `memex ingest <url>` |
+| WhatsApp inbox ingest (per-file cursor) | **built** | `memex ingest --inbox <file>` |
+| Canonical-key dedup + ledger | **built** | Store: `lookup_by_canonical_key`, `source.failed` |
+| Derivation (LLM → notes-tier + provenance edge) | **built** | `memex derive <l0-id>` |
+| Deterministic checks (auto-verify gate) | **built** | `memex.checks.run_checks` |
+| Keyword search over derivations | **built** | `memex search <query>` |
+| Pending set (captured-but-not-ingested) | **built (table only)** | `memex list --pending` |
+| Store deep module (CLI is thin) | **built** | `memex.store.Store` |
+| Test injection via env var | **built** | `MEMEX_FETCHER_MODULE`, `MEMEX_LLM_MODULE` |
+| Telegram Saved-Messages capture | planned (ADR-0006) | not implemented |
+| Lazy density/demand trigger for derivations | manual only (ADR-0003) | `memex derive` is invoked explicitly |
+| Render step (DB → wikilinks for Obsidian) | not started (ADR-0008) | no `memex render` |
+| Per-type extractors (YouTube transcript, PDF) | HTML only | `HttpFetcher` is regex on `<title>` + strip-tags |
+| Staleness propagation | not started | no `stale` trust_state writes yet |
+| Human review queue / targeted review | not started (ADR-0004) | no `human-approved` transition yet |
+| Edit round-trip (Obsidian wikilink edits back into DB) | not started | |
+| Confidence scoring | not started | |
+
+## Map (as built)
+
+Solid lines = implemented path; dashed = planned surface that doesn't yet write data.
 
 ```mermaid
 flowchart TB
   USER((Me))
 
   subgraph Capture
-    WA["WhatsApp export .txt<br/>(one-time backfill)"]
-    TG["Telegram Saved Messages<br/>(ongoing, read-only bot)"]
+    WA["WhatsApp export .txt<br/>(per-file cursor, not one-shot)"]
+    TG["Telegram Saved Messages<br/>planned — ADR-0006"]
   end
 
-  WA --> INBOX["Inbox abstraction<br/>url + ts + note"]
-  TG --> INBOX
+  WA -->|parse_whatsapp_export| INBOX["inbox table<br/>(url + ts + note)"]
+  TG -.-> INBOX
 
-  INBOX --> ING["Ingestion pipeline<br/>(headless, scheduled)"]
-  ING -->|dedup by canonical key| STATE[("SQLite: ledger + cursors")]
-  ING --> EXT["Per-type extractors<br/>HTML / YouTube / PDF"]
-  EXT --> L0["Markdown: L0 raw (immutable)"]
+  INBOX -->|ingest --inbox| ING["Ingestion"]
+  URL["Direct URL"] -->|ingest &lt;url&gt;| ING
 
-  ING -->|"Anthropic SDK (Claude), JSON"| DERIV["Derivations<br/>(lazy: density / demand)"]
-  DERIV --> MD["Markdown: derivation prose"]
-  DERIV --> DB[("SQLite: edges, tier,<br/>trust state, depth, confidence")]
+  ING -->|canonical_key dedup| LEDGER[("source table<br/>(ledger)")]
+  ING -->|HttpFetcher| EXT["HTML extractor<br/>(regex on title + strip-tags)"]
+  EXT --> L0["L0 markdown<br/>(&lt;node-id&gt;.md, immutable)"]
 
-  CHK["Deterministic checks"] --> DB
-  REVIEW["Human review<br/>(targeted + budgeted)"] --> DB
-  USER --> REVIEW
+  ING -.capture-only path.->|"ingest --inbox currently<br/>captures AND ingests atomically"| INBOX
 
-  DB --> RENDER["Render step (DB → wikilinks)"]
-  RENDER --> MD
-  MD --> OBS["Obsidian<br/>(graph + breadcrumbs, view-only)"]
-  USER --> OBS
+  ING -->|derive &lt;l0-id&gt;| DERIV["Deriver<br/>(LLMClient via MEMEX_LLM_MODULE)"]
+  DERIV -->|"notes-tier summary,<br/>provenance edge"| DB[("SQLite<br/>node + edge")]
+  DERIV -->|"writes derivation prose"| DMD["&lt;deriv-id&gt;.md"]
+
+  DB --> CHK["Deterministic checks<br/>(checks.py)"]
+  CHK -->|"pass → auto-verified<br/>fail → draft + check_failures JSON"| DB
+
+  DB -.render step.-> RMD["Wikilinks in markdown<br/>planned — ADR-0008"]
+  RMD -.-> OBS["Obsidian<br/>view-only — planned"]
 
   CLI[["CLI — canonical interface"]] --> DB
-  CLI --> MD
+  CLI --> L0
+  CLI --> DMD
   AGENT["Agent (Pi / Claude Code)<br/>thin per-harness adapter"] --> CLI
   USER --> AGENT
 ```
@@ -68,16 +94,18 @@ flowchart TB
 - [0008](adr/0008-two-store-sqlite-markdown.md) — Two-store: SQLite owns structure, markdown owns content
 - [0009](adr/0009-framework-agnostic-core-no-langgraph.md) — Framework-agnostic Python core; no LangGraph
 - [0010](adr/0010-cli-canonical-interface-no-mcp.md) — CLI as canonical harness-agnostic interface; no MCP
+- [0011](adr/0011-deterministic-checks-gate.md) — Deterministic Checks module + `> Synthesis:` gate
 
 ## Open questions (deferred)
 
-- **Model choice & cost:** default to latest capable Claude (Opus 4.8 / Sonnet 4.6); likely Sonnet for bulk derivation, Opus for high-tier synthesis — tune later.
-- **Tier seed:** start with `raw → notes → synthesis`; let real use reveal whether more ordinal ranks are needed (gated, ADR-0002).
-- **Source-type extractors:** HTML article, YouTube transcript, PDF first; tweets/X and others later.
+- **Model choice & cost:** `AnthropicLLMClient` currently defaults to `claude-opus-4-5`. Switch to Sonnet for bulk derivation once cost matters; keep Opus for higher-tier synthesis. Tune when real volume arrives.
+- **Tier seed:** `raw` + `notes` are built; `synthesis` not yet. Let real use reveal whether more ordinal ranks are needed (gated, ADR-0002).
+- **Source-type extractors:** HTML article is built. YouTube transcript (the canonical-key mapping is already in `canonical_key.py`) and PDF are next. Tweets/X and others later.
 - **Edit round-trip:** if I hand-edit a wikilink in Obsidian, a reconcile step is needed (edge case).
 - **Staleness propagation:** invalidate-eagerly vs mark-and-regenerate-on-demand — leaning on-demand; confirm during build.
 - **✅-reaction** Telegram confirmation: optional later enhancement (needs write scope).
 - **Confidence scoring:** exact formula from source count + contradictions.
+- **Capture/ingest conflation:** `memex ingest --inbox` currently does capture + ingest atomically, so the inbox table never has *pending* items via the CLI. The pending path exists for a future `memex capture` step that persists without ingesting — see ADR-0006/0007. Test coverage of `--pending` therefore writes to the inbox table directly.
 
 ## Reference: `iusztinpaul/ai-research-os-workshop`
 

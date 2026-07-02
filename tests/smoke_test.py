@@ -5,12 +5,13 @@ Each test is a small sequence of CLI invocations + assertions on stdout/exit.
 
 This is *not* a pytest module — invoke directly:
 
-    PYTHONPATH=src python3.12 tests/smoke_test.py
+    uv run python tests/smoke_test.py
 """
 from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -18,7 +19,6 @@ import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-SRC = REPO / "src"
 FAKE_FETCHER = "tests.conftest:FakeFetcher"
 FAKE_LLM = "tests.fake_llm_client:FakeLLMClient"
 FAKE_FAILING_LLM = "tests.fake_llm_client_failing:FakeLLMClientFailing"
@@ -36,9 +36,16 @@ _passes = 0
 
 
 def _run(args: list[str], env: dict | None = None, cwd: Path | None = None) -> subprocess.CompletedProcess:
-    full_env = {**os.environ, "PYTHONPATH": str(SRC), **(env or {})}
+    full_env = {**os.environ, **(env or {})}
+    # `uv run python -m memex.cli` keeps cwd on sys.path so the
+    # `MEMEX_FETCHER_MODULE=tests.conftest:FakeFetcher` test seam works
+    # without PYTHONPATH. Falls back to direct python if uv is absent.
+    if shutil.which("uv"):
+        cmd = ["uv", "run", "python", "-m", "memex.cli", *args]
+    else:
+        cmd = [sys.executable, "-m", "memex.cli", *args]
     return subprocess.run(
-        [sys.executable, "-m", "memex.cli", *args],
+        cmd,
         capture_output=True,
         text=True,
         env=full_env,

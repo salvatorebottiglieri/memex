@@ -1,6 +1,8 @@
 """Shared fixtures and helpers for memex tests."""
 from __future__ import annotations
 
+import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -25,14 +27,19 @@ class FakeFetcher:
 
 FAKE_FETCHER = "tests.conftest:FakeFetcher"
 WORKTREE = Path(__file__).resolve().parent.parent
-SRC_DIR = str(WORKTREE / "src")
 
 
 def _run_memex(args: list[str], cwd: Path | None = None, env: dict | None = None) -> subprocess.CompletedProcess:
-    import os
-    full_env = {**os.environ, **{"PYTHONPATH": SRC_DIR}, **(env or {})}
+    full_env = {**os.environ, **(env or {})}
+    # `uv run python -m memex.cli` keeps cwd on sys.path, which makes the
+    # `MEMEX_FETCHER_MODULE=tests.conftest:FakeFetcher` test seam work
+    # without needing PYTHONPATH. Falls back to direct python if uv is absent.
+    if shutil.which("uv"):
+        cmd = ["uv", "run", "python", "-m", "memex.cli", *args]
+    else:
+        cmd = [sys.executable, "-m", "memex.cli", *args]
     return subprocess.run(
-        [sys.executable, "-m", "memex.cli"] + args,
+        cmd,
         capture_output=True,
         text=True,
         cwd=cwd,
