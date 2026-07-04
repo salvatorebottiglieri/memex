@@ -461,3 +461,78 @@ def test_render_multiple_types(store):
         assert "id" in fm
         assert "kind" in fm
         assert "depth" in fm
+
+# ── Contested nodes ───────────────────────────────────────────────────
+
+
+class TestContestedRender:
+    """Tests for contested state surfacing in render/show/list."""
+
+    def test_contested_node_has_contested_tag(self, store):
+        """A contested node gets trust_state/contested in frontmatter tags."""
+        node_id, md_path = _make_node(store, kind="raw_source")
+        con = sqlite3.connect(store["db"])
+        now = _now()
+        con.execute(
+            "UPDATE node SET is_contested = 1, contested_at = ? WHERE id = ?",
+            (now, node_id),
+        )
+        con.commit()
+        con.close()
+
+        results = _render(store)
+        assert len(results) == 1
+        fm, _ = _read_frontmatter(md_path)
+        assert "trust_state/contested" in fm["tags"]
+
+    def test_uncontested_node_no_contested_tag(self, store):
+        """An uncontested node does not get trust_state/contested."""
+        node_id, md_path = _make_node(store, kind="raw_source")
+        results = _render(store)
+        assert len(results) == 1
+        fm, _ = _read_frontmatter(md_path)
+        assert "trust_state/contested" not in fm["tags"]
+
+    def test_show_contested_includes_field(self, store):
+        """memex show on contested node includes is_contested and contested_at."""
+        node_id, _ = _make_node(store, kind="raw_source")
+        con = sqlite3.connect(store["db"])
+        now = _now()
+        con.execute(
+            "UPDATE node SET is_contested = 1, contested_at = ? WHERE id = ?",
+            (now, node_id),
+        )
+        con.commit()
+        con.close()
+
+        result = _run_memex(
+            ["show", "--db", str(store["db"]), "--vault", str(store["vault"]), node_id],
+        )
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        assert data["is_contested"] is True
+        assert data["contested_at"] == now
+
+    def test_list_contested_includes_field(self, store):
+        """memex list includes is_contested and contested_at for each node."""
+        node_a, _ = _make_node(store, kind="raw_source")
+        node_b, _ = _make_node(store, kind="raw_source")
+        con = sqlite3.connect(store["db"])
+        now = _now()
+        con.execute(
+            "UPDATE node SET is_contested = 1, contested_at = ? WHERE id = ?",
+            (now, node_a),
+        )
+        con.commit()
+        con.close()
+
+        result = _run_memex(
+            ["list", "--db", str(store["db"]), "--vault", str(store["vault"])],
+        )
+        assert result.returncode == 0, result.stderr
+        nodes = json.loads(result.stdout)
+        node_map = {n["id"]: n for n in nodes}
+        assert node_map[node_a]["is_contested"] is True
+        assert node_map[node_a]["contested_at"] == now
+        assert node_map[node_b]["is_contested"] is False
+        assert node_map[node_b]["contested_at"] is None
