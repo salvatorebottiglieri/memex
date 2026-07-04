@@ -63,6 +63,27 @@ CREATE TABLE IF NOT EXISTS inbox (
     note        TEXT,
     captured_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS event_queue (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type     TEXT NOT NULL CHECK (event_type IN ('contradicts_edge_needs_review')),
+    edge_id        TEXT NOT NULL REFERENCES edge(id),
+    target_node_id TEXT NOT NULL REFERENCES node(id),
+    created_at     TEXT NOT NULL,
+    status         TEXT NOT NULL CHECK (status IN ('pending','closed')) DEFAULT 'pending',
+    closed_at      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_event_queue_status ON event_queue(status);
+CREATE INDEX IF NOT EXISTS idx_event_queue_target ON event_queue(target_node_id);
+
+CREATE TABLE IF NOT EXISTS event_node_link (
+    event_id     INTEGER NOT NULL REFERENCES event_queue(id),
+    node_id      TEXT NOT NULL REFERENCES node(id),
+    contested_at TEXT NOT NULL,
+    PRIMARY KEY (event_id, node_id)
+);
+CREATE INDEX IF NOT EXISTS idx_event_node_link_node ON event_node_link(node_id);
+CREATE INDEX IF NOT EXISTS idx_event_node_link_event ON event_node_link(event_id);
 """
 
 
@@ -106,6 +127,21 @@ class Store:
             pass  # column already exists
         try:
             self._con.execute("ALTER TABLE node ADD COLUMN check_failures TEXT")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+        try:
+            self._con.execute("ALTER TABLE node ADD COLUMN is_contested INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+        try:
+            self._con.execute("ALTER TABLE node ADD COLUMN contested_at TEXT")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+        try:
+            self._con.execute(
+                "ALTER TABLE edge ADD COLUMN written_by TEXT NOT NULL DEFAULT 'human'"
+                " CHECK (written_by IN ('human','llm','check','system'))"
+            )
         except sqlite3.OperationalError:
             pass  # column already exists
 
@@ -174,7 +210,6 @@ class Store:
             )
         except sqlite3.Error as e:
             raise StoreError(str(e)) from e
-
     # ── Reads ─────────────────────────────────────────────────────
 
     def list_nodes(self) -> list[dict[str, Any]]:
@@ -182,6 +217,7 @@ class Store:
 
         Returns the same per-node fields as ``get_node``: ``{id, kind, tier,
         trust_state, depth, content_path, created_at, check_failures,
+        is_contested, contested_at,
         canonical_key, source_url, title, fetched_at, failed}``.
         """
         rows = self._con.execute(
@@ -189,6 +225,7 @@ class Store:
             SELECT
                 n.id, n.kind, n.tier, n.trust_state, n.depth,
                 n.content_path, n.created_at, n.check_failures,
+                n.is_contested, n.contested_at,
                 s.canonical_key, s.source_url, s.title, s.fetched_at, s.failed
             FROM node n
             LEFT JOIN source s ON s.node_id = n.id
@@ -205,6 +242,8 @@ class Store:
                 d["check_failures"] = json.loads(cf_json)
             else:
                 d["check_failures"] = None
+            # is_contested and contested_at are plain int/TEXT — no JSON decoding needed
+            d["is_contested"] = bool(d["is_contested"])
             result.append(d)
         return result
 
@@ -212,6 +251,7 @@ class Store:
         """Full node + source by id.
 
         Returns ``{id, kind, tier, trust_state, depth, content_path, created_at,
+        check_failures, is_contested, contested_at,
         canonical_key, source_url, title, fetched_at, failed}`` or ``None``.
         """
         row = self._con.execute(
@@ -219,6 +259,7 @@ class Store:
             SELECT
                 n.id, n.kind, n.tier, n.trust_state, n.depth, n.content_path, n.created_at,
                 n.check_failures,
+                n.is_contested, n.contested_at,
                 s.canonical_key, s.source_url, s.title, s.fetched_at, s.failed
             FROM node n
             LEFT JOIN source s ON s.node_id = n.id
@@ -238,6 +279,8 @@ class Store:
             d["check_failures"] = json.loads(cf_json)
         else:
             d["check_failures"] = None
+        # is_contested and contested_at are plain int/TEXT — no JSON decoding needed
+        d["is_contested"] = bool(d["is_contested"])
         return d
 
     # ── Connection ────────────────────────────────────────────────
@@ -248,15 +291,105 @@ class Store:
     # ── Edges ──────────────────────────────────────────────────────
 
     def create_edge(self, *, edge_id: str, type: str, relation: str,
-                    from_node: str, to_node: str) -> None:
-        """Insert a typed edge between two nodes."""
+                    from_node: str, to_node: str,
+                    written_by: str = "human") -> None:
+        """Insert a typed edge between two nodes.
+
+        When ``relation == 'contradicts'`` the contested-state propagation
+        flow is triggered automatically within the current transaction.
+        """
         try:
             self._con.execute(
                 """
-                INSERT INTO edge (id, type, relation, from_node, to_node)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO edge (id, type, relation, from_node, to_node, written_by)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (edge_id, type, relation, from_node, to_node),
+                (edge_id, type, relation, from_node, to_node, written_by),
+            )
+        except sqlite3.Error as e:
+            raise StoreError(str(e)) from e
+
+        if relation == "contradicts":
+            self._propagate_contradiction(edge_id, to_node)
+
+    # ── Contestation propagation (internal) ────────────────────────
+
+    def _propagate_contradiction(self, edge_id: str, target_node_id: str) -> None:
+        """Open a contestation event, walk provenance descendants,
+        link each descendant and the target node, and flag
+        previously-uncontested nodes.
+
+        This entire sequence shares the caller's transaction — no commit here.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            descendants = self.find_provenance_descendants(target_node_id)
+            event_id = self.open_contestation_event(
+                edge_id=edge_id,
+                target_node_id=target_node_id,
+            )
+            all_nodes = [target_node_id] + descendants
+            for node_id in all_nodes:
+                self.link_event_to_node(event_id, node_id, now)
+                # Only flag nodes that are not already contested
+                self._con.execute(
+                    "UPDATE node SET is_contested = 1, contested_at = ? WHERE id = ? AND is_contested = 0",
+                    (now, node_id),
+                )
+        except sqlite3.Error as e:
+            raise StoreError(str(e)) from e
+
+    def find_provenance_descendants(self, target_node_id: str) -> list[str]:
+        """Walk ``derived_from`` edges transitively to find all nodes
+        that depend on ``target_node_id``.
+
+        Returns node ids, empty list when none exist.
+        """
+        try:
+            rows = self._con.execute(
+                """
+                WITH RECURSIVE descendants AS (
+                    SELECT e.from_node AS id
+                    FROM edge e
+                    WHERE e.to_node = ?
+                      AND e.type = 'provenance'
+                      AND e.relation = 'derived_from'
+                    UNION ALL
+                    SELECT e.from_node
+                    FROM edge e
+                    JOIN descendants d ON e.to_node = d.id
+                    WHERE e.type = 'provenance'
+                      AND e.relation = 'derived_from'
+                )
+                SELECT id FROM descendants
+                """,
+                (target_node_id,),
+            ).fetchall()
+            return [r["id"] for r in rows]
+        except sqlite3.Error as e:
+            raise StoreError(str(e)) from e
+
+    def open_contestation_event(self, edge_id: str, target_node_id: str) -> int:
+        """Insert a new contestation event and return its id."""
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            cur = self._con.execute(
+                """
+                INSERT INTO event_queue (event_type, edge_id, target_node_id, created_at, status)
+                VALUES ('contradicts_edge_needs_review', ?, ?, ?, 'pending')
+                """,
+                (edge_id, target_node_id, now),
+            )
+            return cur.lastrowid
+        except sqlite3.Error as e:
+            raise StoreError(str(e)) from e
+
+    def link_event_to_node(self, event_id: int, node_id: str, contested_at: str) -> None:
+        """Link an event to a contested node."""
+        try:
+            self._con.execute(
+                "INSERT INTO event_node_link (event_id, node_id, contested_at) VALUES (?, ?, ?)",
+                (event_id, node_id, contested_at),
             )
         except sqlite3.Error as e:
             raise StoreError(str(e)) from e
@@ -276,7 +409,7 @@ class Store:
             params.append(relation)
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         rows = self._con.execute(
-            f"SELECT id, type, relation, from_node, to_node FROM edge {where}", params
+            f"SELECT id, type, relation, from_node, to_node, written_by FROM edge {where}", params
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -345,3 +478,4 @@ class Store:
             "UPDATE node SET trust_state = ?, check_failures = ? WHERE id = ?",
             (trust_state, failures_json, node_id),
         )
+
