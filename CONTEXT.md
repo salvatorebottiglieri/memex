@@ -78,3 +78,33 @@ _Avoid_: offset, pointer
 **Render step**:
 The deterministic one-way projection of SQLite structure into markdown frontmatter and `[[wikilinks]]`.
 _Avoid_: export, sync
+
+### Review and contestation
+
+**Contested**:
+A node whose validity has been put in doubt by a contestation event awaiting human adjudication. Orthogonal to trust state: a node can be `contested` regardless of whether it is `draft`, `auto-verified`, `human-approved`, or `stale`. The agent may not stop on a contested node.
+_Avoid_: pending, flagged, under review
+
+**Contestation event**:
+An occurrence that has caused one or more nodes to become `contested` and that requires human adjudication to resolve. Examples: a newly-written `contradicts` association edge; a future deterministic check that fails in a contestable way.
+_Avoid_: incident, complaint, dispute
+
+**Contested footprint**:
+The set of nodes that a single contestation event has marked as `contested`. When the event is adjudicated, its footprint is removed; nodes remain `contested` only if other open events still cover them.
+_Avoid_: scope, blast radius
+
+**Review proposal**:
+An analysis written by the review agent (LLM) that identifies the boundary of damage for a contestation event, in support of the human adjudication step.
+_Avoid_: triage result, agent verdict, recommendation
+
+**Damage boundary**:
+The deepest node in the contested footprint, computed by the review agent from `affected_node_ids`. Non-unique in a DAG. Derived metadata, not a source of truth — the operational set is `affected_node_ids`.
+_Avoid_: damage frontier, cut-off node
+
+**Review queue**:
+The collection of contestation events that have no `review_proposal` yet.
+_Avoid_: pending list, worklist
+
+**Adjudication**:
+The human act of closing a contestation event with `accept`, `reject`, or `dismiss`. The only path out of the review queue.
+_Avoid_: close, resolve, settle

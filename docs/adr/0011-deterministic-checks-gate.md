@@ -19,6 +19,7 @@ ADR-0004 lists additional gates that are *not yet implemented*: tier/depth consi
 - **Failures are persistent** — stored as JSON on the node row, surfaced by `memex show`, and emitted in the `derive` response. The agent doesn't have to re-run checks to know why a node is draft.
 - **Promote-only** — checks can move a derivation from `draft` to `auto-verified`, but never the reverse and never up to `human-approved`. Human approval (ADR-0004) is its own transition.
 - **The `> Synthesis:` marker is a code-level rule, not a prompt convention** — even though the LLM is asked to produce it via the system prompt, the check enforces it. The prompt can drift; the check can't.
+- **Scope** — this ADR covers the gate that moves a derivation from `draft` to `auto-verified`. It does not cover the review agent that produces `review_proposal`s, nor the propagation of `contested` state: those live in ADR-0012.
 
 ## Considered alternatives
 
