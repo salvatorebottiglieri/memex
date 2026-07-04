@@ -11,3 +11,9 @@ class FakeLLMClientThrows:
 
     def derive(self, content: str) -> None:
         raise RuntimeError("Simulated LLM failure")
+
+    def review(self, target_content: str, asserting_content: str, edge_payload: dict) -> None:
+        raise NotImplementedError(
+            "FakeLLMClientThrows is for derive-failure testing only; "
+            "review() should not be called in these tests."
+        )
