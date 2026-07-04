@@ -16,6 +16,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -751,7 +752,7 @@ def smoke_from_inbox(tmp: Path) -> None:
 
 def smoke_help(tmp: Path) -> None:
     print("\n[HELP] every command has --help")
-    for cmd in ["init", "status", "ingest", "list", "show", "derive", "search", "render"]:
+    for cmd in ["init", "status", "ingest", "list", "show", "derive", "search", "render", "review"]:
         p = _run([cmd, "--help"])
         _check(f"{cmd} --help exits 0", p.returncode == 0)
         _check(f"{cmd} --help mentions usage", "Usage:" in p.stdout, f"got: {p.stdout[:80]}")
@@ -790,6 +791,382 @@ def smoke_full_e2e(tmp: Path) -> None:
     _check("search finds both derivations", len(res) == 2, f"got {len(res)}")
 
 
+
+def smoke_review(tmp: Path) -> None:
+    """End-to-end review workflow: contradicts edge → propose → accept/reject."""
+    print("\n[REVIEW] full review workflow — contradicts, propose, accept, verify")
+
+    # ── helpers ────────────────────────────────────────────────
+    def _make_fake_review(path: Path, affected_ids: list[str], conf: str = "high") -> str:
+        """Write a temp FakeLLMClient that returns given affected_node_ids.
+        Returns the MEMEX_LLM_MODULE value (module:Class string)."""
+        stem = path.stem
+        path.write_text(
+            "from tests.fake_llm_client import FakeLLMClient\n"
+            f"class {stem}(FakeLLMClient):\n"
+            "    def __init__(self):\n"
+            f"        super().__init__(review_affected_node_ids={affected_ids!r}, review_confidence={conf!r})\n"
+        )
+        return f"{stem}:{stem}"
+
+    def _create_contradiction(db: Path, deriv_id: str, l0_id: str) -> str:
+        """Insert a contradicts edge + event_queue + event_node_link rows.
+        Returns the edge_id."""
+        import datetime as _dt
+        con = sqlite3.connect(str(db))
+        con.execute("PRAGMA foreign_keys = ON")
+        now = _dt.datetime.now(_dt.timezone.utc).isoformat()
+        edge_id = "e-smoke-" + str(uuid.uuid4())[:8]
+        # Edge
+        con.execute(
+            "INSERT INTO edge (id, type, relation, from_node, to_node, written_by) "
+            "VALUES (?, 'association', 'contradicts', ?, ?, 'system')",
+            (edge_id, deriv_id, l0_id),
+        )
+        # Find descendants of target (l0_id)
+        desc_rows = con.execute(
+            """
+            WITH RECURSIVE descendants AS (
+                SELECT e.from_node AS id
+                FROM edge e
+                WHERE e.to_node = ?
+                  AND e.type = 'provenance'
+                  AND e.relation = 'derived_from'
+                UNION ALL
+                SELECT e.from_node
+                FROM edge e
+                JOIN descendants d ON e.to_node = d.id
+                WHERE e.type = 'provenance'
+                  AND e.relation = 'derived_from'
+            )
+            SELECT id FROM descendants
+            """,
+            (l0_id,),
+        ).fetchall()
+        descendants = [r[0] for r in desc_rows]
+        all_nodes = [l0_id] + descendants
+        # Event queue
+        cur = con.execute(
+            "INSERT INTO event_queue (event_type, edge_id, target_node_id, created_at, status) "
+            "VALUES ('contradicts_edge_needs_review', ?, ?, ?, 'pending')",
+            (edge_id, l0_id, now),
+        )
+        event_id = cur.lastrowid
+        # Event-node links
+        for node_id in all_nodes:
+            con.execute(
+                "INSERT INTO event_node_link (event_id, node_id, contested_at) VALUES (?, ?, ?)",
+                (event_id, node_id, now),
+            )
+            con.execute(
+                "UPDATE node SET is_contested = 1, contested_at = ? WHERE id = ? AND is_contested = 0",
+                (now, node_id),
+            )
+        con.commit()
+        con.close()
+        return edge_id
+
+    # ── Scenario 1: Full accept flow ───────────────────────────
+    print("  [SCENARIO 1] Full accept flow")
+    db1, vault1 = _fresh_store(tmp, "review1")
+
+    # Ingest L0
+    proc = _run(
+        ["ingest", "--db", str(db1), "--vault", str(vault1), "https://example.com/article"],
+        env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
+    )
+    l0 = _expect_json("sc1 ingest URL", proc)
+    l0_id = l0["id"]
+
+    # Derive child
+    proc = _run(
+        ["derive", "--db", str(db1), "--vault", str(vault1), l0_id],
+        env={"MEMEX_LLM_MODULE": FAKE_LLM},
+    )
+    deriv = _expect_json("sc1 derive child", proc)
+    deriv_id = deriv["id"]
+
+    # Create contradicts edge + event (direct SQL)
+    _create_contradiction(db1, deriv_id, l0_id)
+
+    # Verify event was created
+    con = sqlite3.connect(str(db1))
+    link_rows = con.execute(
+        "SELECT node_id FROM event_node_link enl "
+        "JOIN event_queue eq ON eq.id = enl.event_id "
+        "WHERE eq.edge_id LIKE 'e-smoke-%'"
+    ).fetchall()
+    _check("sc1 event_node_link has 2 rows (L0 + deriv)", len(link_rows) == 2, f"got {len(link_rows)}")
+    con.close()
+
+    # Create temp fake LLM client
+    fake_path1 = tmp / "ReviewFake1.py"
+    mod_str1 = _make_fake_review(fake_path1, [l0_id, deriv_id])
+    review_env1 = {
+        "MEMEX_LLM_MODULE": mod_str1,
+        "PYTHONPATH": str(tmp),
+    }
+
+    # Run memex review (batch)
+    proc = _run(
+        ["review", "--db", str(db1), "--vault", str(vault1)],
+        env=review_env1,
+    )
+    review_res = _expect_json("sc1 review batch", proc)
+    _check("sc1 review processed=1", review_res.get("processed") == 1, f"got {review_res}")
+    proposals = review_res.get("proposals", [])
+    _check("sc1 review has 1 proposal", len(proposals) == 1, f"got {len(proposals)}")
+    _check("sc1 proposal status=proposed", proposals[0].get("status") == "proposed", f"got {proposals[0]}")
+    sc1_proposal_id = proposals[0]["proposal_id"]
+
+    # review list
+    proc = _run(
+        ["review", "--db", str(db1), "--vault", str(vault1), "list"],
+    )
+    list_res = _expect_json("sc1 review list", proc)
+    _check("sc1 list contains pending proposal", any(
+        item.get("kind") == "pending_proposal" and item.get("id") == sc1_proposal_id
+        for item in (list_res if isinstance(list_res, list) else [])
+    ), f"got {list_res}")
+    # review accept
+    proc = _run(
+        ["review", "--db", str(db1), "--vault", str(vault1), "accept", str(sc1_proposal_id)],
+    )
+    accept_res = _expect_json("sc1 review accept", proc)
+    _check("sc1 accept status=accepted", accept_res.get("status") == "accepted", f"got {accept_res}")
+
+    # Verify via SQL
+    con = sqlite3.connect(str(db1))
+    con.row_factory = sqlite3.Row
+    l0_row = con.execute(
+        "SELECT trust_state, is_contested FROM node WHERE id = ?", (l0_id,)
+    ).fetchone()
+    deriv_row = con.execute(
+        "SELECT trust_state, is_contested FROM node WHERE id = ?", (deriv_id,)
+    ).fetchone()
+    con.close()
+    _check("sc1 L0 trust_state=stale", l0_row["trust_state"] == "stale", f"got {dict(l0_row)}")
+    _check("sc1 deriv trust_state=stale", deriv_row["trust_state"] == "stale", f"got {dict(deriv_row)}")
+    _check("sc1 L0 is_contested=0", l0_row["is_contested"] == 0, f"got {dict(l0_row)}")
+    _check("sc1 deriv is_contested=0", deriv_row["is_contested"] == 0, f"got {dict(deriv_row)}")
+
+    # ── Scenario 2: Multi-event coverage ───────────────────────
+    print("  [SCENARIO 2] Multi-event coverage")
+    db2, vault2 = _fresh_store(tmp, "review2")
+
+    # Ingest L0
+    proc = _run(
+        ["ingest", "--db", str(db2), "--vault", str(vault2), "https://example.com/article"],
+        env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
+    )
+    l0_2 = _expect_json("sc2 ingest URL", proc)
+    l0_2_id = l0_2["id"]
+
+    # Derive child
+    proc = _run(
+        ["derive", "--db", str(db2), "--vault", str(vault2), l0_2_id],
+        env={"MEMEX_LLM_MODULE": FAKE_LLM},
+    )
+    deriv_2 = _expect_json("sc2 derive child", proc)
+    deriv_2_id = deriv_2["id"]
+
+    # Create two contradicts edges
+    _create_contradiction(db2, deriv_2_id, l0_2_id)
+    _create_contradiction(db2, deriv_2_id, l0_2_id)
+
+    # Create fake LLM for scenario 2
+    fake_path2 = tmp / "ReviewFake2.py"
+    mod_str2 = _make_fake_review(fake_path2, [l0_2_id, deriv_2_id])
+    review_env2 = {
+        "MEMEX_LLM_MODULE": mod_str2,
+        "PYTHONPATH": str(tmp),
+    }
+
+    # Run review batch (should generate 2 proposals)
+    proc = _run(
+        ["review", "--db", str(db2), "--vault", str(vault2)],
+        env=review_env2,
+    )
+    review_res2 = _expect_json("sc2 review batch", proc)
+    _check("sc2 review processed=2", review_res2.get("processed") == 2, f"got {review_res2}")
+
+    # Accept first proposal
+    props2 = review_res2["proposals"]
+    first_pid = props2[0]["proposal_id"]
+    proc = _run(
+        ["review", "--db", str(db2), "--vault", str(vault2), "accept", str(first_pid)],
+    )
+    accept_2a = _expect_json("sc2 accept first", proc)
+    _check("sc2 accept first ok", accept_2a.get("status") == "accepted", f"got {accept_2a}")
+
+    # Verify L0 still contested (second event still open)
+    con = sqlite3.connect(str(db2))
+    l0_2_row = con.execute(
+        "SELECT is_contested FROM node WHERE id = ?", (l0_2_id,)
+    ).fetchone()
+    con.close()
+    _check("sc2 L0 still contested after 1st accept", l0_2_row[0] == 1, f"is_contested={l0_2_row[0]}")
+
+    # Accept second proposal
+    second_pid = props2[1]["proposal_id"]
+    proc = _run(
+        ["review", "--db", str(db2), "--vault", str(vault2), "accept", str(second_pid)],
+    )
+    accept_2b = _expect_json("sc2 accept second", proc)
+    _check("sc2 accept second ok", accept_2b.get("status") == "accepted", f"got {accept_2b}")
+
+    # Verify L0 no longer contested
+    con = sqlite3.connect(str(db2))
+    l0_2_row = con.execute(
+        "SELECT is_contested FROM node WHERE id = ?", (l0_2_id,)
+    ).fetchone()
+    con.close()
+    _check("sc2 L0 not contested after 2nd accept", l0_2_row[0] == 0, f"is_contested={l0_2_row[0]}")
+
+    # ── Scenario 3: Reject preserves trust_state ───────────────
+    print("  [SCENARIO 3] Reject preserves trust_state")
+    db3, vault3 = _fresh_store(tmp, "review3")
+
+    # Ingest L0
+    proc = _run(
+        ["ingest", "--db", str(db3), "--vault", str(vault3), "https://example.com/article"],
+        env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
+    )
+    l0_3 = _expect_json("sc3 ingest URL", proc)
+    l0_3_id = l0_3["id"]
+
+    # Derive child
+    proc = _run(
+        ["derive", "--db", str(db3), "--vault", str(vault3), l0_3_id],
+        env={"MEMEX_LLM_MODULE": FAKE_LLM},
+    )
+    deriv_3 = _expect_json("sc3 derive child", proc)
+    deriv_3_id = deriv_3["id"]
+
+    # Mark L0 as human-approved
+    con = sqlite3.connect(str(db3))
+    con.execute("UPDATE node SET trust_state = 'human-approved' WHERE id = ?", (l0_3_id,))
+    con.commit()
+    con.close()
+
+    # --- Part A: Accept overrides human-approved ---
+    _create_contradiction(db3, deriv_3_id, l0_3_id)
+
+    fake_path3a = tmp / "ReviewFake3a.py"
+    mod_str3a = _make_fake_review(fake_path3a, [l0_3_id, deriv_3_id])
+    review_env3a = {
+        "MEMEX_LLM_MODULE": mod_str3a,
+        "PYTHONPATH": str(tmp),
+    }
+
+    proc = _run(
+        ["review", "--db", str(db3), "--vault", str(vault3)],
+        env=review_env3a,
+    )
+    review_res3a = _expect_json("sc3a review batch", proc)
+    proposal_3a_id = review_res3a["proposals"][0]["proposal_id"]
+
+    proc = _run(
+        ["review", "--db", str(db3), "--vault", str(vault3), "accept", str(proposal_3a_id)],
+    )
+    accept_3a = _expect_json("sc3a review accept", proc)
+    _check("sc3a accept status=accepted", accept_3a.get("status") == "accepted", f"got {accept_3a}")
+
+    con = sqlite3.connect(str(db3))
+    l0_3_row = con.execute(
+        "SELECT trust_state FROM node WHERE id = ?", (l0_3_id,)
+    ).fetchone()
+    con.close()
+    _check("sc3a L0 trust_state=stale after accept (override human-approved)",
+           l0_3_row[0] == "stale", f"got {l0_3_row[0]}")
+
+    # --- Part B: Reject preserves trust_state ---
+    _create_contradiction(db3, deriv_3_id, l0_3_id)
+
+    fake_path3b = tmp / "ReviewFake3b.py"
+    mod_str3b = _make_fake_review(fake_path3b, [l0_3_id, deriv_3_id])
+    review_env3b = {
+        "MEMEX_LLM_MODULE": mod_str3b,
+        "PYTHONPATH": str(tmp),
+    }
+
+    proc = _run(
+        ["review", "--db", str(db3), "--vault", str(vault3)],
+        env=review_env3b,
+    )
+    review_res3b = _expect_json("sc3b review batch", proc)
+    _check("sc3b review processed=1", review_res3b.get("processed") == 1, f"got {review_res3b}")
+    proposal_3b_id = review_res3b["proposals"][0]["proposal_id"]
+
+    proc = _run(
+        ["review", "--db", str(db3), "--vault", str(vault3), "reject", str(proposal_3b_id)],
+    )
+    reject_3b = _expect_json("sc3b review reject", proc)
+    _check("sc3b reject status=rejected", reject_3b.get("status") == "rejected", f"got {reject_3b}")
+
+    con = sqlite3.connect(str(db3))
+    l0_3_row_b = con.execute(
+        "SELECT trust_state FROM node WHERE id = ?", (l0_3_id,)
+    ).fetchone()
+    con.close()
+    _check("sc3b L0 trust_state unchanged after reject",
+           l0_3_row_b[0] == "stale", f"got {l0_3_row_b[0]}")
+    # ── Scenario 4: Dismiss preserves trust_state ──────────────
+    print("  [SCENARIO 4] Dismiss preserves trust_state")
+    db4, vault4 = _fresh_store(tmp, "review4")
+
+    # Ingest L0
+    proc = _run(
+        ["ingest", "--db", str(db4), "--vault", str(vault4), "https://example.com/article"],
+        env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
+    )
+    l0_4 = _expect_json("sc4 ingest URL", proc)
+    l0_4_id = l0_4["id"]
+
+    # Derive child
+    proc = _run(
+        ["derive", "--db", str(db4), "--vault", str(vault4), l0_4_id],
+        env={"MEMEX_LLM_MODULE": FAKE_LLM},
+    )
+    deriv_4 = _expect_json("sc4 derive child", proc)
+    deriv_4_id = deriv_4["id"]
+
+    # Create contradicts edge
+    _create_contradiction(db4, deriv_4_id, l0_4_id)
+
+    # Create temp fake LLM
+    fake_path4 = tmp / "ReviewFake4.py"
+    mod_str4 = _make_fake_review(fake_path4, [l0_4_id, deriv_4_id])
+    review_env4 = {
+        "MEMEX_LLM_MODULE": mod_str4,
+        "PYTHONPATH": str(tmp),
+    }
+
+    # Run review batch
+    proc = _run(
+        ["review", "--db", str(db4), "--vault", str(vault4)],
+        env=review_env4,
+    )
+    review_res4 = _expect_json("sc4 review batch", proc)
+    _check("sc4 review processed=1", review_res4.get("processed") == 1, f"got {review_res4}")
+    proposal_4_id = review_res4["proposals"][0]["proposal_id"]
+
+    # Dismiss
+    proc = _run(
+        ["review", "--db", str(db4), "--vault", str(vault4), "dismiss", str(proposal_4_id)],
+    )
+    dismiss_4 = _expect_json("sc4 review dismiss", proc)
+    _check("sc4 dismiss status=dismissed", dismiss_4.get("status") == "dismissed", f"got {dismiss_4}")
+
+    # Verify trust_state unchanged (L0 is still draft)
+    con = sqlite3.connect(str(db4))
+    l0_4_row = con.execute(
+        "SELECT trust_state, is_contested FROM node WHERE id = ?", (l0_4_id,)
+    ).fetchone()
+    con.close()
+    _check("sc4 L0 trust_state=draft after dismiss", l0_4_row[0] == "draft", f"got {l0_4_row[0]}")
+    _check("sc4 L0 is_contested=0 after dismiss", l0_4_row[1] == 0, f"got {l0_4_row[1]}")
+
 # ── runner ──────────────────────────────────────────────────────
 
 
@@ -816,6 +1193,7 @@ def main() -> int:
         smoke_capture(tmp)
         smoke_help(tmp)
         smoke_full_e2e(tmp)
+        smoke_review(tmp)
 
     print(f"\n{'='*60}")
     print(f"PASSED: {_passes}    FAILED: {len(_failures)}")

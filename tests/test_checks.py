@@ -39,7 +39,9 @@ def _setup_db(tmp_path: Path) -> tuple[sqlite3.Connection, str, Path]:
             trust_state  TEXT NOT NULL CHECK (trust_state IN ('draft','auto-verified','human-approved','stale')),
             depth        INTEGER NOT NULL,
             content_path TEXT NOT NULL,
-            created_at   TEXT NOT NULL
+            created_at   TEXT NOT NULL,
+            is_contested INTEGER NOT NULL DEFAULT 0,
+            contested_at TEXT
         );
 
         CREATE TABLE IF NOT EXISTS source (
@@ -56,8 +58,44 @@ def _setup_db(tmp_path: Path) -> tuple[sqlite3.Connection, str, Path]:
             type      TEXT NOT NULL CHECK (type IN ('provenance','association')),
             relation  TEXT NOT NULL CHECK (relation IN ('derived_from','related','contradicts','refines')),
             from_node TEXT NOT NULL REFERENCES node(id),
-            to_node   TEXT NOT NULL REFERENCES node(id)
+            to_node   TEXT NOT NULL REFERENCES node(id),
+            written_by TEXT NOT NULL DEFAULT 'human'
         );
+
+        CREATE TABLE IF NOT EXISTS event_queue (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type     TEXT NOT NULL CHECK (event_type IN ('contradicts_edge_needs_review')),
+            edge_id        TEXT NOT NULL REFERENCES edge(id),
+            target_node_id TEXT NOT NULL REFERENCES node(id),
+            created_at     TEXT NOT NULL,
+            status         TEXT NOT NULL CHECK (status IN ('pending','closed')) DEFAULT 'pending',
+            closed_at      TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_event_queue_status ON event_queue(status);
+        CREATE INDEX IF NOT EXISTS idx_event_queue_target ON event_queue(target_node_id);
+
+        CREATE TABLE IF NOT EXISTS event_node_link (
+            event_id     INTEGER NOT NULL REFERENCES event_queue(id),
+            node_id      TEXT NOT NULL REFERENCES node(id),
+            contested_at TEXT NOT NULL,
+            PRIMARY KEY (event_id, node_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_event_node_link_node ON event_node_link(node_id);
+        CREATE INDEX IF NOT EXISTS idx_event_node_link_event ON event_node_link(event_id);
+
+        CREATE TABLE IF NOT EXISTS review_proposal (
+            id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id              INTEGER NOT NULL UNIQUE REFERENCES event_queue(id),
+            affected_node_ids     TEXT NOT NULL,
+            damage_boundary_node_id TEXT REFERENCES node(id),
+            rationale_md          TEXT NOT NULL,
+            confidence            TEXT NOT NULL CHECK (confidence IN ('high','medium','low')),
+            status                TEXT NOT NULL CHECK (status IN ('pending','accepted','rejected','dismissed')) DEFAULT 'pending',
+            human_note            TEXT,
+            created_at            TEXT NOT NULL,
+            resolved_at           TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_review_proposal_status ON review_proposal(status);
         """
     )
 
@@ -67,7 +105,7 @@ def _setup_db(tmp_path: Path) -> tuple[sqlite3.Connection, str, Path]:
 
     # Insert L0 node (raw_source)
     con.execute(
-        "INSERT INTO node VALUES (?, 'raw_source', NULL, 'draft', 0, '', '2024-01-01')",
+        "INSERT INTO node (id, kind, tier, trust_state, depth, content_path, created_at) VALUES (?, 'raw_source', NULL, 'draft', 0, '', '2024-01-01')",
         (l0_id,),
     )
 
@@ -77,7 +115,7 @@ def _setup_db(tmp_path: Path) -> tuple[sqlite3.Connection, str, Path]:
 
     # Insert derivation node
     con.execute(
-        "INSERT INTO node VALUES (?, 'summary', 'notes', 'draft', 1, ?, '2024-01-01')",
+        "INSERT INTO node (id, kind, tier, trust_state, depth, content_path, created_at) VALUES (?, 'summary', 'notes', 'draft', 1, ?, '2024-01-01')",
         (deriv_id, str(content_path)),
     )
 
