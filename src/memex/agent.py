@@ -182,6 +182,107 @@ class AnthropicAgent(Agent):
         )
 
 
+class PiAgent(Agent):
+    """Agent powered by the ``pi`` CLI coding assistant.
+
+    Requires ``pi`` to be installed and available on PATH.
+    Supports any provider/model configured in ``pi`` (e.g. Claude, GPT, Gemini).
+    Uses ``pi -p --mode json --no-session --no-tools`` for non-interactive calls.
+    """
+
+    def _call_pi(self, prompt: str) -> str:
+        import json as _json
+        import subprocess as _sp
+
+        try:
+            proc = _sp.run(
+                ["pi", "-p", "--mode", "json", "--no-session", "--no-tools"],
+                input=prompt,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        except FileNotFoundError:
+            raise RuntimeError(
+                "PiAgent requires the 'pi' CLI. Install it from https://pi.dev"
+            ) from None
+        except _sp.TimeoutExpired:
+            raise RuntimeError("PiAgent call timed out after 120s") from None
+
+        if proc.returncode != 0:
+            raise RuntimeError(f"PiAgent call failed: {proc.stderr.strip()}")
+
+        # Parse JSON lines output — extract text from the last message_end
+        last_text = ""
+        for line in proc.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = _json.loads(line)
+            except _json.JSONDecodeError:
+                continue
+            if event.get("type") == "message_end":
+                msg = event.get("message", {})
+                content = msg.get("content", [])
+                for part in content:
+                    if part.get("type") == "text":
+                        last_text = part.get("text", "")
+        return last_text
+
+    def derive(self, content: str) -> DerivationResult:
+        prompt = (
+            "You are a knowledge synthesis assistant. Given source material, produce a concise "
+            "summary in markdown. For any statement you infer beyond what the source directly says, "
+            "prefix it with '> Synthesis:'. Keep sourced facts distinguishable from interpretation.\n\n"
+            f"Source material:\n\n{content}"
+        )
+        prose = self._call_pi(prompt)
+        # Extract > Synthesis: statements
+        import re as _re
+        statements = _re.findall(r"> Synthesis:\s*(.+)", prose)
+        return DerivationResult(prose=prose, synthesis_statements=statements)
+
+    def review(self, target_content: str, asserting_content: str, edge_payload: dict) -> ReviewProposal:
+        prompt = (
+            "You are a research analysis assistant. Given the target node's content "
+            "(the node being contested) and the asserting node's content "
+            "(the node claiming a contradiction), identify which descendants "
+            "materially depend on the contested claim. Distinguish between nodes "
+            "that rely on the contested claim and nodes that merely transitively "
+            "include it but would be unaffected if it were removed.\n\n"
+            "Return ONLY a JSON object with the following fields:\n"
+            '  "affected_node_ids": list of strings — node ids whose content materially depends on the contested claim\n'
+            '  "damage_boundary_node_id": string or null — the deepest affected node id\n'
+            '  "rationale_md": string — brief markdown rationale\n'
+            '  "confidence": "high" | "medium" | "low"\n\n'
+            f"Target content:\n{target_content}\n\n"
+            f"Asserting content:\n{asserting_content}\n\n"
+            f"Edge payload: {edge_payload}"
+        )
+        raw = self._call_pi(prompt)
+        import json as _json
+        try:
+            data = _json.loads(raw)
+            affected = data.get("affected_node_ids", [])
+            boundary = data.get("damage_boundary_node_id")
+            rationale = data.get("rationale_md", raw)
+            confidence = data.get("confidence", "low")
+        except (_json.JSONDecodeError, AttributeError, KeyError):
+            affected = []
+            boundary = None
+            rationale = raw
+            confidence = "low"
+        if confidence not in ("high", "medium", "low"):
+            confidence = "low"
+        return ReviewProposal(
+            affected_node_ids=affected,
+            damage_boundary_node_id=boundary,
+            rationale_md=rationale,
+            confidence=confidence,
+        )
+
+
 def _verify_agent_methods(client: object, module_path: str) -> None:
     """Verify the loaded agent instance has both derive and review callables.
 
