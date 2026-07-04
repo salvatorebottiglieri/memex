@@ -26,6 +26,12 @@ memex exposes a JSON-only CLI (one command per operation, all output is structur
 | `memex search --db <path> --vault <path> <query>` | Keyword search over derivation content (read-only) |
 | `memex render --db <path> --vault <path>` | Project SQLite graph → YAML frontmatter + wikilinks on markdown files (slice 1: metadata + tags + aliases) |
 | `memex capture --db <path> --vault <path>` | Poll Telegram Saved Messages and persist new captures to the inbox (env: `MEMEX_TELEGRAM_SOURCE`) |
+| `memex review --db <path> --vault <path>` | Batch-generate review proposals for all pending contestation events |
+| `memex review list --db <path> --vault <path>` | Show the review queue (pending events + proposals) |
+| `memex review accept --db <path> --vault <path> <proposal-id>` | Accept a review proposal: affected nodes → stale |
+| `memex review reject --db <path> --vault <path> <proposal-id>` | Reject a review proposal: close event, no trust_state change |
+| `memex review dismiss --db <path> --vault <path> <proposal-id>` | Dismiss a review proposal: valid but harmless, no trust_state change |
+| `memex contradict --db <path> --vault <path> <target-id> --asserted-by <node-id>` | Write a contradicts edge targeting a node, triggering contested propagation |
 
 ## Design
 

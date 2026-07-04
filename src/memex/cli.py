@@ -698,5 +698,45 @@ def review_dismiss(ctx: click.Context, proposal_id: int, note: str | None) -> No
     click.echo(json.dumps(result))
 
 
+
+
+@cli.command()
+@_db_options
+@click.argument("target_id")
+@click.option(
+    "--asserted-by",
+    required=True,
+    help="Node id that asserts the contradiction.",
+)
+def contradict(db_path: Path, vault_path: Path, target_id: str, asserted_by: str) -> None:
+    """Write a ``contradicts`` edge targeting a node.
+
+    The edge is written with ``written_by='human'``. The propagation
+    (event_queue + contested on target + descendants) happens atomically
+    inside ``create_edge``.
+
+    Output JSON: ``{edge_id, target_node_id, asserted_by, written_by}``.
+    """
+    import uuid
+
+    from memex.store import Store
+
+    _require_db(db_path)
+    edge_id = str(uuid.uuid4())
+    with Store.open(db_path) as store:
+        store.create_edge(
+            edge_id=edge_id,
+            type="association",
+            relation="contradicts",
+            from_node=asserted_by,
+            to_node=target_id,
+            written_by="human",
+        )
+    click.echo(json.dumps({
+        "edge_id": edge_id,
+        "target_node_id": target_id,
+        "asserted_by": asserted_by,
+        "written_by": "human",
+    }))
 if __name__ == "__main__":
     cli()

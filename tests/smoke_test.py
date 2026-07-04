@@ -752,7 +752,7 @@ def smoke_from_inbox(tmp: Path) -> None:
 
 def smoke_help(tmp: Path) -> None:
     print("\n[HELP] every command has --help")
-    for cmd in ["init", "status", "ingest", "list", "show", "derive", "search", "render", "review"]:
+    for cmd in ["init", "status", "ingest", "list", "show", "derive", "search", "render", "review", "contradict"]:
         p = _run([cmd, "--help"])
         _check(f"{cmd} --help exits 0", p.returncode == 0)
         _check(f"{cmd} --help mentions usage", "Usage:" in p.stdout, f"got: {p.stdout[:80]}")
@@ -886,15 +886,22 @@ def smoke_review(tmp: Path) -> None:
     deriv = _expect_json("sc1 derive child", proc)
     deriv_id = deriv["id"]
 
-    # Create contradicts edge + event (direct SQL)
-    _create_contradiction(db1, deriv_id, l0_id)
+    # Create contradicts edge via CLI command (end-to-end test)
+    proc = _run(
+        ["contradict", "--db", str(db1), "--vault", str(vault1), l0_id, "--asserted-by", deriv_id],
+    )
+    contra = _expect_json("sc1 contradict", proc)
+    _check("sc1 contradict returns edge_id", "edge_id" in contra, f"got {contra}")
+    _check("sc1 contradict target_node_id matches", contra.get("target_node_id") == l0_id)
+    _check("sc1 contradict written_by=human", contra.get("written_by") == "human")
+    contra_edge_id = contra["edge_id"]
 
-    # Verify event was created
+    # Verify event was created (propagation happened)
     con = sqlite3.connect(str(db1))
     link_rows = con.execute(
         "SELECT node_id FROM event_node_link enl "
         "JOIN event_queue eq ON eq.id = enl.event_id "
-        "WHERE eq.edge_id LIKE 'e-smoke-%'"
+        "WHERE eq.edge_id = ?", (contra_edge_id,)
     ).fetchall()
     _check("sc1 event_node_link has 2 rows (L0 + deriv)", len(link_rows) == 2, f"got {len(link_rows)}")
     con.close()
