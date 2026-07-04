@@ -1,6 +1,6 @@
-"""Tests for LLMClient — ReviewProposal, review() method, and MEMEX_LLM_MODULE loading.
+"""Tests for Agent — ReviewProposal, review() method, and MEMEX_AGENT loading.
 
-Direct import tests, no subprocess, no DB. Uses FakeLLMClient.
+Direct import tests, no subprocess, no DB. Uses FakeAgent.
 """
 from __future__ import annotations
 
@@ -8,13 +8,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from memex.llm_client import (
-    LLMClient,
+from memex.agent import (
+    Agent,
     ReviewProposal,
-    load_llm_client,
+    load_agent,
 )
 
-FAKE_LLM = "tests.fake_llm_client:FakeLLMClient"
+FAKE_AGENT = "tests.fake_llm_client:FakeAgent"
 
 
 class TestReviewProposal:
@@ -44,28 +44,28 @@ class TestReviewProposal:
         assert rp.damage_boundary_node_id is None
 
 
-class TestLLMClientBase:
-    """LLMClient base class contract."""
+class TestAgentBase:
+    """Agent base class contract."""
 
     def test_review_raises_not_implemented(self):
-        """LLMClient.review raises NotImplementedError by default."""
-        client = LLMClient()
+        """Agent.review raises NotImplementedError by default."""
+        client = Agent()
         with pytest.raises(NotImplementedError):
             client.review("target", "asserting", {})
 
     def test_derive_still_raises_not_implemented(self):
-        """LLMClient.derive still raises NotImplementedError (no regression)."""
-        client = LLMClient()
+        """Agent.derive still raises NotImplementedError (no regression)."""
+        client = Agent()
         with pytest.raises(NotImplementedError):
             client.derive("content")
 
 
-class TestFakeLLMClient:
-    """FakeLLMClient.review returns deterministic ReviewProposal."""
+class TestFakeAgent:
+    """FakeAgent.review returns deterministic ReviewProposal."""
 
     def test_review_with_custom_args(self):
         """Constructor args shape the returned ReviewProposal."""
-        client = load_llm_client(FAKE_LLM)
+        client = load_agent(FAKE_AGENT)
         client.review_affected_node_ids = ["n3", "n4", "n5"]
         client.review_confidence = "medium"
 
@@ -80,7 +80,7 @@ class TestFakeLLMClient:
 
     def test_review_with_default_args(self):
         """Default args produce a predictable ReviewProposal."""
-        client = load_llm_client(FAKE_LLM)
+        client = load_agent(FAKE_AGENT)
 
         rp = client.review("target", "asserting", {})
 
@@ -92,7 +92,7 @@ class TestFakeLLMClient:
 
     def test_review_empty_affected_ids(self):
         """When affected_node_ids is empty, damage_boundary_node_id is None."""
-        client = load_llm_client(FAKE_LLM)
+        client = load_agent(FAKE_AGENT)
         client.review_affected_node_ids = []
 
         rp = client.review("target", "asserting", {})
@@ -103,24 +103,24 @@ class TestFakeLLMClient:
 
     def test_review_returns_review_proposal(self):
         """Verify that review returns the correct type."""
-        client = load_llm_client(FAKE_LLM)
+        client = load_agent(FAKE_AGENT)
         rp = client.review("target", "asserting", {})
         assert isinstance(rp, ReviewProposal)
 
     def test_derive_still_works(self):
-        """FakeLLMClient.derive is unaffected by the new review method."""
-        client = load_llm_client(FAKE_LLM)
+        """FakeAgent.derive is unaffected by the new review method."""
+        client = load_agent(FAKE_AGENT)
         dr = client.derive("Some content here.")
         assert dr.prose is not None
         assert len(dr.prose) > 0
 
 
-class TestLoadLLM:
-    """MEMEX_LLM_MODULE loading works for both derive and review."""
+class TestLoadAgent:
+    """MEMEX_AGENT loading works for both derive and review."""
 
     def test_fake_llm_derive_and_review(self):
-        """FakeLLMClient loaded via MEMEX_LLM_MODULE satisfies both methods."""
-        client = load_llm_client(FAKE_LLM)
+        """FakeAgent loaded via MEMEX_AGENT satisfies both methods."""
+        client = load_agent(FAKE_AGENT)
         # derive
         dr = client.derive("content")
         assert dr.prose is not None
@@ -130,16 +130,16 @@ class TestLoadLLM:
         assert isinstance(rp, ReviewProposal)
         assert rp.confidence == "high"
 
-    def test_default_llm_derive_and_review(self):
-        """Default (no module_path) loads AnthropicLLMClient with both methods."""
-        client = load_llm_client()
+    def test_default_agent_derive_and_review(self):
+        """Default (no module_path) loads DemoAgent with both methods."""
+        client = load_agent()
         # Both methods should exist (review raises NotImplementedError only on base)
         assert hasattr(client, "derive")
         assert hasattr(client, "review")
 
 
-class TestAnthropicLLMClient:
-    """AnthropicLLMClient.review — method signature and JSON parsing.
+class TestAnthropicAgent:
+    """AnthropicAgent.review — method signature and JSON parsing.
 
     Injects a fake `anthropic` module into sys.modules to avoid installing the real SDK.
     """
@@ -162,18 +162,18 @@ class TestAnthropicLLMClient:
         return fake_module
 
     def test_review_exists(self):
-        """AnthropicLLMClient has a review method."""
-        from memex.llm_client import AnthropicLLMClient  # noqa: PLC0415
+        """AnthropicAgent has a review method."""
+        from memex.agent import AnthropicAgent  # noqa: PLC0415
 
-        client = AnthropicLLMClient()
+        client = AnthropicAgent()
         assert hasattr(client, "review")
 
     def test_review_returns_review_proposal(self):
-        """AnthropicLLMClient.review returns a ReviewProposal from valid JSON."""
+        """AnthropicAgent.review returns a ReviewProposal from valid JSON."""
         import json  # noqa: PLC0415
         import sys  # noqa: PLC0415
 
-        from memex.llm_client import AnthropicLLMClient  # noqa: PLC0415
+        from memex.agent import AnthropicAgent  # noqa: PLC0415
 
         fake_json = json.dumps({
             "affected_node_ids": ["n1", "n2"],
@@ -187,7 +187,7 @@ class TestAnthropicLLMClient:
         saved = sys.modules.get("anthropic")
         sys.modules["anthropic"] = fake_module
         try:
-            client = AnthropicLLMClient()
+            client = AnthropicAgent()
             rp = client.review("target content", "asserting content", {"claim": "x"})
         finally:
             if saved is None:
@@ -205,14 +205,14 @@ class TestAnthropicLLMClient:
         """Malformed JSON degrades to safe defaults (no exception)."""
         import sys  # noqa: PLC0415
 
-        from memex.llm_client import AnthropicLLMClient  # noqa: PLC0415
+        from memex.agent import AnthropicAgent  # noqa: PLC0415
 
         fake_module = self._make_mock_anthropic("{Not valid JSON]")
 
         saved = sys.modules.get("anthropic")
         sys.modules["anthropic"] = fake_module
         try:
-            client = AnthropicLLMClient()
+            client = AnthropicAgent()
             rp = client.review("target", "asserting", {})
         finally:
             if saved is None:
@@ -231,7 +231,7 @@ class TestAnthropicLLMClient:
         import json  # noqa: PLC0415
         import sys  # noqa: PLC0415
 
-        from memex.llm_client import AnthropicLLMClient  # noqa: PLC0415
+        from memex.agent import AnthropicAgent  # noqa: PLC0415
 
         # Missing damage_boundary_node_id and confidence
         partial = json.dumps({
@@ -244,7 +244,7 @@ class TestAnthropicLLMClient:
         saved = sys.modules.get("anthropic")
         sys.modules["anthropic"] = fake_module
         try:
-            client = AnthropicLLMClient()
+            client = AnthropicAgent()
             rp = client.review("target", "asserting", {})
         finally:
             if saved is None:
@@ -258,9 +258,6 @@ class TestAnthropicLLMClient:
         assert rp.damage_boundary_node_id is None
         assert rp.confidence == "low"
         assert "Partial response." in rp.rationale_md
-
-
-
 
 class _OnlyDerive:
     """Minimal class with only derive (for negative testing)."""
@@ -276,29 +273,29 @@ class _OnlyReview:
         return None
 
 
-class TestLoadLLMValidation:
-    """Load-time method validation catches incomplete LLM client classes."""
+class TestLoadAgentValidation:
+    """Load-time method validation catches incomplete agent classes."""
 
     def test_missing_review_raises_importerror(self):
         """A class with only derive (no review) raises ImportError at load."""
-        from memex.llm_client import _verify_llm_client_methods
+        from memex.agent import _verify_agent_methods
 
         with pytest.raises(ImportError, match="review"):
-            _verify_llm_client_methods(_OnlyDerive(), "test:_OnlyDerive")
+            _verify_agent_methods(_OnlyDerive(), "test:_OnlyDerive")
 
     def test_missing_derive_raises_importerror(self):
         """A class with only review (no derive) raises ImportError at load."""
-        from memex.llm_client import _verify_llm_client_methods
+        from memex.agent import _verify_agent_methods
 
         with pytest.raises(ImportError, match="derive"):
-            _verify_llm_client_methods(_OnlyReview(), "test:_OnlyReview")
+            _verify_agent_methods(_OnlyReview(), "test:_OnlyReview")
 
     def test_both_methods_present_passes(self):
         """A class with both derive and review passes validation."""
-        from memex.llm_client import _verify_llm_client_methods
+        from memex.agent import _verify_agent_methods
 
-        client = load_llm_client("tests.fake_llm_client:FakeLLMClient")
-        _verify_llm_client_methods(client, "tests.fake_llm_client:FakeLLMClient")
+        client = load_agent("tests.fake_llm_client:FakeAgent")
+        _verify_agent_methods(client, "tests.fake_llm_client:FakeAgent")
         assert hasattr(client, "derive")
         assert hasattr(client, "review")
         assert callable(client.derive)

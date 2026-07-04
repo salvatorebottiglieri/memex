@@ -292,7 +292,7 @@ def derive(db_path: Path, vault_path: Path, node_id: str | None = None,
     (kind=summary, tier=notes, trust_state=draft, depth=1), records a derived_from
     provenance edge, and runs deterministic checks to transition draft → auto-verified.
     """
-    from memex.llm_client import load_llm_client
+    from memex.agent import load_agent
     from memex.store import Store
 
     _require_db(db_path)
@@ -308,10 +308,10 @@ def derive(db_path: Path, vault_path: Path, node_id: str | None = None,
 def _derive_single(db_path: Path, vault_path: Path, node_id: str) -> None:
     """Derive a single L0 node (the original behavior)."""
     from memex.fetcher import load_fetcher
-    from memex.llm_client import load_llm_client
+    from memex.agent import load_agent
     from memex.store import Store
 
-    llm = load_llm_client(os.environ.get("MEMEX_LLM_MODULE"))
+    agent = load_agent(os.environ.get("MEMEX_AGENT") or os.environ.get("MEMEX_LLM_MODULE"))
 
     with Store.open(db_path) as store:
         # --- Load the L0 node ---
@@ -338,22 +338,22 @@ def _derive_single(db_path: Path, vault_path: Path, node_id: str) -> None:
             }))
             return
 
-        result = _do_derive(store, vault_path, node_id, l0_content, llm)
+        result = _do_derive(store, vault_path, node_id, l0_content, agent)
 
     click.echo(json.dumps(result))
 
 
-def _do_derive(store, vault_path, l0_id, l0_content, llm, use_retry=False):
-    """Run LLM derivation, write markdown, create node+edge, run checks.
+def _do_derive(store, vault_path, l0_id, l0_content, agent, use_retry=False):
+    """Run agent derivation, write markdown, create node+edge, run checks.
 
     Returns a result dict with status="derived" on success.
-    Raises on LLM failure (caller catches for batch mode).
+    Raises on agent failure (caller catches for batch mode).
     """
     from memex.checks import run_checks
-    from memex.llm_client import call_with_retry
+    from memex.agent import call_with_retry
 
-    deriv_fn = lambda: llm.derive(l0_content)
-    deriv = call_with_retry(deriv_fn) if use_retry else llm.derive(l0_content)
+    deriv_fn = lambda: agent.derive(l0_content)
+    deriv = call_with_retry(deriv_fn) if use_retry else agent.derive(l0_content)
 
     deriv_id = str(uuid.uuid4())
     vault_path.mkdir(parents=True, exist_ok=True)
@@ -397,14 +397,14 @@ def _do_derive(store, vault_path, l0_id, l0_content, llm, use_retry=False):
 
 def _derive_all(db_path: Path, vault_path: Path, limit: int) -> None:
     """Derive all un-derived L0 nodes, up to limit."""
-    from memex.llm_client import load_llm_client
+    from memex.agent import load_agent
     from memex.store import Store
 
     if limit <= 0:
         click.echo(json.dumps([]))
         return
 
-    llm = load_llm_client(os.environ.get("MEMEX_LLM_MODULE"))
+    agent = load_agent(os.environ.get("MEMEX_AGENT") or os.environ.get("MEMEX_LLM_MODULE"))
 
     with Store.open(db_path) as store:
         # Find un-derived L0s
@@ -451,7 +451,7 @@ def _derive_all(db_path: Path, vault_path: Path, limit: int) -> None:
 
             try:
                 l0_content = Path(l0["content_path"]).read_text(encoding="utf-8")
-                result = _do_derive(store, vault_path, node["id"], l0_content, llm, use_retry=True)
+                result = _do_derive(store, vault_path, node["id"], l0_content, agent, use_retry=True)
                 results.append(result)
             except Exception as e:
                 results.append({
@@ -615,11 +615,11 @@ def review(ctx: click.Context, db_path: Path, vault_path: Path) -> None:
 
 def _cmd_review_batch(db_path: Path, vault_path: Path) -> None:
     """Batch-generate proposals for all pending events without proposals."""
-    from memex.llm_client import load_llm_client, call_with_retry
+    from memex.agent import load_agent, call_with_retry
     from memex.store import Store
 
     _require_db(db_path)
-    llm = load_llm_client(os.environ.get("MEMEX_LLM_MODULE"))
+    agent = load_agent(os.environ.get("MEMEX_AGENT") or os.environ.get("MEMEX_LLM_MODULE"))
 
     with Store.open(db_path) as store:
         events = store.get_pending_events_without_proposal()
@@ -662,7 +662,7 @@ def _cmd_review_batch(db_path: Path, vault_path: Path) -> None:
                 asserting_content = Path(asserting_node["content_path"]).read_text(encoding="utf-8")
                 edge_payload = {"edge_id": event["edge_id"]}
 
-                review_fn = lambda: llm.review(target_content, asserting_content, edge_payload)
+                review_fn = lambda: agent.review(target_content, asserting_content, edge_payload)
                 proposal = call_with_retry(review_fn)
 
                 proposal_id = store.write_review_proposal(

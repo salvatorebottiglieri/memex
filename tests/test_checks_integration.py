@@ -10,8 +10,8 @@ import sqlite3
 from tests.conftest import _run_memex, FAKE_FETCHER
 
 
-FAKE_LLM = "tests.fake_llm_client:FakeLLMClient"
-FAKE_FAILING_LLM = "tests.fake_llm_client_failing:FakeLLMClientFailing"
+FAKE_AGENT = "tests.fake_llm_client:FakeAgent"
+FAKE_FAILING_AGENT = "tests.fake_llm_client_failing:FakeLLMClientFailing"
 
 
 def _ingest(store, url: str) -> dict:
@@ -23,10 +23,10 @@ def _ingest(store, url: str) -> dict:
     return json.loads(result.stdout)
 
 
-def _derive(store, node_id: str, llm_module: str = FAKE_LLM):
+def _derive(store, node_id: str, agent_module: str = FAKE_AGENT):
     return _run_memex(
         ["derive", "--db", str(store["db"]), "--vault", str(store["vault"]), node_id],
-        env={"MEMEX_LLM_MODULE": llm_module},
+        env={"MEMEX_AGENT": agent_module},
     )
 
 
@@ -59,14 +59,14 @@ class TestFailingDerivation:
         """FakeLLMClientFailing produces a derivation without > Synthesis: marker
         and shorter than MIN_CHARS, so the node stays in draft."""
         ingested = _ingest(store, "https://example.com/article")
-        result = _derive(store, ingested["id"], llm_module=FAKE_FAILING_LLM)
+        result = _derive(store, ingested["id"], agent_module=FAKE_FAILING_AGENT)
         data = json.loads(result.stdout)
         assert data["trust_state"] == "draft"
         assert len(data["check_failures"]) >= 1
 
     def test_failing_derivation_failures_are_persisted(self, store):
         ingested = _ingest(store, "https://example.com/article")
-        result = _derive(store, ingested["id"], llm_module=FAKE_FAILING_LLM)
+        result = _derive(store, ingested["id"], agent_module=FAKE_FAILING_AGENT)
         deriv_id = json.loads(result.stdout)["id"]
 
         show = _show(store, deriv_id)
@@ -78,7 +78,7 @@ class TestFailingDerivation:
     def test_failing_derivation_failures_in_db(self, store):
         """The check_failures JSON column on node is populated for draft derivations."""
         ingested = _ingest(store, "https://example.com/article")
-        result = _derive(store, ingested["id"], llm_module=FAKE_FAILING_LLM)
+        result = _derive(store, ingested["id"], agent_module=FAKE_FAILING_AGENT)
         deriv_id = json.loads(result.stdout)["id"]
 
         con = sqlite3.connect(store["db"])

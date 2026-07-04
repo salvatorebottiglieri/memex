@@ -20,7 +20,7 @@ import yaml
 from memex.store import Store
 from tests.conftest import _run_memex, FAKE_FETCHER, ingest
 
-FAKE_LLM = "tests.fake_llm_client:FakeLLMClient"
+FAKE_AGENT = "tests.fake_llm_client:FakeAgent"
 
 
 def _render(store) -> list:
@@ -40,7 +40,7 @@ def _ingest(store, url: str) -> dict:
 def _derive(store, node_id: str):
     return _run_memex(
         ["derive", "--db", str(store["db"]), "--vault", str(store["vault"]), node_id],
-        env={"MEMEX_LLM_MODULE": FAKE_LLM},
+        env={"MEMEX_AGENT": FAKE_AGENT},
     )
 
 

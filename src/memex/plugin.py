@@ -1,6 +1,6 @@
 """Utilities for plugin-style class loading from 'module:Class' strings.
 
-Used by load_fetcher, load_llm_client, load_telegram_source, and any
+Used by load_fetcher, load_agent, load_telegram_source, and any
 future test-injectable seam.
 """
 

@@ -1,14 +1,14 @@
-"""Fake LLMClient for tests — no real Anthropic calls.
+"""Fake Agent for tests — no real Anthropic calls.
 
 Returns predictable derivation prose that includes at least one > Synthesis: marker.
 Provides a deterministic review() returning configurable ReviewProposal.
 """
 from __future__ import annotations
 
-from memex.llm_client import DerivationResult, ReviewProposal
+from memex.agent import DerivationResult, ReviewProposal
 
-class FakeLLMClient:
-    """Deterministic LLM client for tests."""
+class FakeAgent:
+    """Deterministic Agent for tests."""
 
     def __init__(
         self,

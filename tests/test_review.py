@@ -1,7 +1,7 @@
 """Tests for `memex review` and `memex review list`.
 
 Relies on the full pipeline: ingest -> derive -> contradicts edge -> review.
-LLMClient is injected via MEMEX_LLM_MODULE (FakeLLMClient).
+Agent is injected via MEMEX_AGENT (FakeAgent).
 """
 from __future__ import annotations
 
@@ -11,20 +11,20 @@ import uuid
 from memex.store import Store as _Store
 from tests.conftest import _run_memex, FAKE_FETCHER
 
-FAKE_LLM = "tests.fake_llm_client:FakeLLMClient"
-FAKE_LLM_VALID_REFS = "tests.test_review:FakeLLMClientValidRefs"
-class FakeLLMClientValidRefs:
-    """Fake LLM client returning realistic referencable values.
+FAKE_AGENT = "tests.fake_llm_client:FakeAgent"
+FAKE_AGENT_VALID_REFS = "tests.test_review:FakeAgentValidRefs"
+class FakeAgentValidRefs:
+    """Fake agent returning realistic referencable values.
 
-    Unlike FakeLLMClient (which returns fake node IDs like 'n1','n2'),
-    this client returns damage_boundary_node_id=None to satisfy the FK constraint.
+    Unlike FakeAgent (which returns fake node IDs like 'n1','n2'),
+    this agent returns damage_boundary_node_id=None to satisfy the FK constraint.
     """
 
     def derive(self, content: str) -> dict:
         return {"prose": "fake", "synthesis_statements": []}
 
     def review(self, target_content: str, asserting_content: str, edge_payload: dict) -> dict:
-        from memex.llm_client import ReviewProposal
+        from memex.agent import ReviewProposal
         return ReviewProposal(
             affected_node_ids=[],
             damage_boundary_node_id=None,
@@ -32,8 +32,8 @@ class FakeLLMClientValidRefs:
             confidence="high",
         )
 
-class FakeLLMClientThrowsOnReview:
-    """Fake LLM client that raises on every review() call.
+class FakeAgentThrowsOnReview:
+    """Fake agent that raises on every review() call.
 
     Used to test per-event error recovery in the review batch command.
     """
@@ -58,7 +58,7 @@ def _ingest(store, url: str) -> dict:
 def _derive(store, node_id: str):
     return _run_memex(
         ["derive", "--db", str(store["db"]), "--vault", str(store["vault"]), node_id],
-        env={"MEMEX_LLM_MODULE": FAKE_LLM},
+        env={"MEMEX_AGENT": FAKE_AGENT},
     )
 
 
@@ -93,7 +93,7 @@ class TestReviewCLI:
         # memex review -- produces proposals
         review_result = _run_memex(
             ["review", "--db", str(store["db"]), "--vault", str(store["vault"])],
-            env={"MEMEX_LLM_MODULE": FAKE_LLM_VALID_REFS},
+            env={"MEMEX_AGENT": FAKE_AGENT_VALID_REFS},
         )
         assert review_result.returncode == 0, review_result.stderr
         result_data = json.loads(review_result.stdout)
@@ -110,7 +110,7 @@ class TestReviewCLI:
         # memex review list -- shows proposal
         list_result = _run_memex(
             ["review", "--db", str(store["db"]), "--vault", str(store["vault"]), "list"],
-            env={"MEMEX_LLM_MODULE": FAKE_LLM},
+            env={"MEMEX_AGENT": FAKE_AGENT},
         )
         assert list_result.returncode == 0, list_result.stderr
         queue = json.loads(list_result.stdout)
@@ -131,7 +131,7 @@ class TestReviewCLI:
 
         result1 = _run_memex(
             ["review", "--db", str(store["db"]), "--vault", str(store["vault"])],
-            env={"MEMEX_LLM_MODULE": FAKE_LLM_VALID_REFS},
+            env={"MEMEX_AGENT": FAKE_AGENT_VALID_REFS},
         )
         assert result1.returncode == 0, result1.stderr
         data1 = json.loads(result1.stdout)
@@ -141,7 +141,7 @@ class TestReviewCLI:
         # Re-run -- should return empty (no pending events without proposals)
         result2 = _run_memex(
             ["review", "--db", str(store["db"]), "--vault", str(store["vault"])],
-            env={"MEMEX_LLM_MODULE": FAKE_LLM_VALID_REFS},
+            env={"MEMEX_AGENT": FAKE_AGENT_VALID_REFS},
         )
         data2 = json.loads(result2.stdout)
         proposals2 = data2["proposals"]
@@ -151,7 +151,7 @@ class TestReviewCLI:
         """review with no pending events returns an empty JSON array."""
         result = _run_memex(
             ["review", "--db", str(store["db"]), "--vault", str(store["vault"])],
-            env={"MEMEX_LLM_MODULE": FAKE_LLM},
+            env={"MEMEX_AGENT": FAKE_AGENT},
         )
         assert result.returncode == 0, result.stderr
         data = json.loads(result.stdout)
@@ -161,7 +161,7 @@ class TestReviewCLI:
         """review list with no events or proposals returns an empty JSON array."""
         result = _run_memex(
             ["review", "--db", str(store["db"]), "--vault", str(store["vault"]), "list"],
-            env={"MEMEX_LLM_MODULE": FAKE_LLM},
+            env={"MEMEX_AGENT": FAKE_AGENT},
         )
         assert result.returncode == 0, result.stderr
         data = json.loads(result.stdout)
@@ -177,10 +177,10 @@ class TestReviewCLI:
             derived = json.loads(derive_result.stdout)
             self._add_contradicts_edge(store, derived["id"], ingested["id"])
 
-        THROWING_LLM = "tests.test_review:FakeLLMClientThrowsOnReview"
+        THROWING_AGENT = "tests.test_review:FakeAgentThrowsOnReview"
         result = _run_memex(
             ["review", "--db", str(store["db"]), "--vault", str(store["vault"])],
-            env={"MEMEX_LLM_MODULE": THROWING_LLM},
+            env={"MEMEX_AGENT": THROWING_AGENT},
         )
         assert result.returncode == 0, result.stderr
         data = json.loads(result.stdout)
@@ -205,7 +205,7 @@ class TestReviewCLI:
         # Generate proposal
         review_result = _run_memex(
             ["review", "--db", str(store["db"]), "--vault", str(store["vault"])],
-            env={"MEMEX_LLM_MODULE": FAKE_LLM_VALID_REFS},
+            env={"MEMEX_AGENT": FAKE_AGENT_VALID_REFS},
         )
         assert review_result.returncode == 0, review_result.stderr
         data = json.loads(review_result.stdout)
@@ -238,7 +238,7 @@ class TestReviewCLI:
         self._add_contradicts_edge(store, derived["id"], ingested["id"])
         review_result = _run_memex(
             ["review", "--db", str(store["db"]), "--vault", str(store["vault"])],
-            env={"MEMEX_LLM_MODULE": FAKE_LLM_VALID_REFS},
+            env={"MEMEX_AGENT": FAKE_AGENT_VALID_REFS},
         )
         assert review_result.returncode == 0, review_result.stderr
         prop = json.loads(review_result.stdout)["proposals"][0]
@@ -267,7 +267,7 @@ class TestReviewCLI:
         self._add_contradicts_edge(store, derived["id"], ingested["id"])
         review_result = _run_memex(
             ["review", "--db", str(store["db"]), "--vault", str(store["vault"])],
-            env={"MEMEX_LLM_MODULE": FAKE_LLM_VALID_REFS},
+            env={"MEMEX_AGENT": FAKE_AGENT_VALID_REFS},
         )
         assert review_result.returncode == 0, review_result.stderr
         prop = json.loads(review_result.stdout)["proposals"][0]
@@ -296,7 +296,7 @@ class TestReviewCLI:
         self._add_contradicts_edge(store, derived["id"], ingested["id"])
         review_result = _run_memex(
             ["review", "--db", str(store["db"]), "--vault", str(store["vault"])],
-            env={"MEMEX_LLM_MODULE": FAKE_LLM_VALID_REFS},
+            env={"MEMEX_AGENT": FAKE_AGENT_VALID_REFS},
         )
         assert review_result.returncode == 0, review_result.stderr
         pid = json.loads(review_result.stdout)["proposals"][0]["proposal_id"]
@@ -325,7 +325,7 @@ class TestReviewCLI:
         self._add_contradicts_edge(store, derived["id"], ingested["id"])
         review_result = _run_memex(
             ["review", "--db", str(store["db"]), "--vault", str(store["vault"])],
-            env={"MEMEX_LLM_MODULE": FAKE_LLM_VALID_REFS},
+            env={"MEMEX_AGENT": FAKE_AGENT_VALID_REFS},
         )
         assert review_result.returncode == 0, review_result.stderr
         pid = json.loads(review_result.stdout)["proposals"][0]["proposal_id"]

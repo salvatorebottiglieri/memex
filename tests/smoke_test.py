@@ -21,9 +21,9 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 FAKE_FETCHER = "tests.conftest:FakeFetcher"
-FAKE_LLM = "tests.fake_llm_client:FakeLLMClient"
+FAKE_AGENT = "tests.fake_llm_client:FakeAgent"
 FAKE_TELEGRAM = "tests.fake_telegram_source:FakeTelegramSource"
-FAKE_FAILING_LLM = "tests.fake_llm_client_failing:FakeLLMClientFailing"
+FAKE_FAILING_AGENT = "tests.fake_llm_client_failing:FakeLLMClientFailing"
 
 
 # ── harness ──────────────────────────────────────────────────────
@@ -285,7 +285,7 @@ def smoke_derive_passing(tmp: Path) -> None:
     l0_id = _expect_json("ingest for derive", p)["id"]
 
     p = _run(["derive", "--db", str(db), "--vault", str(vault), l0_id],
-             env={"MEMEX_LLM_MODULE": FAKE_LLM})
+             env={"MEMEX_AGENT": FAKE_AGENT})
     d = _expect_json("derive", p)
     _check("derive status=derived", d.get("status") == "derived")
     _check("trust_state=auto-verified", d.get("trust_state") == "auto-verified")
@@ -330,7 +330,7 @@ def smoke_derive_failing(tmp: Path) -> None:
     l0_id = _expect_json("ingest for failing derive", p)["id"]
 
     p = _run(["derive", "--db", str(db), "--vault", str(vault), l0_id],
-             env={"MEMEX_LLM_MODULE": FAKE_FAILING_LLM})
+             env={"MEMEX_AGENT": FAKE_FAILING_AGENT})
     d = _expect_json("derive failing", p)
     _check("derive returns trust_state=draft", d.get("trust_state") == "draft")
     _check("check_failures populated", len(d.get("check_failures", [])) >= 1)
@@ -353,9 +353,9 @@ def smoke_derive_idempotent(tmp: Path) -> None:
     l0_id = _expect_json("ingest", p)["id"]
 
     _run(["derive", "--db", str(db), "--vault", str(vault), l0_id],
-         env={"MEMEX_LLM_MODULE": FAKE_LLM})
+         env={"MEMEX_AGENT": FAKE_AGENT})
     p = _run(["derive", "--db", str(db), "--vault", str(vault), l0_id],
-             env={"MEMEX_LLM_MODULE": FAKE_LLM})
+             env={"MEMEX_AGENT": FAKE_AGENT})
     d = _expect_json("derive #2", p)
     _check("second derive status=already_derived", d.get("status") == "already_derived")
 
@@ -375,7 +375,7 @@ def smoke_derive_idempotent(tmp: Path) -> None:
 def smoke_derive_all(tmp: Path) -> None:
     print("\n[DERIVE ALL] derive --all batch mode")
     db, vault = _fresh_store(tmp, "deriveall")
-    env = {"MEMEX_FETCHER_MODULE": FAKE_FETCHER, "MEMEX_LLM_MODULE": FAKE_LLM}
+    env = {"MEMEX_FETCHER_MODULE": FAKE_FETCHER, "MEMEX_AGENT": FAKE_AGENT}
 
     # Ingest 3 URLs
     for i in range(3):
@@ -422,7 +422,7 @@ def smoke_search(tmp: Path) -> None:
              env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER})
     l0_id = _expect_json("ingest for search", p)["id"]
     _run(["derive", "--db", str(db), "--vault", str(vault), l0_id],
-         env={"MEMEX_LLM_MODULE": FAKE_LLM})
+         env={"MEMEX_AGENT": FAKE_AGENT})
 
     p = _run(["search", "--db", str(db), "--vault", str(vault), "broader pattern"])
     res = _expect_json("search", p)
@@ -463,7 +463,7 @@ def smoke_errors(tmp: Path) -> None:
 
     # derive on unknown id
     p = _run(["derive", "--db", str(db), "--vault", str(vault), "nope"],
-             env={"MEMEX_LLM_MODULE": FAKE_LLM})
+             env={"MEMEX_AGENT": FAKE_AGENT})
     _check("derive unknown id exits non-zero", p.returncode != 0)
 
     # ingest with no URL and no --inbox
@@ -626,7 +626,7 @@ def smoke_render(tmp: Path) -> None:
 
     # Derivation render
     p = _run(["derive", "--db", str(db), "--vault", str(vault), str(res[0]["node_id"])],
-             env={"MEMEX_LLM_MODULE": FAKE_LLM})
+             env={"MEMEX_AGENT": FAKE_AGENT})
     d = _expect_json("derive for render", p)
     deriv_id = d["id"]
 
@@ -780,7 +780,7 @@ def smoke_full_e2e(tmp: Path) -> None:
 
     for l0_id in l0_ids:
         _run(["derive", "--db", str(db), "--vault", str(vault), l0_id],
-             env={"MEMEX_LLM_MODULE": FAKE_LLM})
+             env={"MEMEX_AGENT": FAKE_AGENT})
 
     p = _run(["list", "--db", str(db), "--vault", str(vault)])
     lst = _expect_json("list", p)
@@ -798,12 +798,12 @@ def smoke_review(tmp: Path) -> None:
 
     # ── helpers ────────────────────────────────────────────────
     def _make_fake_review(path: Path, affected_ids: list[str], conf: str = "high") -> str:
-        """Write a temp FakeLLMClient that returns given affected_node_ids.
-        Returns the MEMEX_LLM_MODULE value (module:Class string)."""
+        """Write a temp FakeAgent that returns given affected_node_ids.
+        Returns the MEMEX_AGENT value (module:Class string)."""
         stem = path.stem
         path.write_text(
-            "from tests.fake_llm_client import FakeLLMClient\n"
-            f"class {stem}(FakeLLMClient):\n"
+            "from tests.fake_llm_client import FakeAgent\n"
+            f"class {stem}(FakeAgent):\n"
             "    def __init__(self):\n"
             f"        super().__init__(review_affected_node_ids={affected_ids!r}, review_confidence={conf!r})\n"
         )
@@ -881,7 +881,7 @@ def smoke_review(tmp: Path) -> None:
     # Derive child
     proc = _run(
         ["derive", "--db", str(db1), "--vault", str(vault1), l0_id],
-        env={"MEMEX_LLM_MODULE": FAKE_LLM},
+        env={"MEMEX_AGENT": FAKE_AGENT},
     )
     deriv = _expect_json("sc1 derive child", proc)
     deriv_id = deriv["id"]
@@ -910,7 +910,7 @@ def smoke_review(tmp: Path) -> None:
     fake_path1 = tmp / "ReviewFake1.py"
     mod_str1 = _make_fake_review(fake_path1, [l0_id, deriv_id])
     review_env1 = {
-        "MEMEX_LLM_MODULE": mod_str1,
+        "MEMEX_AGENT": mod_str1,
         "PYTHONPATH": str(tmp),
     }
 
@@ -972,7 +972,7 @@ def smoke_review(tmp: Path) -> None:
     # Derive child
     proc = _run(
         ["derive", "--db", str(db2), "--vault", str(vault2), l0_2_id],
-        env={"MEMEX_LLM_MODULE": FAKE_LLM},
+        env={"MEMEX_AGENT": FAKE_AGENT},
     )
     deriv_2 = _expect_json("sc2 derive child", proc)
     deriv_2_id = deriv_2["id"]
@@ -985,7 +985,7 @@ def smoke_review(tmp: Path) -> None:
     fake_path2 = tmp / "ReviewFake2.py"
     mod_str2 = _make_fake_review(fake_path2, [l0_2_id, deriv_2_id])
     review_env2 = {
-        "MEMEX_LLM_MODULE": mod_str2,
+        "MEMEX_AGENT": mod_str2,
         "PYTHONPATH": str(tmp),
     }
 
@@ -1045,7 +1045,7 @@ def smoke_review(tmp: Path) -> None:
     # Derive child
     proc = _run(
         ["derive", "--db", str(db3), "--vault", str(vault3), l0_3_id],
-        env={"MEMEX_LLM_MODULE": FAKE_LLM},
+        env={"MEMEX_AGENT": FAKE_AGENT},
     )
     deriv_3 = _expect_json("sc3 derive child", proc)
     deriv_3_id = deriv_3["id"]
@@ -1062,7 +1062,7 @@ def smoke_review(tmp: Path) -> None:
     fake_path3a = tmp / "ReviewFake3a.py"
     mod_str3a = _make_fake_review(fake_path3a, [l0_3_id, deriv_3_id])
     review_env3a = {
-        "MEMEX_LLM_MODULE": mod_str3a,
+        "MEMEX_AGENT": mod_str3a,
         "PYTHONPATH": str(tmp),
     }
 
@@ -1093,7 +1093,7 @@ def smoke_review(tmp: Path) -> None:
     fake_path3b = tmp / "ReviewFake3b.py"
     mod_str3b = _make_fake_review(fake_path3b, [l0_3_id, deriv_3_id])
     review_env3b = {
-        "MEMEX_LLM_MODULE": mod_str3b,
+        "MEMEX_AGENT": mod_str3b,
         "PYTHONPATH": str(tmp),
     }
 
@@ -1133,7 +1133,7 @@ def smoke_review(tmp: Path) -> None:
     # Derive child
     proc = _run(
         ["derive", "--db", str(db4), "--vault", str(vault4), l0_4_id],
-        env={"MEMEX_LLM_MODULE": FAKE_LLM},
+        env={"MEMEX_AGENT": FAKE_AGENT},
     )
     deriv_4 = _expect_json("sc4 derive child", proc)
     deriv_4_id = deriv_4["id"]
@@ -1145,7 +1145,7 @@ def smoke_review(tmp: Path) -> None:
     fake_path4 = tmp / "ReviewFake4.py"
     mod_str4 = _make_fake_review(fake_path4, [l0_4_id, deriv_4_id])
     review_env4 = {
-        "MEMEX_LLM_MODULE": mod_str4,
+        "MEMEX_AGENT": mod_str4,
         "PYTHONPATH": str(tmp),
     }
 
@@ -1235,7 +1235,7 @@ def smoke_stub(tmp: Path) -> None:
 
     # Derive should work via fallback fetch (no file to read)
     p = _run(["derive", "--db", str(db), "--vault", str(vault), node_id],
-             env={**env, "MEMEX_LLM_MODULE": FAKE_LLM})
+             env={**env, "MEMEX_AGENT": FAKE_AGENT})
     dr = _expect_json("derive stub", p)
     _check("derive stub status=derived", dr.get("status") == "derived", f"got {dr.get('status')}")
 

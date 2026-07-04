@@ -1,11 +1,11 @@
-"""Fake LLMClient that produces a derivation that FAILS checks.
+"""Fake Agent that produces a derivation that FAILS checks.
 
 Specifically: no "> Synthesis:" marker, and content is too short to pass size check.
 Used to test that the checks module correctly leaves the node in draft state.
 """
 from __future__ import annotations
 
-from memex.llm_client import DerivationResult
+from memex.agent import DerivationResult
 
 
 class FakeLLMClientFailing:

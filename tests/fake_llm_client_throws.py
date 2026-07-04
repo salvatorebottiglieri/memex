@@ -1,6 +1,6 @@
-"""Fake LLMClient that always raises from derive().
+"""Fake Agent that always raises from derive().
 
-Used to test that _derive_all correctly catches persistent LLM errors
+Used to test that _derive_all correctly catches persistent agent errors
 and reports them as status="error" without crashing the batch.
 """
 from __future__ import annotations

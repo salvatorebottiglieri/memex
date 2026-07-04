@@ -1,7 +1,7 @@
 """Tests for `memex derive <node-id>` and `memex search <query>`.
 
-LLMClient is injected via MEMEX_LLM_MODULE — no real Anthropic calls.
-The fake LLM client module lives at tests/fake_llm_client.py.
+Agent is injected via MEMEX_AGENT — no real Anthropic calls.
+The fake agent module lives at tests/fake_llm_client.py.
 """
 from __future__ import annotations
 
@@ -12,9 +12,9 @@ import sqlite3
 from tests.conftest import _run_memex, FAKE_FETCHER
 
 
-FAKE_LLM = "tests.fake_llm_client:FakeLLMClient"
-FAKE_FAILING_LLM = "tests.fake_llm_client_failing:FakeLLMClientFailing"
-FAKE_THROWS_LLM = "tests.fake_llm_client_throws:FakeLLMClientThrows"
+FAKE_AGENT = "tests.fake_llm_client:FakeAgent"
+FAKE_FAILING_AGENT = "tests.fake_llm_client_failing:FakeLLMClientFailing"
+FAKE_THROWS_AGENT = "tests.fake_llm_client_throws:FakeLLMClientThrows"
 
 
 def _ingest(store, url: str) -> dict:
@@ -29,7 +29,7 @@ def _ingest(store, url: str) -> dict:
 def _derive(store, node_id: str) -> "subprocess.CompletedProcess":  # type: ignore[name-defined]
     return _run_memex(
         ["derive", "--db", str(store["db"]), "--vault", str(store["vault"]), node_id],
-        env={"MEMEX_LLM_MODULE": FAKE_LLM},
+        env={"MEMEX_AGENT": FAKE_AGENT},
     )
 
 
@@ -45,7 +45,7 @@ class TestDerive:
     def test_derive_inserts_notes_tier_node(self, store):
         """The derivation node has kind=summary, tier=notes, depth=1.
 
-        FakeLLMClient produces a valid derivation (has synthesis marker, right length),
+        FakeAgent produces a valid derivation (has synthesis marker, right length),
         so trust_state is auto-verified after checks run.
         """
         ingested = _ingest(store, "https://example.com/article")
@@ -141,14 +141,14 @@ class TestDerive:
 class TestDeriveAll:
     """Tests for memex derive --all with --limit."""
 
-    def _derive_all(self, store, limit: int | None = None, llm: str = FAKE_LLM):
+    def _derive_all(self, store, limit: int | None = None, agent: str = FAKE_AGENT):
         args = [
             "derive", "--db", str(store["db"]),
             "--vault", str(store["vault"]), "--all",
         ]
         if limit is not None:
             args.extend(["--limit", str(limit)])
-        return _run_memex(args, env={"MEMEX_LLM_MODULE": llm})
+        return _run_memex(args, env={"MEMEX_AGENT": agent})
 
     def _ingest_n(self, store, n: int, prefix: str = "article") -> list[dict]:
         """Ingest n unique URLs and return their result dicts."""
@@ -187,7 +187,7 @@ class TestDeriveAll:
         for l0 in l0s[:2]:
             d = _run_memex(
                 ["derive", "--db", str(store["db"]), "--vault", str(store["vault"]), l0["id"]],
-                env={"MEMEX_LLM_MODULE": FAKE_LLM},
+                env={"MEMEX_AGENT": FAKE_AGENT},
             )
             assert d.returncode == 0, d.stderr
 
@@ -214,7 +214,7 @@ class TestDeriveAll:
         for l0 in l0s:
             d = _run_memex(
                 ["derive", "--db", str(store["db"]), "--vault", str(store["vault"]), l0["id"]],
-                env={"MEMEX_LLM_MODULE": FAKE_LLM},
+                env={"MEMEX_AGENT": FAKE_AGENT},
             )
             assert d.returncode == 0, d.stderr
 
@@ -230,7 +230,7 @@ class TestDeriveAll:
         # Derive one manually so we see already_derived too
         _run_memex(
             ["derive", "--db", str(store["db"]), "--vault", str(store["vault"]), l0s[0]["id"]],
-            env={"MEMEX_LLM_MODULE": FAKE_LLM},
+            env={"MEMEX_AGENT": FAKE_AGENT},
         )
 
         result = self._derive_all(store, limit=10)
@@ -259,9 +259,9 @@ class TestDeriveAll:
         assert data == []
 
     def test_derive_all_handles_errors(self, store):
-        """Failing LLM returns error status without crashing batch."""
+        """Failing agent returns error status without crashing batch."""
         l0s = self._ingest_n(store, 3)
-        result = self._derive_all(store, limit=10, llm=FAKE_THROWS_LLM)
+        result = self._derive_all(store, limit=10, agent=FAKE_THROWS_AGENT)
         assert result.returncode == 0, result.stderr
         data = json.loads(result.stdout)
         assert len(data) == 3
@@ -298,7 +298,7 @@ class TestDeriveAll:
         l0s = self._ingest_n(store, 1)
         result = _run_memex(
             ["derive", "--db", str(store["db"]), "--vault", str(store["vault"]), l0s[0]["id"]],
-            env={"MEMEX_LLM_MODULE": FAKE_LLM},
+            env={"MEMEX_AGENT": FAKE_AGENT},
         )
         assert result.returncode == 0, result.stderr
         data = json.loads(result.stdout)
