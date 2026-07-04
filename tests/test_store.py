@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
+import json
 import uuid
 import pytest
 from datetime import datetime, timezone
@@ -28,7 +29,7 @@ class TestSchema:
             "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
         ).fetchall()
         names = {r[0] for r in tables if not r[0].startswith("sqlite_")}
-        assert names == {"node", "source", "edge", "cursor", "inbox", "event_queue", "event_node_link"}
+        assert names == {"node", "source", "edge", "cursor", "inbox", "event_queue", "event_node_link", "review_proposal"}
 
     def test_init_schema_is_idempotent(self):
         store = _store()
@@ -37,7 +38,7 @@ class TestSchema:
             "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
         ).fetchall()
         names = {r[0] for r in tables if not r[0].startswith("sqlite_")}
-        assert names == {"node", "source", "edge", "cursor", "inbox", "event_queue", "event_node_link"}
+        assert names == {"node", "source", "edge", "cursor", "inbox", "event_queue", "event_node_link", "review_proposal"}
 
     def test_init_schema_adds_new_columns(self):
         """Verify is_contested, contested_at on node and written_by on edge exist."""
@@ -359,6 +360,170 @@ class TestContestation:
         assert nodes[0]["is_contested"] is False
         assert nodes[0]["contested_at"] is None
 
+
+
+class TestReviewProposal:
+    """Tests for review_proposal table operations."""
+
+    @staticmethod
+    def _make_contradicts_event(store) -> tuple[int, str, str, str]:
+        """Create a contradicts edge that produces a pending event.
+        Returns (event_id, edge_id, target_node_id, asserter_node_id)."""
+        now = _utcnow()
+        target = str(uuid.uuid4())
+        store.create_node(node_id=target, kind="raw_source", depth=0, created_at=now,
+                          content_path="/tmp/fake.txt")
+        asserter = str(uuid.uuid4())
+        store.create_node(node_id=asserter, kind="summary", depth=1, created_at=now,
+                          content_path="/tmp/fake_assert.txt")
+        eid = str(uuid.uuid4())
+        store.create_edge(edge_id=eid, type="association", relation="contradicts",
+                          from_node=asserter, to_node=target)
+        row = store._con.execute(
+            "SELECT id FROM event_queue WHERE edge_id = ?", (eid,)
+        ).fetchone()
+        return (row["id"], eid, target, asserter)
+
+    def test_get_pending_events_without_proposal_returns_event(self):
+        store = _store()
+        event_id, eid, target, _asserter = self._make_contradicts_event(store)
+        events = store.get_pending_events_without_proposal()
+        assert len(events) == 1
+        assert events[0]["id"] == event_id
+        assert events[0]["status"] == "pending"
+
+    def test_get_pending_events_without_proposal_empty_when_no_events(self):
+        store = _store()
+        assert store.get_pending_events_without_proposal() == []
+
+    def test_get_pending_events_without_proposal_excludes_closed(self):
+        store = _store()
+        event_id, eid, target, _asserter = self._make_contradicts_event(store)
+        store._con.execute("UPDATE event_queue SET status = 'closed' WHERE id = ?", (event_id,))
+        assert store.get_pending_events_without_proposal() == []
+
+    def test_get_pending_events_without_proposal_excludes_proposal_exists(self):
+        store = _store()
+        event_id, eid, target, asserter = self._make_contradicts_event(store)
+        store.write_review_proposal(
+            event_id=event_id,
+            affected_node_ids=[target, asserter],
+            damage_boundary_node_id=asserter,
+            rationale_md="test rationale",
+            confidence="high",
+        )
+        assert store.get_pending_events_without_proposal() == []
+
+    def test_write_review_proposal_returns_id(self):
+        store = _store()
+        event_id, eid, target, asserter = self._make_contradicts_event(store)
+        pid = store.write_review_proposal(
+            event_id=event_id,
+            affected_node_ids=[target, asserter],
+            damage_boundary_node_id=asserter,
+            rationale_md="test rationale",
+            confidence="high",
+        )
+        assert isinstance(pid, int)
+
+    def test_write_review_proposal_persists_fields(self):
+        store = _store()
+        event_id, eid, target, asserter = self._make_contradicts_event(store)
+        pid = store.write_review_proposal(
+            event_id=event_id,
+            affected_node_ids=[target, asserter],
+            damage_boundary_node_id=asserter,
+            rationale_md="test rationale",
+            confidence="high",
+        )
+        row = store._con.execute(
+            "SELECT event_id, affected_node_ids, damage_boundary_node_id, rationale_md, "
+            "confidence, status, human_note, created_at, resolved_at FROM review_proposal WHERE id = ?",
+            (pid,),
+        ).fetchone()
+        assert row["event_id"] == event_id
+        assert json.loads(row["affected_node_ids"]) == [target, asserter]
+        assert row["damage_boundary_node_id"] == asserter
+        assert row["rationale_md"] == "test rationale"
+        assert row["confidence"] == "high"
+        assert row["status"] == "pending"
+        assert row["human_note"] is None
+        assert row["resolved_at"] is None
+        assert row["created_at"] is not None
+
+    def test_write_review_proposal_accepts_none_damage_boundary(self):
+        store = _store()
+        event_id, eid, target, _asserter = self._make_contradicts_event(store)
+        pid = store.write_review_proposal(
+            event_id=event_id,
+            affected_node_ids=["n1"],
+            damage_boundary_node_id=None,
+            rationale_md="no boundary",
+            confidence="low",
+        )
+        row = store._con.execute(
+            "SELECT damage_boundary_node_id FROM review_proposal WHERE id = ?", (pid,)
+        ).fetchone()
+        assert row["damage_boundary_node_id"] is None
+
+    def test_write_review_proposal_unique_event_id(self):
+        store = _store()
+        event_id, eid, target, _asserter = self._make_contradicts_event(store)
+        store.write_review_proposal(
+            event_id=event_id, affected_node_ids=["n1"],
+            damage_boundary_node_id=None, rationale_md="first", confidence="high",
+        )
+        with pytest.raises(StoreError):
+            store.write_review_proposal(
+                event_id=event_id, affected_node_ids=["n2"],
+                damage_boundary_node_id=None, rationale_md="second", confidence="high",
+            )
+
+    def test_get_review_queue_returns_pending_events(self):
+        store = _store()
+        event_id, eid, target, _asserter = self._make_contradicts_event(store)
+        queue = store.get_review_queue()
+        kinds = [item["kind"] for item in queue]
+        assert "pending_event" in kinds
+
+    def test_get_review_queue_returns_pending_proposals(self):
+        store = _store()
+        event_id, eid, target, _asserter = self._make_contradicts_event(store)
+        store.write_review_proposal(
+            event_id=event_id, affected_node_ids=["n1"],
+            damage_boundary_node_id=None, rationale_md="test", confidence="high",
+        )
+        queue = store.get_review_queue()
+        kinds = [item["kind"] for item in queue]
+        assert "pending_proposal" in kinds
+
+    def test_get_review_queue_excludes_non_pending_proposals(self):
+        store = _store()
+        event_id, eid, target, _asserter = self._make_contradicts_event(store)
+        pid = store.write_review_proposal(
+            event_id=event_id, affected_node_ids=["n1"],
+            damage_boundary_node_id=None, rationale_md="test", confidence="high",
+        )
+        store._con.execute("UPDATE review_proposal SET status = 'accepted' WHERE id = ?", (pid,))
+        queue = store.get_review_queue()
+        assert not any(item["kind"] == "pending_proposal" for item in queue)
+
+    def test_get_review_queue_sorted_by_created_at(self):
+        store = _store()
+        # First event, no proposal
+        e1_id, _, _, _ = self._make_contradicts_event(store)
+        # Second event with proposal
+        e2_id, _, _, _ = self._make_contradicts_event(store)
+        store.write_review_proposal(
+            event_id=e2_id, affected_node_ids=["n1"],
+            damage_boundary_node_id=None, rationale_md="test", confidence="high",
+        )
+        queue = store.get_review_queue()
+        assert len(queue) >= 2
+        assert queue[0]["kind"] in ("pending_event", "pending_proposal")
+        # Items should be ordered by created_at ascending
+        created_ats = [item["created_at"] for item in queue]
+        assert created_ats == sorted(created_ats)
 
 class TestLedger:
     def test_lookup_returns_none_for_unknown_key(self):

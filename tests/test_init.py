@@ -35,7 +35,7 @@ def test_init_creates_sqlite_db_with_all_tables(tmp_path, run_memex):
     tables = {row[0] for row in cur.fetchall() if not row[0].startswith("sqlite_")}
     con.close()
 
-    assert tables == {"node", "source", "edge", "cursor", "inbox", "event_queue", "event_node_link"}
+    assert tables == {"node", "source", "edge", "cursor", "inbox", "event_queue", "event_node_link", "review_proposal"}
 
 
 def test_init_creates_vault_directory(tmp_path, run_memex):
@@ -68,7 +68,7 @@ def test_init_is_idempotent(tmp_path, run_memex):
     tables = {row[0] for row in cur.fetchall() if not row[0].startswith("sqlite_")}
     con.close()
 
-    assert tables == {"node", "source", "edge", "cursor", "inbox", "event_queue", "event_node_link"}
+    assert tables == {"node", "source", "edge", "cursor", "inbox", "event_queue", "event_node_link", "review_proposal"}
     assert vault_path.is_dir()
 
 

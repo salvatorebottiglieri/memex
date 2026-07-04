@@ -84,6 +84,20 @@ CREATE TABLE IF NOT EXISTS event_node_link (
 );
 CREATE INDEX IF NOT EXISTS idx_event_node_link_node ON event_node_link(node_id);
 CREATE INDEX IF NOT EXISTS idx_event_node_link_event ON event_node_link(event_id);
+
+CREATE TABLE IF NOT EXISTS review_proposal (
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id              INTEGER NOT NULL UNIQUE REFERENCES event_queue(id),
+    affected_node_ids     TEXT NOT NULL,
+    damage_boundary_node_id TEXT REFERENCES node(id),
+    rationale_md          TEXT NOT NULL,
+    confidence            TEXT NOT NULL CHECK (confidence IN ('high','medium','low')),
+    status                TEXT NOT NULL CHECK (status IN ('pending','accepted','rejected','dismissed')) DEFAULT 'pending',
+    human_note            TEXT,
+    created_at            TEXT NOT NULL,
+    resolved_at           TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_review_proposal_status ON review_proposal(status);
 """
 
 
@@ -381,6 +395,90 @@ class Store:
                 (edge_id, target_node_id, now),
             )
             return cur.lastrowid
+        except sqlite3.Error as e:
+            raise StoreError(str(e)) from e
+
+    # ── Review proposals ──────────────────────────────────────────
+
+    def get_pending_events_without_proposal(self) -> list[dict]:
+        """Return all pending event_queue rows that have no review_proposal."""
+        try:
+            rows = self._con.execute(
+                """
+                SELECT eq.* FROM event_queue eq
+                LEFT JOIN review_proposal rp ON rp.event_id = eq.id
+                WHERE eq.status = 'pending'
+                  AND rp.id IS NULL
+                ORDER BY eq.created_at
+                """
+            ).fetchall()
+            return [dict(r) for r in rows]
+        except sqlite3.Error as e:
+            raise StoreError(str(e)) from e
+
+    def write_review_proposal(
+        self,
+        *,
+        event_id: int,
+        affected_node_ids: list[str],
+        damage_boundary_node_id: str | None = None,
+        rationale_md: str,
+        confidence: str,
+    ) -> int:
+        """Insert a review proposal and return its id.
+
+        ``affected_node_ids`` is JSON-serialized internally.
+        Raises ``StoreError`` on UNIQUE violation (duplicate event_id).
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        affected_json = json.dumps(affected_node_ids)
+        try:
+            cur = self._con.execute(
+                """
+                INSERT INTO review_proposal
+                    (event_id, affected_node_ids, damage_boundary_node_id,
+                     rationale_md, confidence, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (event_id, affected_json, damage_boundary_node_id,
+                 rationale_md, confidence, now),
+            )
+            return cur.lastrowid
+        except sqlite3.Error as e:
+            raise StoreError(str(e)) from e
+
+    def get_review_queue(self) -> list[dict]:
+        """Return pending events without proposals AND pending proposals,
+        each annotated with a ``kind`` field.
+        """
+        try:
+            # Pending events without a proposal
+            events = self._con.execute(
+                """
+                SELECT eq.*, 'pending_event' AS kind
+                FROM event_queue eq
+                LEFT JOIN review_proposal rp ON rp.event_id = eq.id
+                WHERE eq.status = 'pending'
+                  AND rp.id IS NULL
+                """
+            ).fetchall()
+            # Pending proposals joined with their event
+            proposals = self._con.execute(
+                """
+                SELECT rp.id, rp.event_id, rp.affected_node_ids,
+                       rp.damage_boundary_node_id, rp.rationale_md,
+                       rp.confidence, rp.status, rp.human_note,
+                       rp.created_at, rp.resolved_at,
+                       eq.event_type, eq.edge_id, eq.target_node_id,
+                       'pending_proposal' AS kind
+                FROM review_proposal rp
+                JOIN event_queue eq ON eq.id = rp.event_id
+                WHERE rp.status = 'pending'
+                """
+            ).fetchall()
+            combined = [dict(r) for r in events] + [dict(r) for r in proposals]
+            combined.sort(key=lambda x: x["created_at"])
+            return combined
         except sqlite3.Error as e:
             raise StoreError(str(e)) from e
 
