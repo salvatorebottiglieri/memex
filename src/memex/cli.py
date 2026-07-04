@@ -546,5 +546,112 @@ def capture(db_path: Path, vault_path: Path) -> None:
     click.echo(json.dumps(results))
 
 
+@cli.group(invoke_without_command=True)
+@_db_options
+@click.pass_context
+def review(ctx: click.Context, db_path: Path, vault_path: Path) -> None:
+    """Review pending contestation events and manage proposals.
+
+    Without a subcommand: batch-generate proposals for all pending events
+    that don't already have one. Each event invokes the LLM with the
+    target (contested) node content and the asserting edge's source node
+    content, then persists the resulting ReviewProposal.
+
+    Subcommands:
+        list  — show the full review queue (pending events + proposals).
+    """
+    if ctx.invoked_subcommand is not None:
+        return
+    _cmd_review_batch(db_path, vault_path)
+
+
+def _cmd_review_batch(db_path: Path, vault_path: Path) -> None:
+    """Batch-generate proposals for all pending events without proposals."""
+    from memex.llm_client import load_llm_client, call_with_retry
+    from memex.store import Store
+
+    _require_db(db_path)
+    llm = load_llm_client(os.environ.get("MEMEX_LLM_MODULE"))
+
+    with Store.open(db_path) as store:
+        events = store.get_pending_events_without_proposal()
+        results = []
+
+        for event in events:
+            try:
+                target_node = store.get_node(event["target_node_id"])
+                if target_node is None or not target_node.get("content_path"):
+                    results.append({
+                        "event_id": event["id"],
+                        "status": "error",
+                        "detail": "target_node_not_found",
+                    })
+                    continue
+
+                # Find the asserting node (from_node of the contradicts edge)
+                edge_rows = store._con.execute(
+                    "SELECT from_node FROM edge WHERE id = ?", (event["edge_id"],)
+                ).fetchone()
+                if edge_rows is None:
+                    results.append({
+                        "event_id": event["id"],
+                        "status": "error",
+                        "detail": "edge_not_found",
+                    })
+                    continue
+
+                asserting_node_id = edge_rows["from_node"]
+                asserting_node = store.get_node(asserting_node_id)
+                if asserting_node is None or not asserting_node.get("content_path"):
+                    results.append({
+                        "event_id": event["id"],
+                        "status": "error",
+                        "detail": "asserting_node_not_found",
+                    })
+                    continue
+
+                target_content = Path(target_node["content_path"]).read_text(encoding="utf-8")
+                asserting_content = Path(asserting_node["content_path"]).read_text(encoding="utf-8")
+                edge_payload = {"edge_id": event["edge_id"]}
+
+                review_fn = lambda: llm.review(target_content, asserting_content, edge_payload)
+                proposal = call_with_retry(review_fn)
+
+                proposal_id = store.write_review_proposal(
+                    event_id=event["id"],
+                    affected_node_ids=proposal.affected_node_ids,
+                    damage_boundary_node_id=proposal.damage_boundary_node_id,
+                    rationale_md=proposal.rationale_md,
+                    confidence=proposal.confidence,
+                )
+                results.append({
+                    "event_id": event["id"],
+                    "proposal_id": proposal_id,
+                    "status": "proposed",
+                })
+            except Exception as e:
+                results.append({
+                    "event_id": event["id"],
+                    "status": "error",
+                    "detail": str(e),
+                })
+
+    click.echo(json.dumps({"processed": len(events), "proposals": results}))
+
+
+@review.command(name="list")
+@click.pass_context
+def review_list(ctx: click.Context) -> None:
+    """Return JSON list of the review queue (pending events + pending proposals)."""
+    from memex.store import Store
+
+    db_path = ctx.parent.params["db_path"]
+    vault_path = ctx.parent.params["vault_path"]
+    _require_db(db_path)
+    with Store.open(db_path) as store:
+        queue = store.get_review_queue()
+    click.echo(json.dumps(queue))
+
+
 if __name__ == "__main__":
     cli()
