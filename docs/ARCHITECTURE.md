@@ -37,10 +37,10 @@ more conservative on scope (single user, no discovery/web-research subsystem).
 | Lazy density/demand trigger for derivations | manual only (ADR-0003) | `memex derive` is invoked explicitly |
 | Render step (DB → frontmatter + wikilinks for Obsidian) | **built** (slice 1: metadata + tags + aliases) | `memex render` |
 | Per-type extractors (YouTube transcript, PDF) | HTML only | `HttpFetcher` is regex on `<title>` + strip-tags |
-| Staleness propagation | not started | no `stale` trust_state writes yet |
-| Human review queue / targeted review | not started (ADR-0004) | no `human-approved` transition yet |
+| Staleness propagation (contested → triage → accept/reject/dismiss) | **built** | `memex review accept/reject/dismiss` |
+| Human review queue / targeted review | **built** | `memex review` + `memex review list` |
+| Edge authorship tracking | **built** | `edge.written_by` column |
 | Edit round-trip (Obsidian wikilink edits back into DB) | not started | |
-| Confidence scoring | not started | |
 
 ## Map (as built)
 
@@ -98,14 +98,14 @@ flowchart TB
 - [0009](adr/0009-framework-agnostic-core-no-langgraph.md) — Framework-agnostic Python core; no LangGraph
 - [0010](adr/0010-cli-canonical-interface-no-mcp.md) — CLI as canonical harness-agnostic interface; no MCP
 - [0011](adr/0011-deterministic-checks-gate.md) — Deterministic Checks module + `> Synthesis:` gate
-
+- [0012](adr/0012-staleness-propagation-via-contested.md) — Staleness propagation via contested state and human review
 ## Open questions (deferred)
 
 - **Model choice & cost:** `AnthropicLLMClient` currently defaults to `claude-opus-4-5`. Switch to Sonnet for bulk derivation once cost matters; keep Opus for higher-tier synthesis. Tune when real volume arrives.
 - **Tier seed:** `raw` + `notes` are built; `synthesis` not yet. Let real use reveal whether more ordinal ranks are needed (gated, ADR-0002).
 - **Source-type extractors:** HTML article is built. YouTube transcript (the canonical-key mapping is already in `canonical_key.py`) and PDF are next. Tweets/X and others later.
 - **Edit round-trip:** if I hand-edit a wikilink in Obsidian, a reconcile step is needed (edge case).
-- **Staleness propagation:** invalidate-eagerly vs mark-and-regenerate-on-demand — leaning on-demand; confirm during build.
+- ~~**Staleness propagation:** invalidate-eagerly vs mark-and-regenerate-on-demand — leaning on-demand; confirm during build.~~ **Resolved** (ADR-0012): all propagation goes through `contested` → review proposal → human adjudication. Re-derivation is lazy (on-demand).
 - **✅-reaction** Telegram confirmation: optional later enhancement (needs write scope).
 - **Confidence scoring:** exact formula from source count + contradictions.
 - **Capture/ingest separation:** `memex ingest --inbox` does capture + ingest atomically. `memex ingest --from-inbox` now provides the pure-ingest side (process pending inbox rows without re-capturing), so a future `memex capture` command can fill the inbox and `--from-inbox` flushes it. `memex list --pending` surfaces what's waiting.
