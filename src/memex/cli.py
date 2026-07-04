@@ -14,24 +14,38 @@ import click
 
 from memex.canonical_key import canonical_key
 from memex.ingester import ingest_single_url
+import functools
 
 
-def _db_options(fn):
-    fn = click.option(
-        "--db",
-        "db_path",
-        required=True,
-        type=click.Path(dir_okay=False, path_type=Path),
-        help="Path to the SQLite database file.",
-    )(fn)
-    fn = click.option(
-        "--vault",
-        "vault_path",
-        required=True,
-        type=click.Path(file_okay=False, path_type=Path),
-        help="Path to the vault directory for markdown files.",
-    )(fn)
-    return fn
+_DEFAULT_VAULT: Path | None = None
+_OBSIDIAN_CANDIDATES = [
+    "notes/notes",
+    "Obsidian",
+    "Documents/Obsidian",
+]
+
+
+def _detect_vault() -> Path | None:
+    """Find the Obsidian vault root by scanning for ``.obsidian/``."""
+    global _DEFAULT_VAULT
+    if _DEFAULT_VAULT is not None:
+        return _DEFAULT_VAULT
+    for rel in _OBSIDIAN_CANDIDATES:
+        p = Path.home() / rel
+        if (p / ".obsidian").is_dir():
+            _DEFAULT_VAULT = p
+            return p
+    return None
+
+
+def _resolve_paths(db_path, vault_path):
+    """Fill in default db/vault from Obsidian detection when not provided."""
+    vp = Path(vault_path) if vault_path else _detect_vault()
+    if vp is None:
+        _fail("vault_not_found", detail="No --vault given and no Obsidian vault detected. "
+               "Run 'memex init --db <path> --vault <path>' to set up.")
+    dp = Path(db_path) if db_path else vp / ".memex" / "memex.db"
+    return dp, vp
 
 
 def _fail(error: str, **kwargs: Any) -> None:
@@ -42,13 +56,38 @@ def _fail(error: str, **kwargs: Any) -> None:
 
 def _require_db(db_path: Path) -> None:
     """Exit with clean JSON error if the database file doesn't exist."""
-    if not db_path.exists():
-        _fail("db_not_found", db_path=str(db_path))
 
 
 @click.group()
 def cli() -> None:
     """memex — personal second-brain CLI."""
+
+
+def _db_options(fn):
+    fn = click.option(
+        "--db",
+        "db_path",
+        default=None,
+        type=click.Path(dir_okay=False, path_type=Path),
+        help="Path to the SQLite database file (default: <vault>/.memex/memex.db).",
+    )(fn)
+    fn = click.option(
+        "--vault",
+        "vault_path",
+        default=None,
+        type=click.Path(file_okay=False, path_type=Path),
+        help="Path to the vault directory (default: auto-detected Obsidian vault).",
+    )(fn)
+    @click.pass_context
+    @functools.wraps(fn)
+    def wrapper(ctx, **kwargs):
+        kwargs["db_path"], kwargs["vault_path"] = _resolve_paths(
+            kwargs.get("db_path"), kwargs.get("vault_path")
+        )
+        ctx.params["db_path"] = kwargs["db_path"]
+        ctx.params["vault_path"] = kwargs["vault_path"]
+        return fn(**kwargs)
+    return wrapper
 
 
 @cli.command()
