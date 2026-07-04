@@ -33,12 +33,12 @@ def render(db_path: str | Path, vault_path: str | Path) -> list[dict[str, str]]:
             node_id = node["id"]
 
             if not node.get("content_path"):
-                results.append({"node_id": node_id, "status": "skipped"})
+                results.append({"node_id": node_id, "status": "skipped", "reason": "no_content_path"})
                 continue
 
             md_path = Path(node["content_path"])
             if not md_path.exists():
-                results.append({"node_id": node_id, "status": "skipped"})
+                results.append({"node_id": node_id, "status": "skipped", "reason": "file_not_found"})
                 continue
 
             body = _extract_body(md_path)

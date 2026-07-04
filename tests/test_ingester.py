@@ -17,7 +17,12 @@ class FakeFetcher:
     """Minimal inline fetcher — no conftest dependency needed."""
 
     def fetch(self, url: str) -> FetchResult:
-        return FetchResult(content=f"# Content for {url}", title="Test Title")
+        return FetchResult(
+            content=(f"# Content for {url}\n\n"
+                     f"This is a longer body that exceeds the minimum character threshold "
+                     f"of one hundred characters so that the L0 markdown file is created."),
+            title="Test Title",
+        )
 
 
 def test_ingest_single_url_returns_ingested(tmp_path):

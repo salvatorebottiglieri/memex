@@ -307,6 +307,7 @@ def derive(db_path: Path, vault_path: Path, node_id: str | None = None,
 
 def _derive_single(db_path: Path, vault_path: Path, node_id: str) -> None:
     """Derive a single L0 node (the original behavior)."""
+    from memex.fetcher import load_fetcher
     from memex.llm_client import load_llm_client
     from memex.store import Store
 
@@ -317,8 +318,15 @@ def _derive_single(db_path: Path, vault_path: Path, node_id: str) -> None:
         l0 = store.get_node(node_id)
         if l0 is None:
             _fail("not_found", id=node_id)
-        if not l0.get("content_path"):
-            _fail("no_content", id=node_id)
+
+        # --- Load content (from file or fetch fresh) ---
+        if l0.get("content_path") and Path(l0["content_path"]).exists():
+            l0_content = Path(l0["content_path"]).read_text(encoding="utf-8")
+        else:
+            # L0 has no file — fetch URL fresh
+            fetcher = load_fetcher(os.environ.get("MEMEX_FETCHER_MODULE"))
+            result = fetcher.fetch(l0["source_url"])
+            l0_content = result.content
 
         # --- Idempotency check ---
         existing = store.find_derived_from(node_id)
@@ -330,7 +338,6 @@ def _derive_single(db_path: Path, vault_path: Path, node_id: str) -> None:
             }))
             return
 
-        l0_content = Path(l0["content_path"]).read_text(encoding="utf-8")
         result = _do_derive(store, vault_path, node_id, l0_content, llm)
 
     click.echo(json.dumps(result))

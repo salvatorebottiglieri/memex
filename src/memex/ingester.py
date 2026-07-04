@@ -77,13 +77,12 @@ def ingest_single_url(
         failed = True
         fetch_error_msg = str(exc)
 
-    # --- Write L0 markdown file (only on success) ---
+    # --- Write L0 markdown file (only on success, skip stubs < 100 chars) ---
     content_path = ""
-    if not failed and content is not None:
+    if not failed and content is not None and len(content) >= 100:
         vault_path.mkdir(parents=True, exist_ok=True)
         md_path = vault_path / f"{node_id}.md"
-        if not md_path.exists():
-            md_path.write_text(content, encoding="utf-8")
+        md_path.write_text(content, encoding="utf-8")
         content_path = str(md_path)
 
     # --- Insert node + source rows ---

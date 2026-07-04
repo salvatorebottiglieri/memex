@@ -20,7 +20,11 @@ class FakeFetcher:
         if "fail.example.com" in url:
             raise FetchError(f"Simulated fetch failure for {url}")
         return FetchResult(
-            content=f"# Fake Article\n\nFake content for {url}",
+            content=(f"# Fake Article\n\n"
+                     f"Fake content for {url}.\n\n"
+                     f"This is a longer article body that exceeds the minimum character threshold "
+                     f"of one hundred characters so that the L0 markdown file gets created during "
+                     f"ingestion in tests."),
             title="Fake Article Title",
         )
 

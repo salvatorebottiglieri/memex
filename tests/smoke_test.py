@@ -1201,6 +1201,57 @@ def smoke_auto_defaults(tmp: Path) -> None:
     r = _expect_json("status --db only", proc)
     _check("status --db matches", r.get("db_path") == str(dp2))
     _check("status --db vault exists", r.get("vault_path") and Path(r["vault_path"]).exists())
+
+def smoke_stub(tmp: Path) -> None:
+    """Stub content (< 100 chars) should not create an L0 md file, but derive should still work."""
+    print("\n[STUB] short content → no L0 file, derive via fallback fetch")
+
+    # Write a fetcher that returns short content
+    stub_fetcher = tmp / "stub_fetcher.py"
+    stub_fetcher.write_text(
+        "from memex.fetcher import FetchResult\n"
+        "class ShortFetcher:\n"
+        "    def fetch(self, url):\n"
+        "        return FetchResult(content='# Stub', title='Stub Title')\n"
+    )
+    fetcher_module = "stub_fetcher:ShortFetcher"
+    env = {
+        "MEMEX_FETCHER_MODULE": fetcher_module,
+        "PYTHONPATH": str(tmp),
+    }
+
+    db, vault = _fresh_store(tmp / "stubdata", "stub")
+
+    # Ingest stub URL
+    p = _run(["ingest", "--db", str(db), "--vault", str(vault), "https://stub.example.com"],
+             env=env)
+    d = _expect_json("ingest stub", p)
+    _check("ingest stub status=ingested", d.get("status") == "ingested")
+    node_id = d["id"]
+
+    # No markdown file in vault
+    md_files = list(vault.glob("*.md"))
+    _check("no L0 md file for stub", len(md_files) == 0, f"got {len(md_files)}")
+
+    # Derive should work via fallback fetch (no file to read)
+    p = _run(["derive", "--db", str(db), "--vault", str(vault), node_id],
+             env={**env, "MEMEX_LLM_MODULE": FAKE_LLM})
+    dr = _expect_json("derive stub", p)
+    _check("derive stub status=derived", dr.get("status") == "derived", f"got {dr.get('status')}")
+
+    # Derivation markdown was created (notes-tier always has a file)
+    deriv_md = vault / f"{dr['id']}.md"
+    _check("derivation md exists for stub", deriv_md.exists())
+
+    # Render should skip the L0 (no content_path) but still render the derivation
+    p = _run(["render", "--db", str(db), "--vault", str(vault)])
+    res = _expect_json("render stub", p)
+    _check("render returns 2 results (1 skipped + 1 rendered)", len(res) == 2, f"got {len(res)}")
+    skipped = [r for r in res if r["status"] == "skipped"]
+    rendered = [r for r in res if r["status"] == "rendered"]
+    _check("L0 skipped with reason=no_content_path",
+           any(r.get("reason") == "no_content_path" for r in skipped))
+    _check("derivation rendered", len(rendered) == 1)
 # ── runner ──────────────────────────────────────────────────────
 
 
@@ -1229,6 +1280,7 @@ def main() -> int:
         smoke_help(tmp)
         smoke_full_e2e(tmp)
         smoke_review(tmp)
+        smoke_stub(tmp)
 
     print(f"\n{'='*60}")
     print(f"PASSED: {_passes}    FAILED: {len(_failures)}")
