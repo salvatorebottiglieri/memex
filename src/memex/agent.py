@@ -183,11 +183,14 @@ class AnthropicAgent(Agent):
 
 
 class PiAgent(Agent):
-    """Agent powered by the ``pi`` CLI coding assistant.
+    """Agent powered by Pi (``@earendil-works/pi-coding-agent``).
+
+    Uses the ``pi`` CLI under the hood (``pi -p --mode json --no-session --no-tools``).
+    The Pi SDK (TypeScript) at https://pi.dev/docs/latest/sdk provides the full agent
+    runtime for JS/TS projects; this Python integration uses the CLI interface.
 
     Requires ``pi`` to be installed and available on PATH.
-    Supports any provider/model configured in ``pi`` (e.g. Claude, GPT, Gemini).
-    Uses ``pi -p --mode json --no-session --no-tools`` for non-interactive calls.
+    Supports any provider/model configured in ``pi`` (e.g. Claude, GPT, Gemini, DeepSeek).
     """
 
     def _call_pi(self, prompt: str) -> str:
