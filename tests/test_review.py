@@ -191,3 +191,151 @@ class TestReviewCLI:
             assert "event_id" in entry
             assert entry["status"] == "error"
             assert "detail" in entry
+
+    # ── accept / reject / dismiss ──────────────────────────────────
+
+    def test_review_accept_full_flow(self, store):
+        """memex review accept <id> with --note."""
+        # Set up an event and proposal via the full pipeline
+        ingested = _ingest(store, "https://example.com/accept-test")
+        derive_result = _derive(store, ingested["id"])
+        assert derive_result.returncode == 0, derive_result.stderr
+        derived = json.loads(derive_result.stdout)
+        self._add_contradicts_edge(store, derived["id"], ingested["id"])
+        # Generate proposal
+        review_result = _run_memex(
+            ["review", "--db", str(store["db"]), "--vault", str(store["vault"])],
+            env={"MEMEX_LLM_MODULE": FAKE_LLM_VALID_REFS},
+        )
+        assert review_result.returncode == 0, review_result.stderr
+        data = json.loads(review_result.stdout)
+        assert data["processed"] >= 1
+        prop = data["proposals"][0]
+        pid = prop["proposal_id"]
+        # Accept
+        accept_result = _run_memex(
+            ["review", "--db", str(store["db"]), "--vault", str(store["vault"]),
+             "accept", str(pid), "--note", "Looks good"],
+        )
+        assert accept_result.returncode == 0, accept_result.stderr
+        accept_data = json.loads(accept_result.stdout)
+        assert accept_data["status"] == "accepted"
+        assert accept_data["proposal_id"] == pid
+        # Verify via store
+        with _Store.open(store["db"]) as s:
+            row = s._con.execute(
+                "SELECT status, human_note FROM review_proposal WHERE id = ?", (pid,)
+            ).fetchone()
+            assert row["status"] == "accepted"
+            assert row["human_note"] == "Looks good"
+
+    def test_review_reject_full_flow(self, store):
+        """memex review reject <id> with --note."""
+        ingested = _ingest(store, "https://example.com/reject-test")
+        derive_result = _derive(store, ingested["id"])
+        assert derive_result.returncode == 0, derive_result.stderr
+        derived = json.loads(derive_result.stdout)
+        self._add_contradicts_edge(store, derived["id"], ingested["id"])
+        review_result = _run_memex(
+            ["review", "--db", str(store["db"]), "--vault", str(store["vault"])],
+            env={"MEMEX_LLM_MODULE": FAKE_LLM_VALID_REFS},
+        )
+        assert review_result.returncode == 0, review_result.stderr
+        prop = json.loads(review_result.stdout)["proposals"][0]
+        pid = prop["proposal_id"]
+        reject_result = _run_memex(
+            ["review", "--db", str(store["db"]), "--vault", str(store["vault"]),
+             "reject", str(pid), "--note", "Not needed"],
+        )
+        assert reject_result.returncode == 0, reject_result.stderr
+        reject_data = json.loads(reject_result.stdout)
+        assert reject_data["status"] == "rejected"
+        assert reject_data["proposal_id"] == pid
+        with _Store.open(store["db"]) as s:
+            row = s._con.execute(
+                "SELECT status, human_note FROM review_proposal WHERE id = ?", (pid,)
+            ).fetchone()
+            assert row["status"] == "rejected"
+            assert row["human_note"] == "Not needed"
+
+    def test_review_dismiss_full_flow(self, store):
+        """memex review dismiss <id> with --note."""
+        ingested = _ingest(store, "https://example.com/dismiss-test")
+        derive_result = _derive(store, ingested["id"])
+        assert derive_result.returncode == 0, derive_result.stderr
+        derived = json.loads(derive_result.stdout)
+        self._add_contradicts_edge(store, derived["id"], ingested["id"])
+        review_result = _run_memex(
+            ["review", "--db", str(store["db"]), "--vault", str(store["vault"])],
+            env={"MEMEX_LLM_MODULE": FAKE_LLM_VALID_REFS},
+        )
+        assert review_result.returncode == 0, review_result.stderr
+        prop = json.loads(review_result.stdout)["proposals"][0]
+        pid = prop["proposal_id"]
+        dismiss_result = _run_memex(
+            ["review", "--db", str(store["db"]), "--vault", str(store["vault"]),
+             "dismiss", str(pid), "--note", "Off-topic"],
+        )
+        assert dismiss_result.returncode == 0, dismiss_result.stderr
+        dismiss_data = json.loads(dismiss_result.stdout)
+        assert dismiss_data["status"] == "dismissed"
+        assert dismiss_data["proposal_id"] == pid
+        with _Store.open(store["db"]) as s:
+            row = s._con.execute(
+                "SELECT status, human_note FROM review_proposal WHERE id = ?", (pid,)
+            ).fetchone()
+            assert row["status"] == "dismissed"
+            assert row["human_note"] == "Off-topic"
+
+    def test_review_accept_idempotent(self, store):
+        """Second accept returns already_resolved."""
+        ingested = _ingest(store, "https://example.com/accept-idem")
+        derive_result = _derive(store, ingested["id"])
+        assert derive_result.returncode == 0, derive_result.stderr
+        derived = json.loads(derive_result.stdout)
+        self._add_contradicts_edge(store, derived["id"], ingested["id"])
+        review_result = _run_memex(
+            ["review", "--db", str(store["db"]), "--vault", str(store["vault"])],
+            env={"MEMEX_LLM_MODULE": FAKE_LLM_VALID_REFS},
+        )
+        assert review_result.returncode == 0, review_result.stderr
+        pid = json.loads(review_result.stdout)["proposals"][0]["proposal_id"]
+        # First accept
+        r1 = _run_memex(
+            ["review", "--db", str(store["db"]), "--vault", str(store["vault"]),
+             "accept", str(pid)],
+        )
+        assert r1.returncode == 0, r1.stderr
+        assert json.loads(r1.stdout)["status"] == "accepted"
+        # Second accept
+        r2 = _run_memex(
+            ["review", "--db", str(store["db"]), "--vault", str(store["vault"]),
+             "accept", str(pid)],
+        )
+        assert r2.returncode == 0, r2.stderr
+        assert json.loads(r2.stdout)["status"] == "already_resolved"
+        assert json.loads(r2.stdout)["current_status"] == "accepted"
+
+    def test_review_accept_without_note(self, store):
+        """Accept without --note stores NULL human_note."""
+        ingested = _ingest(store, "https://example.com/no-note")
+        derive_result = _derive(store, ingested["id"])
+        assert derive_result.returncode == 0, derive_result.stderr
+        derived = json.loads(derive_result.stdout)
+        self._add_contradicts_edge(store, derived["id"], ingested["id"])
+        review_result = _run_memex(
+            ["review", "--db", str(store["db"]), "--vault", str(store["vault"])],
+            env={"MEMEX_LLM_MODULE": FAKE_LLM_VALID_REFS},
+        )
+        assert review_result.returncode == 0, review_result.stderr
+        pid = json.loads(review_result.stdout)["proposals"][0]["proposal_id"]
+        accept_result = _run_memex(
+            ["review", "--db", str(store["db"]), "--vault", str(store["vault"]),
+             "accept", str(pid)],
+        )
+        assert accept_result.returncode == 0, accept_result.stderr
+        with _Store.open(store["db"]) as s:
+            row = s._con.execute(
+                "SELECT human_note FROM review_proposal WHERE id = ?", (pid,)
+            ).fetchone()
+            assert row["human_note"] is None
