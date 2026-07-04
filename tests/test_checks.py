@@ -83,7 +83,7 @@ def _setup_db(tmp_path: Path) -> tuple[sqlite3.Connection, str, Path]:
 
     # Insert provenance edge: deriv_id --derived_from--> l0_id
     con.execute(
-        "INSERT INTO edge VALUES (?, 'provenance', 'derived_from', ?, ?)",
+        "INSERT INTO edge (id, type, relation, from_node, to_node) VALUES (?, 'provenance', 'derived_from', ?, ?)",
         (edge_id, deriv_id, l0_id),
     )
     con.commit()
