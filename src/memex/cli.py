@@ -22,8 +22,9 @@ _OBSIDIAN_CANDIDATES = [
     "notes/notes",
     "Obsidian",
     "Documents/Obsidian",
+    "vault",
+    "notes",
 ]
-
 
 def _detect_vault() -> Path | None:
     """Find the Obsidian vault root by scanning for ``.obsidian/``."""
@@ -39,14 +40,12 @@ def _detect_vault() -> Path | None:
 
 
 def _resolve_paths(db_path, vault_path):
-    """Fill in default db/vault from Obsidian detection when not provided."""
+    """Fill in default db/vault from Obsidian detection or fallback."""
     vp = Path(vault_path) if vault_path else _detect_vault()
     if vp is None:
-        _fail("vault_not_found", detail="No --vault given and no Obsidian vault detected. "
-               "Run 'memex init --db <path> --vault <path>' to set up.")
+        vp = Path.home() / "memex-vault"
     dp = Path(db_path) if db_path else vp / ".memex" / "memex.db"
     return dp, vp
-
 
 def _fail(error: str, **kwargs: Any) -> None:
     """Emit a JSON error to stderr and exit with code 1."""
@@ -76,7 +75,7 @@ def _db_options(fn):
         "vault_path",
         default=None,
         type=click.Path(file_okay=False, path_type=Path),
-        help="Path to the vault directory (default: auto-detected Obsidian vault).",
+        help="Path to the vault directory (default: auto-detected Obsidian vault, or ~/memex-vault).",
     )(fn)
     @click.pass_context
     @functools.wraps(fn)
