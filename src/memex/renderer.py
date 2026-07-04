@@ -64,6 +64,8 @@ def _build_frontmatter(node: dict[str, Any], body: str, store: Store) -> dict[st
     trust_state = node.get("trust_state")
     if trust_state:
         tags.append(f"trust_state/{trust_state}")
+    if node.get("is_contested"):
+        tags.append("trust_state/contested")
     tier = node.get("tier")
     if tier:
         tags.append(f"tier/{tier}")
