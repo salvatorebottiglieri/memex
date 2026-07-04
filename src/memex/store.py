@@ -492,6 +492,185 @@ class Store:
         except sqlite3.Error as e:
             raise StoreError(str(e)) from e
 
+    # ── Adjudication (accept / reject / dismiss) ──────────────────
+
+    def _close_contestation_event(self, event_id: int) -> list[str]:
+        """Close an event's links and recompute is_contested for linked nodes.
+
+        1. Find all nodes linked to this event.
+        2. Delete the links.
+        3. For each formerly-linked node, if it has no other pending event,
+           clear is_contested.
+        4. Return the list of formerly-linked node ids.
+        """
+        try:
+            # 1. Find linked nodes
+            linked = self._con.execute(
+                "SELECT node_id FROM event_node_link WHERE event_id = ?",
+                (event_id,),
+            ).fetchall()
+            node_ids = [r["node_id"] for r in linked]
+
+            # 2. Delete links
+            self._con.execute(
+                "DELETE FROM event_node_link WHERE event_id = ?",
+                (event_id,),
+            )
+
+            # 3. Recompute is_contested for each node
+            for node_id in node_ids:
+                other = self._con.execute(
+                    """
+                    SELECT 1 FROM event_node_link enl
+                    JOIN event_queue eq ON eq.id = enl.event_id
+                    WHERE enl.node_id = ?
+                      AND eq.status = 'pending'
+                      AND enl.event_id != ?
+                    LIMIT 1
+                    """,
+                    (node_id, event_id),
+                ).fetchone()
+                if other is None:
+                    self._con.execute(
+                        "UPDATE node SET is_contested = 0, contested_at = NULL WHERE id = ?",
+                        (node_id,),
+                    )
+
+            return node_ids
+        except sqlite3.Error as e:
+            raise StoreError(str(e)) from e
+
+    def accept_proposal(self, proposal_id: int, human_note: str | None = None) -> dict:
+        """Accept a review proposal — mark affected nodes as stale, close event.
+
+        Returns status dict. Idempotent — second call returns already_resolved.
+        """
+        try:
+            now = datetime.now(timezone.utc).isoformat()
+            row = self._con.execute(
+                "SELECT event_id, status, affected_node_ids FROM review_proposal WHERE id = ?",
+                (proposal_id,),
+            ).fetchone()
+            if row is None:
+                return {"status": "not_found", "proposal_id": proposal_id}
+            if row["status"] != "pending":
+                return {"status": "already_resolved", "proposal_id": proposal_id, "current_status": row["status"]}
+
+            event_id = row["event_id"]
+            affected_node_ids = json.loads(row["affected_node_ids"])
+
+            # 4. Set affected nodes to stale
+            for node_id in affected_node_ids:
+                self._con.execute(
+                    "UPDATE node SET trust_state = 'stale' WHERE id = ?",
+                    (node_id,),
+                )
+
+            # 5. Close contestation event links
+            formerly_linked = self._close_contestation_event(event_id)
+
+            # 6. Update proposal
+            self._con.execute(
+                "UPDATE review_proposal SET status = 'accepted', resolved_at = ?, human_note = ? WHERE id = ?",
+                (now, human_note, proposal_id),
+            )
+
+            # 7. Close event
+            self._con.execute(
+                "UPDATE event_queue SET status = 'closed', closed_at = ? WHERE id = ?",
+                (now, event_id),
+            )
+
+            # Compute still_contested: intersection of formerly-linked nodes
+            # that remain is_contested=1 after cleanup
+            still_contested = []
+            for nid in formerly_linked:
+                node = self.get_node(nid)
+                if node and node["is_contested"]:
+                    still_contested.append(nid)
+
+            return {
+                "status": "accepted",
+                "proposal_id": proposal_id,
+                "affected": affected_node_ids,
+                "still_contested": still_contested,
+            }
+        except sqlite3.Error as e:
+            raise StoreError(str(e)) from e
+
+    def reject_proposal(self, proposal_id: int, human_note: str | None = None) -> dict:
+        """Reject a review proposal — close event, no trust_state changes.
+
+        Returns status dict. Idempotent.
+        """
+        try:
+            now = datetime.now(timezone.utc).isoformat()
+            row = self._con.execute(
+                "SELECT event_id, status FROM review_proposal WHERE id = ?",
+                (proposal_id,),
+            ).fetchone()
+            if row is None:
+                return {"status": "not_found", "proposal_id": proposal_id}
+            if row["status"] != "pending":
+                return {"status": "already_resolved", "proposal_id": proposal_id, "current_status": row["status"]}
+
+            event_id = row["event_id"]
+            uncontested = self._close_contestation_event(event_id)
+
+            self._con.execute(
+                "UPDATE review_proposal SET status = 'rejected', resolved_at = ?, human_note = ? WHERE id = ?",
+                (now, human_note, proposal_id),
+            )
+            self._con.execute(
+                "UPDATE event_queue SET status = 'closed', closed_at = ? WHERE id = ?",
+                (now, event_id),
+            )
+
+            return {
+                "status": "rejected",
+                "proposal_id": proposal_id,
+                "uncontested": uncontested,
+            }
+        except sqlite3.Error as e:
+            raise StoreError(str(e)) from e
+
+    def dismiss_proposal(self, proposal_id: int, human_note: str | None = None) -> dict:
+        """Dismiss a review proposal — close event, no trust_state changes.
+
+        Identical to reject except status='dismissed'.
+        Returns status dict. Idempotent.
+        """
+        try:
+            now = datetime.now(timezone.utc).isoformat()
+            row = self._con.execute(
+                "SELECT event_id, status FROM review_proposal WHERE id = ?",
+                (proposal_id,),
+            ).fetchone()
+            if row is None:
+                return {"status": "not_found", "proposal_id": proposal_id}
+            if row["status"] != "pending":
+                return {"status": "already_resolved", "proposal_id": proposal_id, "current_status": row["status"]}
+
+            event_id = row["event_id"]
+            uncontested = self._close_contestation_event(event_id)
+
+            self._con.execute(
+                "UPDATE review_proposal SET status = 'dismissed', resolved_at = ?, human_note = ? WHERE id = ?",
+                (now, human_note, proposal_id),
+            )
+            self._con.execute(
+                "UPDATE event_queue SET status = 'closed', closed_at = ? WHERE id = ?",
+                (now, event_id),
+            )
+
+            return {
+                "status": "dismissed",
+                "proposal_id": proposal_id,
+                "uncontested": uncontested,
+            }
+        except sqlite3.Error as e:
+            raise StoreError(str(e)) from e
+
     def list_edges(self, *, node_id: str | None = None, type: str | None = None,
                    relation: str | None = None) -> list[dict]:
         """List edges, optionally filtered. node_id matches from_node or to_node."""

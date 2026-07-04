@@ -525,6 +525,424 @@ class TestReviewProposal:
         created_ats = [item["created_at"] for item in queue]
         assert created_ats == sorted(created_ats)
 
+
+class TestReviewAdjudication:
+    """Tests for accept_proposal, reject_proposal, dismiss_proposal."""
+
+    @staticmethod
+    def _make_contradicts_event(store) -> tuple[int, str, str, str]:
+        """Create a contradicts edge that produces a pending event.
+        Returns (event_id, edge_id, target_node_id, asserter_node_id)."""
+        now = datetime.now(timezone.utc).isoformat()
+        target = str(uuid.uuid4())
+        store.create_node(node_id=target, kind="raw_source", depth=0, created_at=now,
+                          content_path="/tmp/fake.txt")
+        asserter = str(uuid.uuid4())
+        store.create_node(node_id=asserter, kind="summary", depth=1, created_at=now,
+                          content_path="/tmp/fake_assert.txt")
+        eid = str(uuid.uuid4())
+        store.create_edge(edge_id=eid, type="association", relation="contradicts",
+                          from_node=asserter, to_node=target)
+        row = store._con.execute(
+            "SELECT id FROM event_queue WHERE edge_id = ?", (eid,)
+        ).fetchone()
+        return (row["id"], eid, target, asserter)
+
+    @staticmethod
+    def _make_pending_proposal(store, event_id: int, affected: list[str]) -> int:
+        """Create a pending review proposal and return its id."""
+        return store.write_review_proposal(
+            event_id=event_id,
+            affected_node_ids=affected,
+            damage_boundary_node_id=affected[0] if affected else None,
+            rationale_md="test rationale",
+            confidence="high",
+        )
+
+    # ── accept_proposal ──────────────────────────────────────────────
+
+    def test_accept_proposal_sets_trust_state_stale(self):
+        """Accepting a proposal sets affected nodes to trust_state='stale'."""
+        store = _store()
+        event_id, _eid, target, asserter = self._make_contradicts_event(store)
+        affected = [target, asserter]
+        pid = self._make_pending_proposal(store, event_id, affected)
+        result = store.accept_proposal(pid)
+        assert result["status"] == "accepted"
+        assert result["proposal_id"] == pid
+        assert sorted(result["affected"]) == sorted(affected)
+        for nid in affected:
+            node = store.get_node(nid)
+            assert node is not None
+            assert node["trust_state"] == "stale"
+
+    def test_accept_proposal_closes_event_and_proposal(self):
+        """After accept, event is closed with closed_at; proposal is accepted with resolved_at."""
+        store = _store()
+        event_id, _eid, target, asserter = self._make_contradicts_event(store)
+        pid = self._make_pending_proposal(store, event_id, [target, asserter])
+        store.accept_proposal(pid)
+        # Proposal row
+        prop_row = store._con.execute(
+            "SELECT status, resolved_at FROM review_proposal WHERE id = ?", (pid,)
+        ).fetchone()
+        assert prop_row["status"] == "accepted"
+        assert prop_row["resolved_at"] is not None
+        # Event row
+        evt_row = store._con.execute(
+            "SELECT status, closed_at FROM event_queue WHERE id = ?", (event_id,)
+        ).fetchone()
+        assert evt_row["status"] == "closed"
+        assert evt_row["closed_at"] is not None
+
+    def test_accept_proposal_clears_is_contested(self):
+        """After accepting the only covering event, nodes become uncontested."""
+        store = _store()
+        event_id, _eid, target, asserter = self._make_contradicts_event(store)
+        pid = self._make_pending_proposal(store, event_id, [target, asserter])
+        store.accept_proposal(pid)
+        for nid in (target, asserter):
+            node = store.get_node(nid)
+            assert node is not None
+            assert node["is_contested"] is False
+            assert node["contested_at"] is None
+
+    def test_accept_proposal_multi_event_coverage(self):
+        """Node covered by 2 events stays contested after first accept, clears after second."""
+        store = _store()
+        # Create a target node
+        now = datetime.now(timezone.utc).isoformat()
+        target = str(uuid.uuid4())
+        store.create_node(node_id=target, kind="raw_source", depth=0, created_at=now,
+                          content_path="/tmp/target.txt")
+        # Two contradictors
+        a1 = str(uuid.uuid4())
+        store.create_node(node_id=a1, kind="summary", depth=1, created_at=now,
+                          content_path="/tmp/a1.txt")
+        a2 = str(uuid.uuid4())
+        store.create_node(node_id=a2, kind="summary", depth=1, created_at=now,
+                          content_path="/tmp/a2.txt")
+        # Contradiction 1
+        e1 = str(uuid.uuid4())
+        store.create_edge(edge_id=e1, type="association", relation="contradicts",
+                          from_node=a1, to_node=target)
+        ev1 = store._con.execute("SELECT id FROM event_queue WHERE edge_id = ?", (e1,)).fetchone()["id"]
+        # Contradiction 2
+        e2 = str(uuid.uuid4())
+        store.create_edge(edge_id=e2, type="association", relation="contradicts",
+                          from_node=a2, to_node=target)
+        ev2 = store._con.execute("SELECT id FROM event_queue WHERE edge_id = ?", (e2,)).fetchone()["id"]
+        # Proposals for both
+        p1 = self._make_pending_proposal(store, ev1, [target])
+        p2 = self._make_pending_proposal(store, ev2, [target])
+        # First accept — target should stay contested (second event still open)
+        r1 = store.accept_proposal(p1)
+        assert r1["status"] == "accepted"
+        node = store.get_node(target)
+        assert node is not None
+        assert node["is_contested"] is True, "target should still be contested"
+        assert r1["still_contested"] == [target]
+        # Second accept — target becomes clean
+        r2 = store.accept_proposal(p2)
+        assert r2["status"] == "accepted"
+        node = store.get_node(target)
+        assert node is not None
+        assert node["is_contested"] is False
+        assert r2["still_contested"] == []
+
+    def test_accept_proposal_human_approved_override(self):
+        """Human-approved nodes get set to stale just like any other trust_state."""
+        store = _store()
+        event_id, _eid, target, asserter = self._make_contradicts_event(store)
+        store._con.execute(
+            "UPDATE node SET trust_state = 'human-approved' WHERE id = ?", (target,)
+        )
+        pid = self._make_pending_proposal(store, event_id, [target, asserter])
+        store.accept_proposal(pid)
+        node = store.get_node(target)
+        assert node is not None
+        assert node["trust_state"] == "stale"
+
+    def test_accept_proposal_idempotent(self):
+        """Second accept returns already_resolved with correct current_status."""
+        store = _store()
+        event_id, _eid, target, asserter = self._make_contradicts_event(store)
+        pid = self._make_pending_proposal(store, event_id, [target, asserter])
+        r1 = store.accept_proposal(pid)
+        assert r1["status"] == "accepted"
+        r2 = store.accept_proposal(pid)
+        assert r2["status"] == "already_resolved"
+        assert r2["current_status"] == "accepted"
+        # No re-execution: event_node_link should still be empty
+        links = store._con.execute(
+            "SELECT COUNT(*) FROM event_node_link WHERE event_id = ?", (event_id,)
+        ).fetchone()[0]
+        assert links == 0
+
+    def test_accept_proposal_raises_store_error_on_db_failure(self):
+        """StoreError wraps db failures during accept."""
+        store = _store()
+        event_id, _eid, target, asserter = self._make_contradicts_event(store)
+        pid = self._make_pending_proposal(store, event_id, [target, asserter])
+
+        class _FailingConnection:
+            def __init__(self, conn, fail_after):
+                self._conn = conn
+                self._count = 0
+                self._fail_after = fail_after
+            def execute(self, sql, params=None):
+                self._count += 1
+                if self._count >= self._fail_after:
+                    raise sqlite3.OperationalError("simulated failure")
+                if params is not None:
+                    return self._conn.execute(sql, params)
+                return self._conn.execute(sql)
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+        real_con = store._con
+        store._con = _FailingConnection(real_con, fail_after=3)
+        with pytest.raises(StoreError):
+            store.accept_proposal(pid)
+        # Proposal remains pending — final UPDATE never ran
+        prop_row = real_con.execute(
+            "SELECT status FROM review_proposal WHERE id = ?", (pid,)
+        ).fetchone()
+        assert prop_row["status"] == "pending"
+        evt_row = real_con.execute(
+            "SELECT status FROM event_queue WHERE id = ?", (event_id,)
+        ).fetchone()
+        assert evt_row["status"] == "pending"
+
+    # ── reject_proposal ──────────────────────────────────────────────
+
+    def test_reject_proposal_does_not_modify_trust_state(self):
+        """Rejecting a proposal does NOT change trust_state."""
+        store = _store()
+        event_id, _eid, target, asserter = self._make_contradicts_event(store)
+        affected = [target, asserter]
+        pid = self._make_pending_proposal(store, event_id, affected)
+        original_states = {}
+        for nid in affected:
+            node = store.get_node(nid)
+            original_states[nid] = node["trust_state"] if node else None
+        store.reject_proposal(pid)
+        for nid in affected:
+            node = store.get_node(nid)
+            assert node is not None
+            assert node["trust_state"] == original_states[nid], \
+                f"{nid} trust_state should not change on reject"
+
+    def test_reject_proposal_clears_is_contested(self):
+        """Reject still clears is_contested via _close_contestation_event."""
+        store = _store()
+        event_id, _eid, target, asserter = self._make_contradicts_event(store)
+        pid = self._make_pending_proposal(store, event_id, [target, asserter])
+        result = store.reject_proposal(pid)
+        assert result["uncontested"] == [target]
+        for nid in (target, asserter):
+            node = store.get_node(nid)
+            assert node is not None
+        node = store.get_node(target)
+        assert node is not None
+        assert node["is_contested"] is False
+        assert node["contested_at"] is None
+
+    def test_reject_proposal_closes_event_and_proposal(self):
+        """Reject sets proposal status=rejected and event status=closed."""
+        store = _store()
+        event_id, _eid, target, asserter = self._make_contradicts_event(store)
+        pid = self._make_pending_proposal(store, event_id, [target, asserter])
+        result = store.reject_proposal(pid)
+        assert result["uncontested"] == [target]
+        assert result["status"] == "rejected"
+        assert result["proposal_id"] == pid
+        prop_row = store._con.execute(
+            "SELECT status, resolved_at FROM review_proposal WHERE id = ?", (pid,)
+        ).fetchone()
+        assert prop_row["status"] == "rejected"
+        assert prop_row["resolved_at"] is not None
+        evt_row = store._con.execute(
+            "SELECT status, closed_at FROM event_queue WHERE id = ?", (event_id,)
+        ).fetchone()
+        assert evt_row["status"] == "closed"
+        assert evt_row["closed_at"] is not None
+
+    def test_reject_proposal_stores_human_note(self):
+        """human_note is stored when provided."""
+        store = _store()
+        event_id, _eid, target, asserter = self._make_contradicts_event(store)
+        pid = self._make_pending_proposal(store, event_id, [target, asserter])
+        store.reject_proposal(pid, human_note="Not convincing")
+        row = store._con.execute(
+            "SELECT human_note FROM review_proposal WHERE id = ?", (pid,)
+        ).fetchone()
+        assert row["human_note"] == "Not convincing"
+
+    def test_reject_proposal_idempotent(self):
+        """Second reject returns already_resolved with correct current_status."""
+        store = _store()
+        event_id, _eid, target, asserter = self._make_contradicts_event(store)
+        pid = self._make_pending_proposal(store, event_id, [target, asserter])
+        store.reject_proposal(pid)
+        r2 = store.reject_proposal(pid)
+        assert r2["status"] == "already_resolved"
+        assert r2["current_status"] == "rejected"
+
+    def test_reject_proposal_raises_store_error_on_db_failure(self):
+        """StoreError wraps db failures during reject."""
+        store = _store()
+        event_id, _eid, target, asserter = self._make_contradicts_event(store)
+        pid = self._make_pending_proposal(store, event_id, [target, asserter])
+
+        class _FailingConnection:
+            def __init__(self, conn, fail_after):
+                self._conn = conn
+                self._count = 0
+                self._fail_after = fail_after
+            def execute(self, sql, params=None):
+                self._count += 1
+                if self._count >= self._fail_after:
+                    raise sqlite3.OperationalError("simulated failure")
+                if params is not None:
+                    return self._conn.execute(sql, params)
+                return self._conn.execute(sql)
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+        real_con = store._con
+        store._con = _FailingConnection(real_con, fail_after=3)
+        with pytest.raises(StoreError):
+            store.reject_proposal(pid)
+        prop_row = real_con.execute(
+            "SELECT status FROM review_proposal WHERE id = ?", (pid,)
+        ).fetchone()
+        assert prop_row["status"] == "pending"
+
+    def test_reject_proposal_preserves_human_approved(self):
+        """Reject does NOT touch trust_state — human-approved stays."""
+        store = _store()
+        event_id, _eid, target, asserter = self._make_contradicts_event(store)
+        store._con.execute(
+            "UPDATE node SET trust_state = 'human-approved' WHERE id = ?", (target,)
+        )
+        pid = self._make_pending_proposal(store, event_id, [target, asserter])
+        store.reject_proposal(pid)
+        node = store.get_node(target)
+        assert node is not None
+        assert node["trust_state"] == "human-approved"
+
+    # ── dismiss_proposal ─────────────────────────────────────────────
+
+    def test_dismiss_proposal_does_not_modify_trust_state(self):
+        """Dismissing does NOT change trust_state."""
+        store = _store()
+        event_id, _eid, target, asserter = self._make_contradicts_event(store)
+        pid = self._make_pending_proposal(store, event_id, [target, asserter])
+        original = {}
+        for nid in (target, asserter):
+            node = store.get_node(nid)
+            original[nid] = node["trust_state"] if node else None
+        store.dismiss_proposal(pid)
+        for nid in (target, asserter):
+            node = store.get_node(nid)
+            assert node is not None
+            assert node["trust_state"] == original[nid]
+
+    def test_dismiss_proposal_uses_dismissed_status(self):
+        """Dismiss sets proposal status='dismissed'."""
+        store = _store()
+        event_id, _eid, target, asserter = self._make_contradicts_event(store)
+        pid = self._make_pending_proposal(store, event_id, [target, asserter])
+        result = store.dismiss_proposal(pid)
+        assert result["status"] == "dismissed"
+        assert result["proposal_id"] == pid
+        assert result["uncontested"] == [target]
+        prop_row = store._con.execute(
+            "SELECT status FROM review_proposal WHERE id = ?", (pid,)
+        ).fetchone()
+        assert prop_row["status"] == "dismissed"
+
+    def test_dismiss_proposal_idempotent(self):
+        """Second dismiss returns already_resolved with correct current_status."""
+        store = _store()
+        event_id, _eid, target, asserter = self._make_contradicts_event(store)
+        pid = self._make_pending_proposal(store, event_id, [target, asserter])
+        store.dismiss_proposal(pid)
+        r2 = store.dismiss_proposal(pid)
+        assert r2["status"] == "already_resolved"
+        assert r2["current_status"] == "dismissed"
+
+    def test_dismiss_proposal_stores_human_note(self):
+        """human_note stored on dismiss."""
+        store = _store()
+        event_id, _eid, target, asserter = self._make_contradicts_event(store)
+        pid = self._make_pending_proposal(store, event_id, [target, asserter])
+        store.dismiss_proposal(pid, human_note="Spam")
+        row = store._con.execute(
+            "SELECT human_note FROM review_proposal WHERE id = ?", (pid,)
+        ).fetchone()
+        assert row["human_note"] == "Spam"
+
+    def test_dismiss_proposal_empty_affected(self):
+        """Dismiss with empty affected list still works."""
+        store = _store()
+        event_id, _eid, target, asserter = self._make_contradicts_event(store)
+        # Create a proposal with empty affected
+        pid = store.write_review_proposal(
+            event_id=event_id,
+            affected_node_ids=[],
+            damage_boundary_node_id=None,
+            rationale_md="empty",
+            confidence="low",
+        )
+        result = store.dismiss_proposal(pid)
+        assert result["status"] == "dismissed"
+        assert result["uncontested"] == [target]  # target is linked via event_node_link
+        evt_row = store._con.execute(
+            "SELECT status FROM event_queue WHERE id = ?", (event_id,)
+        ).fetchone()
+        assert evt_row["status"] == "closed"
+        # is_contested should still be recomputed — target and asserter
+        # are linked to the event through event_node_link
+        node = store.get_node(target)
+        assert node is not None
+        assert node["is_contested"] is False
+
+    def test_dismiss_proposal_atomic(self):
+        """Mid-flight failure rolls back all changes."""
+        store = _store()
+        event_id, _eid, target, asserter = self._make_contradicts_event(store)
+        pid = self._make_pending_proposal(store, event_id, [target, asserter])
+
+        class _FailingConnection:
+            def __init__(self, conn, fail_after):
+                self._conn = conn
+                self._count = 0
+                self._fail_after = fail_after
+            def execute(self, sql, params=None):
+                self._count += 1
+                if self._count >= self._fail_after:
+                    raise sqlite3.OperationalError("simulated failure")
+                if params is not None:
+                    return self._conn.execute(sql, params)
+                return self._conn.execute(sql)
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+        store._con = _FailingConnection(store._con, fail_after=6)
+        with pytest.raises(StoreError):
+            store.dismiss_proposal(pid)
+        real_con = store._con._conn
+        prop_row = real_con.execute(
+            "SELECT status FROM review_proposal WHERE id = ?", (pid,)
+        ).fetchone()
+        assert prop_row["status"] == "pending"
+        evt_row = real_con.execute(
+            "SELECT status FROM event_queue WHERE id = ?", (event_id,)
+        ).fetchone()
+        assert evt_row["status"] == "pending"
+
 class TestLedger:
     def test_lookup_returns_none_for_unknown_key(self):
         store = _store()

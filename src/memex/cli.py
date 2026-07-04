@@ -653,5 +653,50 @@ def review_list(ctx: click.Context) -> None:
     click.echo(json.dumps(queue))
 
 
+@review.command(name="accept")
+@click.pass_context
+@click.argument("proposal_id", type=int)
+@click.option("--note", default=None, help="Optional human note.")
+def review_accept(ctx: click.Context, proposal_id: int, note: str | None) -> None:
+    """Accept a review proposal — mark affected nodes as stale, close event."""
+    from memex.store import Store
+    db_path = ctx.parent.params["db_path"]
+    vault_path = ctx.parent.params["vault_path"]
+    _require_db(db_path)
+    with Store.open(db_path) as store:
+        result = store.accept_proposal(proposal_id, human_note=note)
+    click.echo(json.dumps(result))
+
+
+@review.command(name="reject")
+@click.pass_context
+@click.argument("proposal_id", type=int)
+@click.option("--note", default=None, help="Optional human note.")
+def review_reject(ctx: click.Context, proposal_id: int, note: str | None) -> None:
+    """Reject a review proposal — close event, no trust_state changes."""
+    from memex.store import Store
+    db_path = ctx.parent.params["db_path"]
+    vault_path = ctx.parent.params["vault_path"]
+    _require_db(db_path)
+    with Store.open(db_path) as store:
+        result = store.reject_proposal(proposal_id, human_note=note)
+    click.echo(json.dumps(result))
+
+
+@review.command(name="dismiss")
+@click.pass_context
+@click.argument("proposal_id", type=int)
+@click.option("--note", default=None, help="Optional human note.")
+def review_dismiss(ctx: click.Context, proposal_id: int, note: str | None) -> None:
+    """Dismiss a review proposal — close event, no trust_state changes."""
+    from memex.store import Store
+    db_path = ctx.parent.params["db_path"]
+    vault_path = ctx.parent.params["vault_path"]
+    _require_db(db_path)
+    with Store.open(db_path) as store:
+        result = store.dismiss_proposal(proposal_id, human_note=note)
+    click.echo(json.dumps(result))
+
+
 if __name__ == "__main__":
     cli()
