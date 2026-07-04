@@ -134,24 +134,25 @@ def ingest(db_path: Path, vault_path: Path, url: str | None, inbox_path: Path | 
         if from_inbox:
             # ── From-inbox: ingest all pending inbox items ───────
             ingested_keys = store.list_ingested_canonical_keys()
+            inbox_items = list(store.list_inbox())
+            total = len(inbox_items)
             results = []
-            for item in store.list_inbox():
+            for i, item in enumerate(inbox_items, start=1):
                 ckey = canonical_key(item["url"])
                 if ckey not in ingested_keys:
                     result = ingest_single_url(store, vault_path, item["url"], fetcher)
                     results.append(result)
-                    # Track newly ingested keys to avoid re-processing
-                    # the same canonical key within this batch
                     if result.get("canonical_key"):
                         ingested_keys.add(result["canonical_key"])
                 else:
-                    # Already ingested — report as already_exists
                     existing = store.lookup_by_canonical_key(ckey)
-                    results.append({
+                    result = {
                         "id": existing["node_id"] if existing else None,
                         "status": "already_exists",
                         "canonical_key": ckey,
-                    })
+                    }
+                    results.append(result)
+                click.echo(f"[{i}/{total}] {result.get('status','?')}  {item['url']}", err=True)
             click.echo(json.dumps(results))
         elif inbox_path is not None:
             source_name = f"whatsapp:{inbox_path}"
@@ -163,15 +164,17 @@ def ingest(db_path: Path, vault_path: Path, url: str | None, inbox_path: Path | 
             cursor_index = int(cursor_str) if cursor_str is not None else 0
             new_items = all_items[cursor_index:]
 
-            results = [
-                ingest_single_url(
+            total = len(new_items)
+            results = []
+            for i, item in enumerate(new_items, start=1):
+                result = ingest_single_url(
                     store, vault_path, item["url"], fetcher,
                     source_name=source_name,
                     item_timestamp=item["timestamp"],
                     item_note=item.get("note"),
                 )
-                for item in new_items
-            ]
+                results.append(result)
+                click.echo(f"[{i}/{total}] {result.get('status','?')}  {item['url']}", err=True)
 
             # Advance cursor to end of all items seen (idempotent re-runs)
             store.set_cursor(source_name, str(len(all_items)))
