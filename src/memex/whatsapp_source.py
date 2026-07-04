@@ -3,8 +3,9 @@
 Parses a WhatsApp `.txt` chat export and yields captured items:
   { url, timestamp, note? }
 
-WhatsApp message format:
-  [DD/MM/YYYY, HH:MM:SS] Author: message text
+WhatsApp message formats:
+  [DD/MM/YYYY, HH:MM:SS] Author: message text       (export with seconds)
+  DD/MM/YY, HH:MM - Author: message text             (export without seconds)
 
 Only messages containing a URL are emitted. Non-link chatter is silently ignored.
 The timestamp is taken from the message header and returned as ISO 8601.
@@ -17,9 +18,13 @@ from datetime import datetime
 from typing import Iterator, TypedDict
 
 
-# Matches a WhatsApp message header: [DD/MM/YYYY, HH:MM:SS] Author:
+# Matches WhatsApp message headers in two common export formats:
 _HEADER_RE = re.compile(
-    r"^\[(\d{2}/\d{2}/\d{4}),\s*(\d{2}:\d{2}:\d{2})\]\s+([^:]+):\s*"
+    r"^\[?"
+    r"(\d{2}/\d{2}/\d{2,4}),\s*"
+    r"(\d{2}:\d{2}(?::\d{2})?)"
+    r"\]?\s*(?:-\s*)?"
+    r"([^:]+):\s*"
 )
 
 # Matches a URL in text (greedy, stops at whitespace)
@@ -53,15 +58,20 @@ def parse_whatsapp_export(text: str) -> Iterator[CapturedItem]:
         if not url_match:
             continue
 
-        # Parse timestamp → ISO 8601
-        dt = datetime.strptime(f"{date_str} {time_str}", "%d/%m/%Y %H:%M:%S")
+        # Parse timestamp → ISO 8601 (handle 2 or 4 digit year, optional seconds)
+        raw_date = date_str
+        if len(date_str.split("/")[-1]) == 2:
+            # Two-digit year: assume 20xx
+            parts = date_str.split("/")
+            raw_date = f"{parts[0]}/{parts[1]}/20{parts[2]}"
+        fmt = "%d/%m/%Y %H:%M:%S" if time_str.count(":") == 2 else "%d/%m/%Y %H:%M"
+        dt = datetime.strptime(f"{raw_date} {time_str}", fmt)
         timestamp = dt.isoformat()
 
         url = url_match.group(0)
 
         # Build note: message text with URL removed, whitespace collapsed
         note_text = _URL_RE.sub("", message_text).strip()
-        # Collapse multiple spaces left behind after URL removal
         note_text = re.sub(r"  +", " ", note_text)
 
         item: CapturedItem = {"url": url, "timestamp": timestamp}
