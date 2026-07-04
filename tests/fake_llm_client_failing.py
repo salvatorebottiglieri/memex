@@ -15,3 +15,9 @@ class FakeLLMClientFailing:
         # Deliberately omit "> Synthesis:" and keep it short (< MIN_CHARS=100)
         prose = "This derivation has no synthesis marker and is intentionally bad."
         return DerivationResult(prose=prose, synthesis_statements=[])
+
+    def review(self, target_content: str, asserting_content: str, edge_payload: dict) -> None:
+        raise NotImplementedError(
+            "FakeLLMClientFailing is for derive-failure testing only; "
+            "review() should not be called in these tests."
+        )
