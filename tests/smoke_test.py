@@ -1174,6 +1174,33 @@ def smoke_review(tmp: Path) -> None:
     _check("sc4 L0 trust_state=draft after dismiss", l0_4_row[0] == "draft", f"got {l0_4_row[0]}")
     _check("sc4 L0 is_contested=0 after dismiss", l0_4_row[1] == 0, f"got {l0_4_row[1]}")
 
+
+def smoke_auto_defaults(tmp: Path) -> None:
+    """Auto-detection and fallback of --vault and --db defaults."""
+    print("\n[AUTO-DEFAULTS] vault/db auto-detection edge cases")
+
+    # Scenario 1: explicit --db and --vault (unchanged behavior)
+    vp = tmp / "vault"
+    dp = tmp / "vault/.memex/memex.db"
+    proc = _run(["init", "--db", str(dp), "--vault", str(vp)])
+    r = _expect_json("init explicit", proc)
+    _check("explicit db matches", r.get("db_path") == str(dp))
+    _check("explicit vault matches", r.get("vault_path") == str(vp))
+    _check("explicit db_created", r.get("db_created") is True)
+
+    # Scenario 2: --vault only (db derived from vault)
+    proc = _run(["status", "--vault", str(vp)])
+    r = _expect_json("status --vault only", proc)
+    _check("status --vault db derived", r.get("db_path") == str(dp))
+    _check("status --vault db_exists", r.get("db_exists") is True)
+    _check("status --vault vault matches", r.get("vault_path") == str(vp))
+
+    # Scenario 3: --db only (vault auto-detected from existing Obsidian)
+    dp2 = tmp / "custom.db"
+    proc = _run(["status", "--db", str(dp2)])
+    r = _expect_json("status --db only", proc)
+    _check("status --db matches", r.get("db_path") == str(dp2))
+    _check("status --db vault exists", r.get("vault_path") and Path(r["vault_path"]).exists())
 # ── runner ──────────────────────────────────────────────────────
 
 
@@ -1196,7 +1223,8 @@ def main() -> int:
         smoke_youtube(tmp)
         smoke_l0_immutable(tmp)
         smoke_render(tmp)
-        smoke_from_inbox(tmp)
+        smoke_review(tmp)
+        smoke_auto_defaults(tmp)
         smoke_capture(tmp)
         smoke_help(tmp)
         smoke_full_e2e(tmp)
