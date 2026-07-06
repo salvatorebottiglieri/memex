@@ -6,7 +6,7 @@ A personal wiki / second brain.
 
 Inspired by Andrej Karpathy's personal-wiki approach and by `iusztinpaul/ai-research-os-workshop`. Obsidian is a view-only window onto the knowledge, not the engine.
 
-> Status: **ingestion + derivation + rendering layers implemented.** Core CLI operational.
+> Status: **ingestion + derivation + rendering + staleness propagation + review layers implemented.** Core CLI operational.
 
 ## CLI
 
@@ -37,7 +37,7 @@ memex exposes a JSON-only CLI (one command per operation, all output is structur
 
 - **[CONTEXT.md](CONTEXT.md)** — the glossary (ubiquitous language).
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — vision, architecture map, open questions, non-goals.
-- **[docs/adr/](docs/adr/)** — the architectural decisions (0001–0010) and *why* each was made.
+- **[docs/adr/](docs/adr/)** — the architectural decisions (0001–0012) and *why* each was made.
 
 ## Develop
 
@@ -45,7 +45,7 @@ memex exposes a JSON-only CLI (one command per operation, all output is structur
 uv sync                       # install dependencies
 uv run memex init --db /tmp/memex.db --vault /tmp/vault  # quick smoke test
 uv run pytest                                                 # run the unit suite
-uv run python tests/smoke_test.py                             # aggressive end-to-end smoke tests (real subprocess, 93 checks)
+uv run python tests/smoke_test.py                             # aggressive end-to-end smoke tests (real subprocess, 171 checks)
 ```
 
 All output is JSON (AXI standard) — pipe to `jq` or your agent's tools.

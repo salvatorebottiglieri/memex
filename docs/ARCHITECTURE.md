@@ -52,11 +52,11 @@ flowchart TB
 
   subgraph Capture
     WA["WhatsApp export .txt<br/>(per-file cursor, not one-shot)"]
-    TG["Telegram Saved Messages<br/>planned — ADR-0006"]
+    TG["Telegram Saved Messages<br/>(ADR-0006)"]
   end
 
   WA -->|parse_whatsapp_export| INBOX["inbox table<br/>(url + ts + note)"]
-  TG -.-> INBOX
+  TG -->|parse_telegram_export| INBOX
 
   INBOX -->|ingest --inbox| ING["Ingestion"]
   URL["Direct URL"] -->|ingest &lt;url&gt;| ING
@@ -101,7 +101,7 @@ flowchart TB
 - [0012](adr/0012-staleness-propagation-via-contested.md) — Staleness propagation via contested state and human review
 ## Open questions (deferred)
 
-- **Model choice & cost:** `AnthropicLLMClient` currently defaults to `claude-opus-4-5`. Switch to Sonnet for bulk derivation once cost matters; keep Opus for higher-tier synthesis. Tune when real volume arrives.
+- **Model choice & cost:** `AnthropicAgent` currently defaults to `claude-opus-4-5`. Switch to Sonnet for bulk derivation once cost matters; keep Opus for higher-tier synthesis. Tune when real volume arrives.
 - **Tier seed:** `raw` + `notes` are built; `synthesis` not yet. Let real use reveal whether more ordinal ranks are needed (gated, ADR-0002).
 - **Source-type extractors:** HTML article is built. YouTube transcript (the canonical-key mapping is already in `canonical_key.py`) and PDF are next. Tweets/X and others later.
 - **Edit round-trip:** if I hand-edit a wikilink in Obsidian, a reconcile step is needed (edge case).
