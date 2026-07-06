@@ -32,7 +32,7 @@ Re-derivation of `stale` nodes is **lazy** (ADR-0003): the next `memex derive` n
 
 ## Review agent
 
-The review proposal is produced by an LLM agent invoked by `memex review`. The agent is **shared with the deriver** via the existing `MEMEX_LLM_MODULE` seam; what differs is the system prompt and the input shape, not the underlying model. The agent receives the target node's content, the asserting node's content, and the payload of the `contradicts` edge, and returns a structured `TriageResult` (`affected_node_ids`, `damage_boundary_node_id`, `rationale_md`, `confidence`).
+The review proposal is produced by an LLM agent invoked by `memex review`. The agent is **shared with the deriver** via the existing `MEMEX_AGENT` seam; what differs is the system prompt and the input shape, not the underlying model. The agent receives the target node's content, the asserting node's content, and the payload of the `contradicts` edge, and returns a structured `ReviewProposal` (`affected_node_ids`, `damage_boundary_node_id`, `rationale_md`, `confidence`).
 
 This is deliberately **not a deterministic check** (ADR-0011 excludes it). The review agent is a non-deterministic proposal step whose output the human is expected to read, not rubber-stamp.
 

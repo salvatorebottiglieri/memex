@@ -31,7 +31,7 @@ more conservative on scope (single user, no discovery/web-research subsystem).
 | Pending set (captured-but-not-ingested) | **built** | `memex list --pending` + `memex ingest --from-inbox` |
 | Inbox flush (inbox → ledger) | **built** | `memex ingest --from-inbox` |
 | Store deep module (CLI is thin) | **built** | `memex.store.Store` |
-| Test injection via env var | **built** | `MEMEX_FETCHER_MODULE`, `MEMEX_LLM_MODULE` |
+| Test injection via env var | **built** | `MEMEX_FETCHER_MODULE`, `MEMEX_AGENT` |
 | Telegram Saved-Messages capture | **built** (slice 2: protocol + fake) | `memex capture` via `MEMEX_TELEGRAM_SOURCE` |
 | Ingest from inbox (separated from capture) | **built** | `memex ingest --from-inbox` |
 | Lazy density/demand trigger for derivations | manual only (ADR-0003) | `memex derive` is invoked explicitly |
@@ -67,7 +67,7 @@ flowchart TB
 
   ING -.capture-only path.->|"ingest --inbox currently<br/>captures AND ingests atomically"| INBOX
 
-  ING -->|derive &lt;l0-id&gt;| DERIV["Deriver<br/>(LLMClient via MEMEX_LLM_MODULE)"]
+  ING -->|derive &lt;l0-id&gt;| DERIV["Deriver<br/>(Agent via MEMEX_AGENT)"]
   DERIV -->|"notes-tier summary,<br/>provenance edge"| DB[("SQLite<br/>node + edge")]
   DERIV -->|"writes derivation prose"| DMD["&lt;deriv-id&gt;.md"]
 

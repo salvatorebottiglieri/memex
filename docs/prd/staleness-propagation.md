@@ -45,7 +45,7 @@ The system gains: a queue the user can act on, an audit trail of every contestat
 18. As a user, I want `memex list` to include the `is_contested` flag in its output, so that I can scan for contested nodes in bulk.
 19. As a user, I want the markdown frontmatter rendered by `memex render` to include a `trust_state/contested` tag when applicable, so that Obsidian surfaces the state.
 20. As a user, I want the agent's "can I stop here" rule to be updated so that a node is stoppable only if `trust_state ∈ {auto-verified, human-approved}` AND `is_contested = 0`, so that I never stop on contested information.
-21. As a user, I want the review agent to use the same LLM seam (`MEMEX_LLM_MODULE`) as the deriver, so that I do not need a second env var or a second test-injection module.
+21. As a user, I want the review agent to use the same agent seam (`MEMEX_AGENT`) as the deriver, so that I do not need a second env var or a second test-injection module.
 22. As a user, I want the review agent to have a different system prompt from the deriver, so that its role (analysis, not generation) is clear to the model.
 23. As a user, I want the review agent to receive both the target node's content and the asserting node's content, so that it can reason about the contradiction.
 24. As a user, I want the review agent to receive the `contradicts` edge payload, so that it understands the reason given for the contradiction.
@@ -124,7 +124,7 @@ The new columns and tables are added inside the existing `init_schema` flow. The
 
 **`src/memex/llm_client.py`**:
 
-- The `LLMClient` base class gains a `review(target_content, asserting_content, edge_payload) -> ReviewProposal` method, alongside the existing `derive`. Same seam (`MEMEX_LLM_MODULE`), same test-injection surface.
+- The `Agent` base class gains a `review(target_content, asserting_content, edge_payload) -> ReviewProposal` method, alongside the existing `derive`. Same seam (`MEMEX_AGENT`), same test-injection surface.
 - A `ReviewProposal` dataclass is added (mirroring the existing `DerivationResult`).
 - A `load_llm_client` change is **not** needed: the seam loads the same class, which now exposes two methods.
 - The Anthropic implementation adds a second method with a different system prompt; the JSON parsing logic mirrors the deriver's `prose` / `synthesis_statements` pattern, now for `affected_node_ids` / `damage_boundary_node_id` / `rationale_md` / `confidence`.
@@ -200,7 +200,7 @@ The system prompt (stored in `llm_client.py` next to the deriver's) instructs th
 
 - Re-ingest / refresh L0 from URL (the upstream-drift variant rejected in the design discussion).
 - Time-based TTL on trust state (the time-based variant rejected in the design discussion).
-- A second, separate LLM module for the review agent (the same `MEMEX_LLM_MODULE` is used; the prompt differs, not the model).
+- A second, separate agent module for the review agent (the same `MEMEX_AGENT` is used; the prompt differs, not the model).
 - Concurrency model beyond SQLite's default file-level locking (no WAL mode, no connection pooling).
 - Schema versioning or migration history (the existing `try/except ALTER TABLE` pattern continues).
 - A UI for the review queue beyond the CLI. (Obsidian frontmatter tags are the only human-facing visualisation.)
