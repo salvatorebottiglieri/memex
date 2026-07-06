@@ -671,6 +671,23 @@ class Store:
         except sqlite3.Error as e:
             raise StoreError(str(e)) from e
 
+    def get_node_open_events(self, node_id: str) -> list[int]:
+        """Return event_ids of all pending events that cover ``node_id``."""
+        try:
+            rows = self._con.execute(
+                """
+                SELECT enl.event_id
+                FROM event_node_link enl
+                JOIN event_queue eq ON eq.id = enl.event_id
+                WHERE enl.node_id = ?
+                  AND eq.status = 'pending'
+                """,
+                (node_id,),
+            ).fetchall()
+            return [r["event_id"] for r in rows]
+        except sqlite3.Error as e:
+            raise StoreError(str(e)) from e
+
     def list_edges(self, *, node_id: str | None = None, type: str | None = None,
                    relation: str | None = None) -> list[dict]:
         """List edges, optionally filtered. node_id matches from_node or to_node."""

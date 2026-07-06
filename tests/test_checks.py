@@ -40,6 +40,7 @@ def _setup_db(tmp_path: Path) -> tuple[sqlite3.Connection, str, Path]:
             depth        INTEGER NOT NULL,
             content_path TEXT NOT NULL,
             created_at   TEXT NOT NULL,
+            check_failures TEXT,
             is_contested INTEGER NOT NULL DEFAULT 0,
             contested_at TEXT
         );

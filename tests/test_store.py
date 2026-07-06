@@ -994,11 +994,67 @@ class TestList:
         assert nodes[1]["id"] == "n2"
 
 
+class TestGetNodeOpenEvents:
+    def test_returns_empty_for_unknown_node(self):
+        """A node with no events returns an empty list."""
+        store = _store()
+        result = store.get_node_open_events("nonexistent")
+        assert result == []
+
+    def test_returns_event_ids_for_pending_events(self):
+        """A node linked to a pending event yields that event's id."""
+        store = _store()
+        now = _utcnow()
+        l0 = str(uuid.uuid4())
+        src = str(uuid.uuid4())
+        edge_id = str(uuid.uuid4())
+        store.create_node(node_id=l0, kind="raw_source", depth=0, created_at=now)
+        store.create_node(node_id=src, kind="summary", depth=1, created_at=now)
+        store.create_edge(edge_id=edge_id, type="association",
+                          relation="contradicts", from_node=src, to_node=l0)
+        result = store.get_node_open_events(l0)
+        assert len(result) == 1
+        assert isinstance(result[0], int)
+
+    def test_returns_multiple_event_ids(self):
+        """Two contradicts edges against the same node create two pending events."""
+        store = _store()
+        now = _utcnow()
+        l0 = str(uuid.uuid4())
+        src1 = str(uuid.uuid4())
+        src2 = str(uuid.uuid4())
+        for nid, kind in [(l0, "raw_source"), (src1, "summary"), (src2, "summary")]:
+            store.create_node(node_id=nid, kind=kind, depth=0, created_at=now)
+        store.create_edge(edge_id=str(uuid.uuid4()), type="association",
+                          relation="contradicts", from_node=src1, to_node=l0)
+        store.create_edge(edge_id=str(uuid.uuid4()), type="association",
+                          relation="contradicts", from_node=src2, to_node=l0)
+        result = store.get_node_open_events(l0)
+        assert len(result) == 2
+        assert all(isinstance(eid, int) for eid in result)
+
+    def test_excludes_closed_events(self):
+        """Closed events are not returned."""
+        store = _store()
+        now = _utcnow()
+        l0 = str(uuid.uuid4())
+        src = str(uuid.uuid4())
+        store.create_node(node_id=l0, kind="raw_source", depth=0, created_at=now)
+        store.create_node(node_id=src, kind="summary", depth=1, created_at=now)
+        store.create_edge(edge_id=str(uuid.uuid4()), type="association",
+                          relation="contradicts", from_node=src, to_node=l0)
+        # Close the event manually
+        store._con.execute("UPDATE event_queue SET status = 'closed' WHERE 1=1")
+        result = store.get_node_open_events(l0)
+        assert result == []
+
+
 class TestEdgeCursor:
     def test_edge_methods_exist(self):
         store = _store()
         for name in ("create_edge", "list_edges", "find_provenance_descendants",
-                     "open_contestation_event", "link_event_to_node"):
+                     "open_contestation_event", "link_event_to_node",
+                     "get_node_open_events"):
             assert callable(getattr(store, name)), f"store.{name} is not callable"
 
     def test_cursor_methods_exist(self):
