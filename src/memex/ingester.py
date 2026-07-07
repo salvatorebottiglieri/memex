@@ -73,9 +73,12 @@ def ingest_single_url(
         result = fetcher.fetch(url)
         content = result.content
         title = result.title
+        fetched_content_path = result.content_path
     except FetchError as exc:
         failed = True
         fetch_error_msg = str(exc)
+        fetched_content_path = None
+
 
     # --- Write L0 markdown file (only on success, skip stubs < 100 chars) ---
     content_path = ""
@@ -84,7 +87,9 @@ def ingest_single_url(
         md_path = vault_path / f"{node_id}.md"
         md_path.write_text(content, encoding="utf-8")
         content_path = str(md_path)
-
+    elif fetched_content_path:
+        # Content too short (e.g. YouTube metadata only), but fetcher provided a cache path
+        content_path = fetched_content_path
     # --- Insert node + source rows ---
     store.create_node(
         node_id=node_id,
