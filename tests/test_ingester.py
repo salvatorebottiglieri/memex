@@ -66,3 +66,23 @@ def test_ingest_single_url_writes_markdown(tmp_path):
     md_path = vault_path / f"{result['id']}.md"
     assert md_path.exists()
     assert "Content for" in md_path.read_text()
+
+
+def test_ingest_single_url_pdf_url(tmp_path):
+    """Ingesting a .pdf URL works through the pipeline with a fake fetcher."""
+    db_path = tmp_path / "test.db"
+    vault_path = tmp_path / "vault"
+    vault_path.mkdir()
+
+    with Store.open(db_path) as store:
+        store.init_schema()
+        result = ingest_single_url(
+            store, vault_path, "https://example.com/paper.pdf", FakeFetcher()
+        )
+
+    assert result["status"] == "ingested"
+    assert result["canonical_key"] == "https://example.com/paper.pdf"
+    md_path = vault_path / f"{result['id']}.md"
+    assert md_path.exists()
+    assert "Content for" in md_path.read_text()
+    assert "content_path" in result

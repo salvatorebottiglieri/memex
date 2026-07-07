@@ -24,6 +24,7 @@ FAKE_FETCHER = "tests.conftest:FakeFetcher"
 FAKE_AGENT = "tests.fake_llm_client:FakeAgent"
 FAKE_TELEGRAM = "tests.fake_telegram_source:FakeTelegramSource"
 FAKE_FAILING_AGENT = "tests.fake_llm_client_failing:FakeLLMClientFailing"
+FAKE_FETCHER_PDF = "tests.fake_fetcher_pdf:FakePDFFetcher"
 
 
 # ── harness ──────────────────────────────────────────────────────
@@ -557,6 +558,33 @@ def smoke_youtube(tmp: Path) -> None:
     d = _expect_json("ingest youtu.be", p)
     _check("youtu.be dedupes to same node", d.get("status") == "already_exists")
 
+
+
+def smoke_fetcher_pdf(tmp: Path) -> None:
+    print("\n[FETCHER PDF] ingest a .pdf URL through RoutingFetcher")
+    db, vault = _fresh_store(tmp, "fetcherpdf")
+    p = _run(
+        ["ingest", "--db", str(db), "--vault", str(vault), "https://example.com/paper.pdf"],
+        env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER_PDF},
+    )
+    d = _expect_json("ingest pdf", p)
+    _check("pdf ingest status=ingested", d.get("status") == "ingested")
+    _check("pdf ingest has content_path", d.get("content_path") is not None)
+    _check("pdf ingest content_path has .md", d["content_path"].endswith(".md"))
+
+    node_id = d["id"]
+    md_path = vault / f"{node_id}.md"
+    _check("pdf L0 markdown exists", md_path.exists())
+    _check("pdf L0 has extracted text", "Extracted PDF" in md_path.read_text())
+
+    # Derive from the PDF-ingested node
+    p2 = _run(
+        ["derive", "--db", str(db), "--vault", str(vault), node_id],
+        env={"MEMEX_AGENT": FAKE_AGENT},
+    )
+    d2 = _expect_json("derive from pdf", p2)
+    _check("pdf derive status=derived", d2.get("status") == "derived",
+           f"got {d2.get('status')}")
 
 def smoke_l0_immutable(tmp: Path) -> None:
     print("\n[L0 IMMUTABLE] L0 markdown file is not overwritten on re-ingest")
@@ -1272,6 +1300,7 @@ def main() -> int:
         smoke_errors(tmp)
         smoke_migration(tmp)
         smoke_youtube(tmp)
+        smoke_fetcher_pdf(tmp)
         smoke_l0_immutable(tmp)
         smoke_render(tmp)
         smoke_review(tmp)

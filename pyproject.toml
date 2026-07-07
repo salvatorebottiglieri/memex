@@ -13,6 +13,11 @@ dependencies = [
     "telethon>=1.44.0",
 ]
 
+[project.optional-dependencies]
+media = [
+    "pypdf>=5.4.0",
+]
+
 [project.scripts]
 memex = "memex.cli:cli"
 
@@ -23,6 +28,7 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
+    "pypdf>=5.4.0",
 ]
 
 [tool.pytest.ini_options]
