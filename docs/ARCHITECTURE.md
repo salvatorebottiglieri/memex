@@ -34,13 +34,15 @@ more conservative on scope (single user, no discovery/web-research subsystem).
 | Test injection via env var | **built** | `MEMEX_FETCHER_MODULE`, `MEMEX_AGENT` |
 | Telegram Saved-Messages capture | **built** (slice 2: protocol + fake) | `memex capture` via `MEMEX_TELEGRAM_SOURCE` |
 | Ingest from inbox (separated from capture) | **built** | `memex ingest --from-inbox` |
-| Lazy density/demand trigger for derivations | manual only (ADR-0003) | `memex derive` is invoked explicitly |
+| Lazy derivation trigger | demand only (ADR-0003) | `memex derive`/`synthesize` on explicit action; density trigger deferred (YAGNI) |
 | Render step (DB → frontmatter + wikilinks for Obsidian) | **built** (slice 1: metadata + tags + aliases) | `memex render` |
-| Per-type extractors (YouTube transcript, PDF) | HTML only | `HttpFetcher` is regex on `<title>` + strip-tags |
+| Per-type extractors (YouTube transcript, PDF) | **designed** (ADR-0013) | Fetcher router dispatched via canonical key; `youtube-transcript-api` + `pypdf` |
 | Staleness propagation (contested → triage → accept/reject/dismiss) | **built** | `memex review accept/reject/dismiss` |
 | Human review queue / targeted review | **built** | `memex review` + `memex review list` |
 | Edge authorship tracking | **built** | `edge.written_by` column |
-| Edit round-trip (Obsidian wikilink edits back into DB) | not started | |
+| Edit round-trip (Obsidian wikilink edits back into DB) | **by design: Obsidian is view-only** | ADR-0008: SQLite owns structure, markdown owns content — unidirectional render |
+| Trust cascade (child trust capped to lowest parent) | **designed** (ADR-0014) | Implemented in `store.update_trust_state` |
+| Synthesis tier (cross-source derivation) | **designed** (ADR-0014) | `memex synthesize <id1> <id2> ...` |
 
 ## Map (as built)
 
@@ -99,16 +101,18 @@ flowchart TB
 - [0010](adr/0010-cli-canonical-interface-no-mcp.md) — CLI as canonical harness-agnostic interface; no MCP
 - [0011](adr/0011-deterministic-checks-gate.md) — Deterministic Checks module + `> Synthesis:` gate
 - [0012](adr/0012-staleness-propagation-via-contested.md) — Staleness propagation via contested state and human review
+- [0013](adr/0013-fetcher-router-per-type-extractors.md) — Fetcher router with per-type content extractors
+- [0014](adr/0014-synthesis-tier-and-trust-cascade.md) — Synthesis tier command and trust state cascade on parent regression
 ## Open questions (deferred)
 
 - **Model choice & cost:** `AnthropicAgent` currently defaults to `claude-opus-4-5`. Switch to Sonnet for bulk derivation once cost matters; keep Opus for higher-tier synthesis. Tune when real volume arrives.
-- **Tier seed:** `raw` + `notes` are built; `synthesis` not yet. Let real use reveal whether more ordinal ranks are needed (gated, ADR-0002).
-- **Source-type extractors:** HTML article is built. YouTube transcript (the canonical-key mapping is already in `canonical_key.py`) and PDF are next. Tweets/X and others later.
-- **Edit round-trip:** if I hand-edit a wikilink in Obsidian, a reconcile step is needed (edge case).
-- ~~**Staleness propagation:** invalidate-eagerly vs mark-and-regenerate-on-demand — leaning on-demand; confirm during build.~~ **Resolved** (ADR-0012): all propagation goes through `contested` → review proposal → human adjudication. Re-derivation is lazy (on-demand).
-- **✅-reaction** Telegram confirmation: optional later enhancement (needs write scope).
-- **Confidence scoring:** exact formula from source count + contradictions.
-- **Capture/ingest separation:** `memex ingest --inbox` does capture + ingest atomically. `memex ingest --from-inbox` now provides the pure-ingest side (process pending inbox rows without re-capturing), so a future `memex capture` command can fill the inbox and `--from-inbox` flushes it. `memex list --pending` surfaces what's waiting.
+- ~~**Tier seed:** `raw` + `notes` are built; `synthesis` not yet. Let real use reveal whether more ordinal ranks are needed (gated, ADR-0002).~~ **Resolved** (ADR-0014): synthesis tier designed. Demand-driven, explicit `memex synthesize` command.
+- ~~**Source-type extractors:** HTML article is built. YouTube transcript (the canonical-key mapping is already in `canonical_key.py`) and PDF are next. Tweets/X and others later.~~ **Resolved** (ADR-0013): fetcher router + per-type extractors designed.
+- ~~**Edit round-trip:** if I hand-edit a wikilink in Obsidian, a reconcile step is needed (edge case).~~ **By design:** Obsidian is view-only. Render is unidirectional (ADR-0008).
+- **Confidence scoring:** exact formula from source count + contradictions. (ADR-0014 covers trust state, not confidence — separate problem.)
+- ~~**Staleness propagation:** invalidate-eagerly vs mark-and-regenerate-on-demand.~~ **Resolved** (ADR-0012).
+- ~~**✅-reaction** Telegram confirmation: optional later enhancement (needs write scope).~~ **Deferred (YAGNI)** — zero utenti, zero bisogno percepito.
+- ~~**Capture/ingest separation:** `memex ingest --inbox` does capture + ingest atomically.~~ **Deferred (YAGNI)** — Telegram già separato (ADR-0006). WhatsApp path è legacy funzionante, non spec.
 
 ## Reference: `iusztinpaul/ai-research-os-workshop`
 
