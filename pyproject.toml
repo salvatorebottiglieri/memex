@@ -16,6 +16,7 @@ dependencies = [
 [project.optional-dependencies]
 media = [
     "pypdf>=5.4.0",
+    "youtube-transcript-api>=1.0.0",
 ]
 
 [project.scripts]

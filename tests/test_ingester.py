@@ -5,7 +5,6 @@ Tests ``ingest_single_url`` directly via the Store seam, running in
 """
 from __future__ import annotations
 
-import sqlite3
 from pathlib import Path
 
 from memex.fetcher import FetchResult
@@ -86,3 +85,41 @@ def test_ingest_single_url_pdf_url(tmp_path):
     assert md_path.exists()
     assert "Content for" in md_path.read_text()
     assert "content_path" in result
+
+
+def test_ingest_single_url_youtube_metadata_only(tmp_path):
+    """YouTube path: metadata-only content (< 100 chars) with content_path set."""
+    db_path = tmp_path / "test.db"
+    vault_path = tmp_path / "vault"
+    vault_path.mkdir()
+
+    # Fake YouTube fetcher: short metadata content + content_path to cache
+    cache_file = tmp_path / "youtube-abc123.md"
+    cache_file.write_text("Transcript text here.\n", encoding="utf-8")
+
+    class FakeYouTubeFetcher:
+        def fetch(self, url: str):
+            return FetchResult(
+                content="# My YouTube Video\nChannel: Test Channel",
+                title="My YouTube Video",
+                content_path=str(cache_file),
+            )
+
+    with Store.open(db_path) as store:
+        store.init_schema()
+        result = ingest_single_url(
+            store, vault_path, "https://www.youtube.com/watch?v=abc123", FakeYouTubeFetcher()
+        )
+
+    assert result["status"] == "ingested"
+    assert result["canonical_key"] == "youtube://abc123"
+    assert result["content_path"] is not None
+    assert result["content_path"].endswith("youtube-abc123.md")  # cache file path
+
+    # No L0 markdown file was written (content < 100 chars)
+    l0_md = vault_path / f"{result['id']}.md"
+    assert not l0_md.exists()
+
+    # But the content_path points to the cache file
+    assert Path(result["content_path"]).exists()
+    assert "Transcript" in Path(result["content_path"]).read_text()

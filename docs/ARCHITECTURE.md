@@ -22,22 +22,22 @@ more conservative on scope (single user, no discovery/web-research subsystem).
 
 | Concern | State | Surface |
 |---|---|---|
-| Ingestion (URL → L0 markdown + node) | **built** | `memex ingest <url>` |
+| Ingestion (URL -> L0 markdown + node) | **built** | `memex ingest <url>` |
 | WhatsApp inbox ingest (per-file cursor) | **built** | `memex ingest --inbox <file>` |
 | Canonical-key dedup + ledger | **built** | Store: `lookup_by_canonical_key`, `source.failed` |
-| Derivation (LLM → notes-tier + provenance edge) | **built** | `memex derive <l0-id>` |
+| Derivation (LLM -> notes-tier + provenance edge) | **built** | `memex derive <l0-id>` |
 | Deterministic checks (auto-verify gate) | **built** | `memex.checks.run_checks` |
 | Keyword search over derivations | **built** | `memex search <query>` |
 | Pending set (captured-but-not-ingested) | **built** | `memex list --pending` + `memex ingest --from-inbox` |
-| Inbox flush (inbox → ledger) | **built** | `memex ingest --from-inbox` |
+| Inbox flush (inbox -> ledger) | **built** | `memex ingest --from-inbox` |
 | Store deep module (CLI is thin) | **built** | `memex.store.Store` |
 | Test injection via env var | **built** | `MEMEX_FETCHER_MODULE`, `MEMEX_AGENT` |
 | Telegram Saved-Messages capture | **built** (slice 2: protocol + fake) | `memex capture` via `MEMEX_TELEGRAM_SOURCE` |
 | Ingest from inbox (separated from capture) | **built** | `memex ingest --from-inbox` |
 | Lazy derivation trigger | demand only (ADR-0003) | `memex derive`/`synthesize` on explicit action; density trigger deferred (YAGNI) |
-| Render step (DB → frontmatter + wikilinks for Obsidian) | **built** (slice 1: metadata + tags + aliases) | `memex render` |
-| Per-type extractors (YouTube transcript, PDF) | **designed** (ADR-0013) | Fetcher router dispatched via canonical key; `youtube-transcript-api` + `pypdf` |
-| Staleness propagation (contested → triage → accept/reject/dismiss) | **built** | `memex review accept/reject/dismiss` |
+| Render step (DB -> frontmatter + wikilinks for Obsidian) | **built** (slice 1: metadata + tags + aliases) | `memex render` |
+| Per-type extractors (YouTube transcript, PDF) | **built** (slices 1+2) | Fetcher router dispatched via canonical key; `youtube-transcript-api` + `pypdf` |
+| Staleness propagation (contested -> triage -> accept/reject/dismiss) | **built** | `memex review accept/reject/dismiss` |
 | Human review queue / targeted review | **built** | `memex review` + `memex review list` |
 | Edge authorship tracking | **built** | `edge.written_by` column |
 | Edit round-trip (Obsidian wikilink edits back into DB) | **by design: Obsidian is view-only** | ADR-0008: SQLite owns structure, markdown owns content — unidirectional render |
@@ -74,7 +74,7 @@ flowchart TB
   DERIV -->|"writes derivation prose"| DMD["&lt;deriv-id&gt;.md"]
 
   DB --> CHK["Deterministic checks<br/>(checks.py)"]
-  CHK -->|"pass → auto-verified<br/>fail → draft + check_failures JSON"| DB
+  CHK -->|"pass -> auto-verified<br/>fail -> draft + check_failures JSON"| DB
 
   DB --> RENDER["memex render<br/>(renderer.py)"]
   RENDER --> MD_WIKI["Markdown with YAML frontmatter<br/>+ [[wikilinks]] for provenance<br/>- slice 1: metadata + tags + aliases<br/>- slice 2: edge wikilinks"]
