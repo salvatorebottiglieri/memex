@@ -314,6 +314,47 @@ class OMPAgent(PiAgent):
 
     _cli_cmd = "omp"
 
+    def _call_pi(self, prompt: str) -> str:
+        import json as _json
+        import subprocess as _sp
+
+        try:
+            proc = _sp.run(
+                [self._cli_cmd, "-p", "--mode", "json", "--no-session", "--no-tools", prompt],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        except FileNotFoundError:
+            raise RuntimeError(
+                f"{type(self).__name__} requires the '{self._cli_cmd}' CLI. "
+                f"Install it from https://ohmy-pi.dev"
+            ) from None
+        except _sp.TimeoutExpired:
+            raise RuntimeError(f"{type(self).__name__} call timed out after 120s") from None
+
+        if proc.returncode != 0:
+            raise RuntimeError(f"{type(self).__name__} call failed: {proc.stderr.strip()}")
+        # Parse JSON lines output — extract text from the last message_end
+        last_text = ""
+        for line in proc.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = _json.loads(line)
+            except _json.JSONDecodeError:
+                continue
+            if event.get("type") == "message_end":
+                msg = event.get("message", {})
+                content = msg.get("content", [])
+                if isinstance(content, str):
+                    last_text = content
+                elif isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict) and part.get("type") == "text":
+                            last_text = part.get("text", "")
+        return last_text
 
 def _verify_agent_methods(client: object, module_path: str) -> None:
     """Verify the loaded agent instance has both derive and review callables.
