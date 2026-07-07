@@ -29,6 +29,9 @@ class FakeAgent:
         ]
         return DerivationResult(prose=prose, synthesis_statements=synthesis_statements)
 
+    def generate_title(self, content: str, url: str) -> str | None:
+        return None
+
     def review(self, target_content: str, asserting_content: str, edge_payload: dict) -> ReviewProposal:
         rp_affected = self.review_affected_node_ids
         if rp_affected is None:

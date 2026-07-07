@@ -204,13 +204,15 @@ class PiAgent(Agent):
     Supports any provider/model configured in ``pi`` (e.g. Claude, GPT, Gemini, DeepSeek).
     """
 
+    _cli_cmd = "pi"
+
     def _call_pi(self, prompt: str) -> str:
         import json as _json
         import subprocess as _sp
 
         try:
             proc = _sp.run(
-                ["pi", "-p", "--mode", "json", "--no-session", "--no-tools"],
+                [self._cli_cmd, "-p", "--mode", "json", "--no-session", "--no-tools"],
                 input=prompt,
                 capture_output=True,
                 text=True,
@@ -218,13 +220,14 @@ class PiAgent(Agent):
             )
         except FileNotFoundError:
             raise RuntimeError(
-                "PiAgent requires the 'pi' CLI. Install it from https://pi.dev"
+                f"{type(self).__name__} requires the '{self._cli_cmd}' CLI. "
+                f"Install it from https://{self._cli_cmd}.dev"
             ) from None
         except _sp.TimeoutExpired:
-            raise RuntimeError("PiAgent call timed out after 120s") from None
+            raise RuntimeError(f"{type(self).__name__} call timed out after 120s") from None
 
         if proc.returncode != 0:
-            raise RuntimeError(f"PiAgent call failed: {proc.stderr.strip()}")
+            raise RuntimeError(f"{type(self).__name__} call failed: {proc.stderr.strip()}")
 
         # Parse JSON lines output — extract text from the last message_end
         last_text = ""
@@ -243,6 +246,7 @@ class PiAgent(Agent):
                     if part.get("type") == "text":
                         last_text = part.get("text", "")
         return last_text
+
 
     def derive(self, content: str) -> DerivationResult:
         prompt = (
@@ -295,6 +299,20 @@ class PiAgent(Agent):
             rationale_md=rationale,
             confidence=confidence,
         )
+
+
+class OMPAgent(PiAgent):
+    """Agent powered by OMP (Oh My Pi — ``@nicedoc/oh-my-pi``).
+
+    Uses the ``omp`` CLI under the hood (same interface as Pi).
+
+    Requires ``omp`` to be installed and available on PATH.
+    Supports any provider/model configured in ``omp`` (e.g. Claude, GPT, Gemini, DeepSeek).
+
+    Usage: ``MEMEX_AGENT=memex.agent:OMPAgent``
+    """
+
+    _cli_cmd = "omp"
 
 
 def _verify_agent_methods(client: object, module_path: str) -> None:

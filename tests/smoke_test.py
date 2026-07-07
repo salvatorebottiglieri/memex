@@ -666,8 +666,8 @@ def smoke_render(tmp: Path) -> None:
     _check("frontmatter has depth=0", fm.get("depth") == 0)
     _check("frontmatter has tags with kind/raw_source", "kind/raw_source" in fm.get("tags", []))
     _check("frontmatter has source_url", "source_url" in fm)
-    _check("frontmatter has title", fm.get("title") == "Fake Article Title")
-    _check("frontmatter has aliases", fm.get("aliases") == ["Fake Article Title"])
+    _check("frontmatter has title", fm.get("title") == "Fake Article")
+    _check("frontmatter has aliases", fm.get("aliases") == ["Fake Article"])
 
     # Idempotency
     p = _run(["render", "--db", str(db), "--vault", str(vault)])
@@ -678,7 +678,7 @@ def smoke_render(tmp: Path) -> None:
     _, fm_raw2, _ = text2.split("---\n", 2)
     fm2 = _y.safe_load(fm_raw2)
     _check("idempotent: same kind", fm2.get("kind") == "raw_source")
-    _check("idempotent: same title", fm2.get("title") == "Fake Article Title")
+    _check("idempotent: same title", fm2.get("title") == "Fake Article")
 
     # Derivation render
     p = _run(["derive", "--db", str(db), "--vault", str(vault), str(res[0]["node_id"])],
