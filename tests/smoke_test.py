@@ -1251,12 +1251,13 @@ def smoke_auto_defaults(tmp: Path) -> None:
     _check("status --vault db_exists", r.get("db_exists") is True)
     _check("status --vault vault matches", r.get("vault_path") == str(vp))
 
-    # Scenario 3: --db only (vault auto-detected from existing Obsidian)
+    # Scenario 3: --db only (vault falls back to ~/memex-vault when no Obsidian detected)
     dp2 = tmp / "custom.db"
     proc = _run(["status", "--db", str(dp2)])
     r = _expect_json("status --db only", proc)
     _check("status --db matches", r.get("db_path") == str(dp2))
-    _check("status --db vault exists", r.get("vault_path") and Path(r["vault_path"]).exists())
+    _check("status --db vault_path is set", bool(r.get("vault_path")))
+    _check("status --db vault_exists field", r.get("vault_exists") is not None)
 
 def smoke_stub(tmp: Path) -> None:
     """Stub content (< 100 chars) should not create an L0 md file, but derive should still work."""
