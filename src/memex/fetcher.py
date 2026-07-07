@@ -112,8 +112,8 @@ class YouTubeTranscriptFetcher(ContentFetcher):
         try:
             from youtube_transcript_api import YouTubeTranscriptApi
 
-            transcript = YouTubeTranscriptApi.get_transcript(video_id)
-            transcript_text = "\n".join(seg.get("text", "") for seg in transcript)
+            transcript = YouTubeTranscriptApi().fetch(video_id)
+            transcript_text = "\n".join(seg.text for seg in transcript)
 
             if self._vault_path:
                 cache_dir = Path(self._vault_path) / ".cache"
@@ -152,12 +152,15 @@ class RoutingFetcher(ContentFetcher):
         if ckey.startswith("youtube://"):
             return YouTubeTranscriptFetcher(vault_path=self._vault_path)
         stripped = ckey.split("?")[0].rstrip("/")
-        if ckey.startswith(("http://", "https://")) and stripped.endswith(".pdf"):
-            return PDFFetcher()
+        if ckey.startswith(("http://", "https://")):
+            if stripped.endswith(".pdf") or "/pdf/" in stripped:
+                return PDFFetcher()
+            return HttpFetcher()
         return HttpFetcher()
 
     def fetch(self, url: str) -> FetchResult:
-        ckey = url  # canonical_key is applied by the caller (ingester)
+        from memex.canonical_key import canonical_key
+        ckey = canonical_key(url)
         fetcher = self._select(ckey)
         return fetcher.fetch(url)
 

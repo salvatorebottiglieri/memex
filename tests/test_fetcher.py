@@ -247,13 +247,13 @@ class TestYouTubeTranscriptFetcher:
     def test_fetch_transcript_available_writes_cache(self, tmp_path):
         """Happy path: transcript available -> cache file written, metadata in content, content_path set."""
         mock_resp = self._mock_html_page()
-        yt_api_mock = MagicMock()
-        yt_api_mock.get_transcript.return_value = [
-            {"text": "Welcome to my video"},
-            {"text": "This is a test"},
-        ]
+        # Mock YouTubeTranscriptApi().fetch() returning snippet objects with .text
+        snippet1 = MagicMock(text="Welcome to my video")
+        snippet2 = MagicMock(text="This is a test")
+        api_instance = MagicMock()
+        api_instance.fetch.return_value = [snippet1, snippet2]
         fake_module = MagicMock()
-        fake_module.YouTubeTranscriptApi = yt_api_mock
+        fake_module.YouTubeTranscriptApi = MagicMock(return_value=api_instance)
 
         with patch("urllib.request.urlopen", return_value=mock_resp):
             import sys
@@ -273,10 +273,11 @@ class TestYouTubeTranscriptFetcher:
     def test_fetch_transcript_unavailable_metadata_only(self, tmp_path):
         """Transcript disabled/unavailable -> metadata only, no cache, content_path=None."""
         mock_resp = self._mock_html_page()
-        yt_api_mock = MagicMock()
-        yt_api_mock.get_transcript.side_effect = type("TranscriptsDisabled", (Exception,), {})()
+        exc_cls = type("TranscriptsDisabled", (Exception,), {})
+        api_instance = MagicMock()
+        api_instance.fetch.side_effect = exc_cls()
         fake_module = MagicMock()
-        fake_module.YouTubeTranscriptApi = yt_api_mock
+        fake_module.YouTubeTranscriptApi = MagicMock(return_value=api_instance)
 
         with patch("urllib.request.urlopen", return_value=mock_resp):
             import sys
@@ -295,11 +296,10 @@ class TestYouTubeTranscriptFetcher:
     def test_fetch_network_error_raises_fetch_error(self, tmp_path):
         """Network/rate limiting during transcript fetch -> FetchError."""
         mock_resp = self._mock_html_page()
-        yt_api_mock = MagicMock()
-        # Simulate a non-"unavailable" error like a timeout or rate limit
-        yt_api_mock.get_transcript.side_effect = Exception("HTTP Error 429: Too Many Requests")
+        api_instance = MagicMock()
+        api_instance.fetch.side_effect = Exception("HTTP Error 429: Too Many Requests")
         fake_module = MagicMock()
-        fake_module.YouTubeTranscriptApi = yt_api_mock
+        fake_module.YouTubeTranscriptApi = MagicMock(return_value=api_instance)
 
         with patch("urllib.request.urlopen", return_value=mock_resp):
             import sys
@@ -311,12 +311,11 @@ class TestYouTubeTranscriptFetcher:
     def test_fetch_no_vault_path_includes_transcript_in_content(self, tmp_path):
         """When vault_path is None, include transcript in content, no cache."""
         mock_resp = self._mock_html_page()
-        yt_api_mock = MagicMock()
-        yt_api_mock.get_transcript.return_value = [
-            {"text": "Inline transcript text"},
-        ]
+        snippet = MagicMock(text="Inline transcript text")
+        api_instance = MagicMock()
+        api_instance.fetch.return_value = [snippet]
         fake_module = MagicMock()
-        fake_module.YouTubeTranscriptApi = yt_api_mock
+        fake_module.YouTubeTranscriptApi = MagicMock(return_value=api_instance)
 
         with patch("urllib.request.urlopen", return_value=mock_resp):
             import sys
@@ -328,6 +327,8 @@ class TestYouTubeTranscriptFetcher:
         assert "# My Test Video" in result.content
         assert result.content_path is None
         assert "Inline transcript text" in result.content  # transcript included in content
+
+
 
     def test_fetch_missing_youtube_transcript_api(self, tmp_path):
         """Missing youtube-transcript-api raises FetchError with helpful message."""
