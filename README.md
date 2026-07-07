@@ -25,11 +25,11 @@ memex exposes a JSON-only CLI (one command per operation, all output is structur
 | `memex derive --db <path> --vault <path> <node-id>` | Generate a notes-tier derivation from an L0 (agent via `MEMEX_AGENT`) |
 | `memex derive --db <path> --vault <path> --all [--limit N]` | Batch-derive all un-derived L0 nodes (default limit: 10) |
 | `memex search --db <path> --vault <path> <query>` | Keyword search over derivation content (read-only) |
-| `memex render --db <path> --vault <path>` | Project SQLite graph → YAML frontmatter + wikilinks on markdown files (slice 1: metadata + tags + aliases) |
+| `memex render --db <path> --vault <path>` | Project SQLite graph -> YAML frontmatter + wikilinks on markdown files (slice 1: metadata + tags + aliases) |
 | `memex capture --db <path> --vault <path>` | Poll Telegram Saved Messages and persist new captures to the inbox (env: `MEMEX_TELEGRAM_SOURCE`) |
 | `memex review --db <path> --vault <path>` | Batch-generate review proposals for all pending contestation events |
 | `memex review list --db <path> --vault <path>` | Show the review queue (pending events + proposals) |
-| `memex review accept --db <path> --vault <path> <proposal-id>` | Accept a review proposal: affected nodes → stale |
+| `memex review accept --db <path> --vault <path> <proposal-id>` | Accept a review proposal: affected nodes -> stale |
 | `memex review reject --db <path> --vault <path> <proposal-id>` | Reject a review proposal: close event, no trust_state change |
 | `memex review dismiss --db <path> --vault <path> <proposal-id>` | Dismiss a review proposal: valid but harmless, no trust_state change |
 | `memex contradict --db <path> --vault <path> <target-id> --asserted-by <node-id>` | Write a contradicts edge targeting a node, triggering contested propagation |
@@ -46,8 +46,7 @@ memex exposes a JSON-only CLI (one command per operation, all output is structur
 uv sync                       # install dependencies
 uv run memex init --db /tmp/memex.db --vault /tmp/vault  # quick smoke test
 uv run pytest                                                 # run the unit suite
-uv run python tests/smoke_test.py                             # aggressive end-to-end smoke tests (real subprocess, 171 checks)
-```
+uv run python tests/smoke_test.py                             # aggressive end-to-end smoke tests (real subprocess, 189 checks)
 
 All output is JSON (AXI standard) — pipe to `jq` or your agent's tools.
 
@@ -57,7 +56,7 @@ Tests inject fake collaborators without touching network or paying for LLM calls
 
 | Env var | Where | Effect |
 |---|---|---|
-| `MEMEX_FETCHER_MODULE` | `memex ingest` | Replaces `HttpFetcher` with a module:Class string (e.g. `tests.conftest:FakeFetcher`) |
+| `MEMEX_FETCHER_MODULE` | `memex ingest` | Replaces the default `RoutingFetcher` with a module:Class string (e.g. `tests.conftest:FakeFetcher`) |
 | `MEMEX_AGENT` | `memex derive` | Replaces `AnthropicAgent` with a module:Class string (e.g. `tests.fake_llm_client:FakeAgent`). Omit to use the built-in `DemoAgent` (no API key needed). |
 
 Both follow the `module:Class` import-string convention so the seam is a one-line change with no monkeypatching.

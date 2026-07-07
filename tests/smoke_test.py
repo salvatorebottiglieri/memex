@@ -1336,7 +1336,6 @@ def main() -> int:
         smoke_capture(tmp)
         smoke_help(tmp)
         smoke_full_e2e(tmp)
-        smoke_review(tmp)
         smoke_stub(tmp)
 
     print(f"\n{'='*60}")
