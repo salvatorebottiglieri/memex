@@ -156,6 +156,7 @@ def ingest(db_path: Path, vault_path: Path, url: str | None, inbox_path: Path | 
     Idempotent — running twice with the same (canonical) URL yields one node.
     A fetch failure is recorded and does not crash the run.
     """
+    from memex.agent import load_agent
     from memex.fetcher import load_fetcher
     from memex.store import Store
     from memex.whatsapp_source import parse_whatsapp_export
@@ -168,6 +169,8 @@ def ingest(db_path: Path, vault_path: Path, url: str | None, inbox_path: Path | 
     _require_db(db_path)
     fetcher = load_fetcher(os.environ.get("MEMEX_FETCHER_MODULE"), vault_path=str(vault_path))
 
+    title_agent = load_agent(os.environ.get("MEMEX_AGENT") or os.environ.get("MEMEX_LLM_MODULE"))
+ 
     with Store.open(db_path) as store:
         if from_inbox:
             # ── From-inbox: ingest all pending inbox items ───────
@@ -179,6 +182,13 @@ def ingest(db_path: Path, vault_path: Path, url: str | None, inbox_path: Path | 
                 ckey = canonical_key(item["url"])
                 if ckey not in ingested_keys:
                     result = ingest_single_url(store, vault_path, item["url"], fetcher)
+                    if title_agent and result.get("status") == "ingested" and result.get("content_path"):
+                        cp = Path(result["content_path"])
+                        if cp.exists():
+                            t = title_agent.generate_title(cp.read_text(encoding="utf-8"), item["url"])
+                            if t:
+                                store.update_source_title(result["id"], t)
+                                result["title"] = t
                     results.append(result)
                     if result.get("canonical_key"):
                         ingested_keys.add(result["canonical_key"])
@@ -211,6 +221,13 @@ def ingest(db_path: Path, vault_path: Path, url: str | None, inbox_path: Path | 
                     item_timestamp=item["timestamp"],
                     item_note=item.get("note"),
                 )
+                if title_agent and result.get("status") == "ingested" and result.get("content_path"):
+                    cp = Path(result["content_path"])
+                    if cp.exists():
+                        t = title_agent.generate_title(cp.read_text(encoding="utf-8"), item["url"])
+                        if t:
+                            store.update_source_title(result["id"], t)
+                            result["title"] = t
                 results.append(result)
                 click.echo(f"[{i}/{total}] {result.get('status','?')}  {item['url']}", err=True)
 
@@ -219,7 +236,15 @@ def ingest(db_path: Path, vault_path: Path, url: str | None, inbox_path: Path | 
 
             click.echo(json.dumps(results))
         else:
-            click.echo(json.dumps(ingest_single_url(store, vault_path, url, fetcher)))
+            result = ingest_single_url(store, vault_path, url, fetcher)
+            if title_agent and result.get("status") == "ingested" and result.get("content_path"):
+                cp = Path(result["content_path"])
+                if cp.exists():
+                    t = title_agent.generate_title(cp.read_text(encoding="utf-8"), url)
+                    if t:
+                        store.update_source_title(result["id"], t)
+                        result["title"] = t
+            click.echo(json.dumps(result))
 
 
 @cli.command("list")

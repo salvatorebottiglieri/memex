@@ -43,6 +43,10 @@ class Agent:
     ) -> ReviewProposal:
         raise NotImplementedError
 
+    def generate_title(self, content: str, url: str) -> str | None:
+        """Infer a human-readable title from content and URL. Return None to skip."""
+        return None
+
 
 class DemoAgent:
     """Built-in demo agent — returns hardcoded content. No API key needed."""
@@ -72,6 +76,13 @@ class DemoAgent:
             rationale_md="Demo review: no real analysis.",
             confidence="low",
         )
+
+    def generate_title(self, content: str, url: str) -> str | None:
+        # Take the first line of content as title
+        first_line = content.split('\n')[0].strip()
+        if first_line and len(first_line) < 200:
+            return first_line.removeprefix('# ').strip()
+        return None
 
 
 class AnthropicAgent(Agent):

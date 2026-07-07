@@ -773,3 +773,13 @@ class Store:
             (trust_state, failures_json, node_id),
         )
 
+    def update_source_title(self, node_id: str, title: str) -> None:
+        """Update the title of a source row."""
+        try:
+            self._con.execute(
+                "UPDATE source SET title = ? WHERE node_id = ?",
+                (title, node_id),
+            )
+        except sqlite3.Error as e:
+            raise StoreError(str(e)) from e
+
