@@ -25,6 +25,7 @@ FAKE_AGENT = "tests.fake_llm_client:FakeAgent"
 FAKE_TELEGRAM = "tests.fake_telegram_source:FakeTelegramSource"
 FAKE_FAILING_AGENT = "tests.fake_llm_client_failing:FakeLLMClientFailing"
 FAKE_FETCHER_PDF = "tests.fake_fetcher_pdf:FakePDFFetcher"
+FAKE_FETCHER_YOUTUBE = "tests.fake_fetcher_youtube:FakeYouTubeFetcher"
 
 
 # ── harness ──────────────────────────────────────────────────────
@@ -89,7 +90,7 @@ def _fresh_store(tmp: Path, name: str = "smoke") -> tuple[Path, Path]:
 
 
 def smoke_lifecycle(tmp: Path) -> None:
-    print("\n[LIFECYCLE] init → status → ingest → list → show")
+    print("\n[LIFECYCLE] init -> status -> ingest -> list -> show")
     db, vault = _fresh_store(tmp, "lifecycle")
     s = _run(["status", "--db", str(db), "--vault", str(vault)])
     d = _expect_json("status after init", s)
@@ -130,7 +131,7 @@ def smoke_lifecycle(tmp: Path) -> None:
 
 
 def smoke_idempotency(tmp: Path) -> None:
-    print("\n[IDEMPOTENCY] ingest same URL twice → one node")
+    print("\n[IDEMPOTENCY] ingest same URL twice -> one node")
     db, vault = _fresh_store(tmp, "idem")
     url = "https://example.com/article?utm_source=twitter"
     env = {"MEMEX_FETCHER_MODULE": FAKE_FETCHER}
@@ -279,7 +280,7 @@ def smoke_pending(tmp: Path) -> None:
 
 
 def smoke_derive_passing(tmp: Path) -> None:
-    print("\n[DERIVE PASS] derive → auto-verified")
+    print("\n[DERIVE PASS] derive -> auto-verified")
     db, vault = _fresh_store(tmp, "deriveok")
     p = _run(["ingest", "--db", str(db), "--vault", str(vault), "https://example.com/article"],
              env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER})
@@ -324,7 +325,7 @@ def smoke_derive_passing(tmp: Path) -> None:
 
 
 def smoke_derive_failing(tmp: Path) -> None:
-    print("\n[DERIVE FAIL] failing LLM → draft with check_failures")
+    print("\n[DERIVE FAIL] failing LLM -> draft with check_failures")
     db, vault = _fresh_store(tmp, "derivefail")
     p = _run(["ingest", "--db", str(db), "--vault", str(vault), "https://example.com/article"],
              env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER})
@@ -347,7 +348,7 @@ def smoke_derive_failing(tmp: Path) -> None:
 
 
 def smoke_derive_idempotent(tmp: Path) -> None:
-    print("\n[DERIVE IDEMPOTENT] derive twice → already_derived")
+    print("\n[DERIVE IDEMPOTENT] derive twice -> already_derived")
     db, vault = _fresh_store(tmp, "deriveidem")
     p = _run(["ingest", "--db", str(db), "--vault", str(vault), "https://example.com/article"],
              env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER})
@@ -480,7 +481,7 @@ def smoke_errors(tmp: Path) -> None:
 
 
 def smoke_migration(tmp: Path) -> None:
-    print("\n[MIGRATION] old-schema DB (no inbox, no check_failures) → init → use")
+    print("\n[MIGRATION] old-schema DB (no inbox, no check_failures) -> init -> use")
     db, vault = tmp / "old.db", tmp / "old_vault"
     con = sqlite3.connect(db)
     con.executescript("""
@@ -550,7 +551,7 @@ def smoke_youtube(tmp: Path) -> None:
     _check("youtube canonical_key uses scheme", d.get("canonical_key") == "youtube://dQw4w9WgXcQ",
            f"got {d.get('canonical_key')}")
 
-    # Same video via youtu.be → same key
+    # Same video via youtu.be -> same key
     p = _run(
         ["ingest", "--db", str(db), "--vault", str(vault), "https://youtu.be/dQw4w9WgXcQ"],
         env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
@@ -584,6 +585,33 @@ def smoke_fetcher_pdf(tmp: Path) -> None:
     )
     d2 = _expect_json("derive from pdf", p2)
     _check("pdf derive status=derived", d2.get("status") == "derived",
+           f"got {d2.get('status')}")
+
+def smoke_fetcher_youtube(tmp: Path) -> None:
+    print("\n[FETCHER YOUTUBE] ingest a youtube URL through RoutingFetcher")
+    db, vault = _fresh_store(tmp, "fetcheryt")
+    p = _run(
+        ["ingest", "--db", str(db), "--vault", str(vault), "https://www.youtube.com/watch?v=test123"],
+        env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER_YOUTUBE},
+    )
+    d = _expect_json("ingest youtube", p)
+    _check("youtube ingest status=ingested", d.get("status") == "ingested")
+    _check("youtube ingest has content_path", d.get("content_path") is not None)
+    _check("youtube ingest content_path has youtube-", "youtube-" in d["content_path"])
+    _check("youtube ingest content_path is .md", d["content_path"].endswith(".md"))
+
+    node_id = d["id"]
+    # The L0 markdown file is NOT written (content < 100 chars, metadata only)
+    l0_md = vault / f"{node_id}.md"
+    _check("youtube L0 markdown not written", not l0_md.exists())
+
+    # Derive from the YouTube-ingested node (reads from content_path)
+    p2 = _run(
+        ["derive", "--db", str(db), "--vault", str(vault), node_id],
+        env={"MEMEX_AGENT": FAKE_AGENT},
+    )
+    d2 = _expect_json("derive from youtube", p2)
+    _check("youtube derive status=derived", d2.get("status") == "derived",
            f"got {d2.get('status')}")
 
 def smoke_l0_immutable(tmp: Path) -> None:
@@ -787,8 +815,8 @@ def smoke_help(tmp: Path) -> None:
 
 
 def smoke_full_e2e(tmp: Path) -> None:
-    """One continuous flow: inbox → derive → search."""
-    print("\n[E2E FLOW] ingest inbox → derive → search → verify")
+    """One continuous flow: inbox -> derive -> search."""
+    print("\n[E2E FLOW] ingest inbox -> derive -> search -> verify")
     db, vault = _fresh_store(tmp, "e2e")
 
     export = """\
@@ -821,7 +849,7 @@ def smoke_full_e2e(tmp: Path) -> None:
 
 
 def smoke_review(tmp: Path) -> None:
-    """End-to-end review workflow: contradicts edge → propose → accept/reject."""
+    """End-to-end review workflow: contradicts edge -> propose -> accept/reject."""
     print("\n[REVIEW] full review workflow — contradicts, propose, accept, verify")
 
     # ── helpers ────────────────────────────────────────────────
@@ -1232,7 +1260,7 @@ def smoke_auto_defaults(tmp: Path) -> None:
 
 def smoke_stub(tmp: Path) -> None:
     """Stub content (< 100 chars) should not create an L0 md file, but derive should still work."""
-    print("\n[STUB] short content → no L0 file, derive via fallback fetch")
+    print("\n[STUB] short content -> no L0 file, derive via fallback fetch")
 
     # Write a fetcher that returns short content
     stub_fetcher = tmp / "stub_fetcher.py"
@@ -1287,7 +1315,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         smoke_lifecycle(tmp)
-        smoke_idempotency(tmp)
+        smoke_fetcher_youtube(tmp)
         smoke_fetch_failure(tmp)
         smoke_inbox(tmp)
         smoke_inbox_with_failures(tmp)

@@ -1,10 +1,10 @@
-"""Unit tests for memex.fetcher — RoutingFetcher, PDFFetcher, FetchResult.
+"""Unit tests for memex.fetcher -- RoutingFetcher, PDFFetcher, FetchResult.
 
 Tests dispatch logic, PDF extraction (with mocked pypdf), error
 handling, and the content_path field.
 """
 from __future__ import annotations
-
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -16,6 +16,7 @@ from memex.fetcher import (
     HttpFetcher,
     PDFFetcher,
     RoutingFetcher,
+    YouTubeTranscriptFetcher,
     load_fetcher,
 )
 
@@ -72,17 +73,16 @@ class TestRoutingFetcherSelect:
         f = router._select("http://example.com/page.html")
         assert isinstance(f, HttpFetcher)
 
-    def test_select_youtube_prefix(self):
+    def test_select_youtube_returns_yt_fetcher(self):
         router = self._router()
-        with pytest.raises(FetchError, match="not yet implemented"):
-            router._select("youtube://abc123")
+        f = router._select("youtube://abc123")
+        assert isinstance(f, YouTubeTranscriptFetcher)
 
-    def test_select_pdf_query_string(self):
-        router = self._router()
-        f = router._select("https://example.com/paper.pdf?download=1")
-        assert isinstance(f, PDFFetcher)
-
-
+    def test_select_youtube_inherits_vault_path(self):
+        router = RoutingFetcher([HttpFetcher, PDFFetcher], vault_path="/tmp/vault")
+        f = router._select("youtube://abc123")
+        assert isinstance(f, YouTubeTranscriptFetcher)
+        assert f._vault_path == "/tmp/vault"
 # ── RoutingFetcher.fetch (delegation) ────────────────────────────
 
 
@@ -123,7 +123,7 @@ class TestPDFFetcherFetch:
     @patch("urllib.request.urlopen")
     @patch("pypdf.PdfReader")
     def test_fetch_success(self, mock_reader, mock_urlopen):
-        """Happy path: download → extract → return content."""
+        """Happy path: download -> extract -> return content."""
         mock_resp = MagicMock()
         mock_resp.__enter__.return_value.read.return_value = b"%PDF-1.4 data"
         mock_urlopen.return_value = mock_resp
@@ -226,3 +226,122 @@ class TestLoadFetcher:
         assert len(router._fetchers) == 2
         assert HttpFetcher in router._fetchers
         assert PDFFetcher in router._fetchers
+
+# ── YouTubeTranscriptFetcher ────────────────────────────────────
+
+
+class TestYouTubeTranscriptFetcher:
+    """YouTubeTranscriptFetcher with mocked urllib and youtube-transcript-api."""
+
+    @staticmethod
+    def _mock_html_page(title: str = "My Test Video") -> MagicMock:
+        """Return a mock urllib response with a YouTube watch page HTML."""
+        mock_resp = MagicMock()
+        mock_resp.__enter__.return_value.read.return_value = (
+            f"<html><head><title>{title}</title></head>"
+            f'<body><script>var ytInitialData = {{"channelName": "Test Channel"}};'
+            f"</script></body></html>"
+        ).encode("utf-8")
+        return mock_resp
+
+    def test_fetch_transcript_available_writes_cache(self, tmp_path):
+        """Happy path: transcript available -> cache file written, metadata in content, content_path set."""
+        mock_resp = self._mock_html_page()
+        yt_api_mock = MagicMock()
+        yt_api_mock.get_transcript.return_value = [
+            {"text": "Welcome to my video"},
+            {"text": "This is a test"},
+        ]
+        fake_module = MagicMock()
+        fake_module.YouTubeTranscriptApi = yt_api_mock
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            import sys
+            with patch.object(sys, "modules", {**sys.modules, "youtube_transcript_api": fake_module}):
+                f = YouTubeTranscriptFetcher(vault_path=str(tmp_path))
+                result = f.fetch("https://www.youtube.com/watch?v=abc123")
+
+        assert result.title == "My Test Video"
+        assert "# My Test Video" in result.content
+        assert "Test Channel" in result.content
+        assert result.content_path is not None
+        assert result.content_path.endswith("youtube-abc123.md")
+        # Cache file was written
+        assert Path(result.content_path).exists()
+        assert "Welcome to my video" in Path(result.content_path).read_text()
+
+    def test_fetch_transcript_unavailable_metadata_only(self, tmp_path):
+        """Transcript disabled/unavailable -> metadata only, no cache, content_path=None."""
+        mock_resp = self._mock_html_page()
+        yt_api_mock = MagicMock()
+        yt_api_mock.get_transcript.side_effect = type("TranscriptsDisabled", (Exception,), {})()
+        fake_module = MagicMock()
+        fake_module.YouTubeTranscriptApi = yt_api_mock
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            import sys
+            with patch.object(sys, "modules", {**sys.modules, "youtube_transcript_api": fake_module}):
+                f = YouTubeTranscriptFetcher(vault_path=str(tmp_path))
+                result = f.fetch("https://www.youtube.com/watch?v=abc123")
+
+        assert result.title == "My Test Video"
+        assert "# My Test Video" in result.content
+        assert "Test Channel" in result.content
+        assert result.content_path is None
+        # No cache file written
+        cache_dir = tmp_path / ".cache"
+        assert not cache_dir.exists()
+
+    def test_fetch_network_error_raises_fetch_error(self, tmp_path):
+        """Network/rate limiting during transcript fetch -> FetchError."""
+        mock_resp = self._mock_html_page()
+        yt_api_mock = MagicMock()
+        # Simulate a non-"unavailable" error like a timeout or rate limit
+        yt_api_mock.get_transcript.side_effect = Exception("HTTP Error 429: Too Many Requests")
+        fake_module = MagicMock()
+        fake_module.YouTubeTranscriptApi = yt_api_mock
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            import sys
+            with patch.object(sys, "modules", {**sys.modules, "youtube_transcript_api": fake_module}):
+                f = YouTubeTranscriptFetcher(vault_path=str(tmp_path))
+                with pytest.raises(FetchError, match="429"):
+                    f.fetch("https://www.youtube.com/watch?v=abc123")
+
+    def test_fetch_no_vault_path_includes_transcript_in_content(self, tmp_path):
+        """When vault_path is None, include transcript in content, no cache."""
+        mock_resp = self._mock_html_page()
+        yt_api_mock = MagicMock()
+        yt_api_mock.get_transcript.return_value = [
+            {"text": "Inline transcript text"},
+        ]
+        fake_module = MagicMock()
+        fake_module.YouTubeTranscriptApi = yt_api_mock
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            import sys
+            with patch.object(sys, "modules", {**sys.modules, "youtube_transcript_api": fake_module}):
+                f = YouTubeTranscriptFetcher(vault_path=None)
+                result = f.fetch("https://www.youtube.com/watch?v=abc123")
+
+        assert result.title == "My Test Video"
+        assert "# My Test Video" in result.content
+        assert result.content_path is None
+        assert "Inline transcript text" in result.content  # transcript included in content
+
+    def test_fetch_missing_youtube_transcript_api(self, tmp_path):
+        """Missing youtube-transcript-api raises FetchError with helpful message."""
+        mock_resp = self._mock_html_page()
+        import builtins
+        real_import = builtins.__import__
+
+        def mock_import(name, *args, **kwargs):
+            if name == "youtube_transcript_api":
+                raise ImportError("No module named 'youtube_transcript_api'")
+            return real_import(name, *args, **kwargs)
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            with patch("builtins.__import__", side_effect=mock_import):
+                f = YouTubeTranscriptFetcher(vault_path=str(tmp_path))
+                with pytest.raises(FetchError, match="youtube-transcript-api"):
+                    f.fetch("https://www.youtube.com/watch?v=abc123")

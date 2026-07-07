@@ -166,7 +166,7 @@ def ingest(db_path: Path, vault_path: Path, url: str | None, inbox_path: Path | 
         )
 
     _require_db(db_path)
-    fetcher = load_fetcher(os.environ.get("MEMEX_FETCHER_MODULE"))
+    fetcher = load_fetcher(os.environ.get("MEMEX_FETCHER_MODULE"), vault_path=str(vault_path))
 
     with Store.open(db_path) as store:
         if from_inbox:
@@ -290,7 +290,7 @@ def derive(db_path: Path, vault_path: Path, node_id: str | None = None,
 
     Writes derivation prose as <deriv_id>.md in the vault, inserts a node row
     (kind=summary, tier=notes, trust_state=draft, depth=1), records a derived_from
-    provenance edge, and runs deterministic checks to transition draft → auto-verified.
+    provenance edge, and runs deterministic checks to transition draft -> auto-verified.
     """
     from memex.agent import load_agent
     from memex.store import Store
@@ -323,11 +323,14 @@ def _derive_single(db_path: Path, vault_path: Path, node_id: str) -> None:
         if l0.get("content_path") and Path(l0["content_path"]).exists():
             l0_content = Path(l0["content_path"]).read_text(encoding="utf-8")
         else:
-            # L0 has no file — fetch URL fresh
-            fetcher = load_fetcher(os.environ.get("MEMEX_FETCHER_MODULE"))
-            result = fetcher.fetch(l0["source_url"])
-            l0_content = result.content
-
+            # L0 has no file — fetch URL fresh (may yield metadata-only content)
+            try:
+                fetcher = load_fetcher(os.environ.get("MEMEX_FETCHER_MODULE"), vault_path=str(vault_path))
+                result = fetcher.fetch(l0["source_url"])
+                l0_content = result.content
+            except Exception as exc:
+                click.echo(json.dumps({"status": "error", "reason": f"No content available for derivation: {exc}"}))
+                return
         # --- Idempotency check ---
         existing = store.find_derived_from(node_id)
         if existing is not None:
@@ -521,7 +524,7 @@ def render(db_path: Path, vault_path: Path) -> None:
 
     Reads every node, computes YAML frontmatter with metadata + tags + aliases,
     and writes it into the node's markdown file preserving the body.
-    One-way DB → markdown. Idempotent.
+    One-way DB -> markdown. Idempotent.
     """
     from memex.renderer import render as _render
 
