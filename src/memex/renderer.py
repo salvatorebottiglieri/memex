@@ -58,6 +58,7 @@ def _build_frontmatter(node: dict[str, Any], body: str, store: Store) -> dict[st
     fm["kind"] = node["kind"]
     fm["depth"] = node["depth"]
     fm["created_at"] = node["created_at"]
+    fm["confidence"] = node["confidence"]
 
     # ── Tags ─────────────────────────────────────────────────────
     tags = [f"kind/{node['kind']}"]
