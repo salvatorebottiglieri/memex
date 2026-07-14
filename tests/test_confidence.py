@@ -383,3 +383,218 @@ class TestSynthesizeConfidence:
         assert row is not None
         # min(medium, low) = low
         assert row[0] == "low"
+# ── Contradicts cascade ────────────────────────────────────────────
+
+class TestContradictsCascade:
+    """Confidence cascade when a contradicts edge is written."""
+
+    def test_contradicts_target_confidence_low(self):
+        """Contradicts edge sets target node confidence to low."""
+        s = _store()
+        a = str(uuid.uuid4())
+        b = str(uuid.uuid4())
+        note1 = str(uuid.uuid4())
+        note2 = str(uuid.uuid4())
+        s.create_node(node_id=a, kind="raw_source")
+        s.create_node(node_id=b, kind="raw_source")
+        s.create_node(node_id=note1, kind="note", tier="notes")
+        s.create_edge(
+            edge_id=str(uuid.uuid4()), type="provenance", relation="derived_from",
+            from_node=note1, to_node=a,
+        )
+        # Note with 1 parent → medium
+        s._con.execute("UPDATE node SET confidence = 'medium' WHERE id = ?", (note1,))
+        s.create_node(node_id=note2, kind="note", tier="notes")
+        s.create_edge(
+            edge_id=str(uuid.uuid4()), type="provenance", relation="derived_from",
+            from_node=note2, to_node=b,
+        )
+        s._con.execute("UPDATE node SET confidence = 'medium' WHERE id = ?", (note2,))
+
+        # Both notes start medium (1 parent each)
+        for nid in (note1, note2):
+            row = s._con.execute(
+                "SELECT confidence FROM node WHERE id = ?", (nid,)
+            ).fetchone()
+            assert row[0] == "medium", f"expected medium for {nid}, got {row[0]}"
+
+        # Contradicts: note1 → note2 (target = note2)
+        s.create_edge(
+            edge_id=str(uuid.uuid4()), type="association", relation="contradicts",
+            from_node=note1, to_node=note2,
+        )
+
+        # Target note2 should be low
+        row = s._con.execute(
+            "SELECT confidence FROM node WHERE id = ?", (note2,)
+        ).fetchone()
+        assert row[0] == "low", f"expected low for note2, got {row[0]}"
+
+        # Unaffected note1 stays medium
+        row = s._con.execute(
+            "SELECT confidence FROM node WHERE id = ?", (note1,)
+        ).fetchone()
+        assert row[0] == "medium", f"expected medium for note1, got {row[0]}"
+
+    def test_contradicts_cascade_synthesis(self):
+        """Contradicts target → low, then descendant synthesis recomputed."""
+        s = _store()
+        a = str(uuid.uuid4())
+        b = str(uuid.uuid4())
+        note1 = str(uuid.uuid4())
+        note2 = str(uuid.uuid4())
+        syn = str(uuid.uuid4())
+
+        s.create_node(node_id=a, kind="raw_source")
+        s.create_node(node_id=b, kind="raw_source")
+        s.create_node(node_id=note1, kind="note", tier="notes")
+        s.create_edge(
+            edge_id=str(uuid.uuid4()), type="provenance", relation="derived_from",
+            from_node=note1, to_node=a,
+        )
+        s._con.execute("UPDATE node SET confidence = 'medium' WHERE id = ?", (note1,))
+        s.create_node(node_id=note2, kind="note", tier="notes")
+        s.create_edge(
+            edge_id=str(uuid.uuid4()), type="provenance", relation="derived_from",
+            from_node=note2, to_node=b,
+        )
+        s._con.execute("UPDATE node SET confidence = 'medium' WHERE id = ?", (note2,))
+
+        # Synthesis from note1 + note2 → medium (min of medium, medium)
+        s.create_node(node_id=syn, kind="synthesis", tier="synthesis")
+        s.create_edge(
+            edge_id=str(uuid.uuid4()), type="provenance", relation="derived_from",
+            from_node=syn, to_node=note1,
+        )
+        s.create_edge(
+            edge_id=str(uuid.uuid4()), type="provenance", relation="derived_from",
+            from_node=syn, to_node=note2,
+        )
+        # Min of parent confidences for synthesis
+        s._con.execute("UPDATE node SET confidence = 'medium' WHERE id = ?", (syn,))
+
+        # Synthesis should be medium (min of medium, medium)
+        row = s._con.execute(
+            "SELECT confidence FROM node WHERE id = ?", (syn,)
+        ).fetchone()
+        assert row[0] == "medium", f"expected medium for syn, got {row[0]}"
+
+        # Contradicts: note1 → note2 (target = note2)
+        s.create_edge(
+            edge_id=str(uuid.uuid4()), type="association", relation="contradicts",
+            from_node=note1, to_node=note2,
+        )
+
+        # Target note2 goes low
+        row = s._con.execute(
+            "SELECT confidence FROM node WHERE id = ?", (note2,)
+        ).fetchone()
+        assert row[0] == "low"
+
+        # Synthesis descendant should cascade to low (min of medium, low)
+        row = s._con.execute(
+            "SELECT confidence FROM node WHERE id = ?", (syn,)
+        ).fetchone()
+        assert row[0] == "low", f"expected low for syn after cascade, got {row[0]}"
+
+    def test_contradicts_cascade_transitive(self):
+        """Transitive cascade: grandchild synthesis also recomputed."""
+        s = _store()
+        a = str(uuid.uuid4())
+        b = str(uuid.uuid4())
+        note1 = str(uuid.uuid4())
+        note2 = str(uuid.uuid4())
+        syn1 = str(uuid.uuid4())
+        syn2 = str(uuid.uuid4())
+        note3 = str(uuid.uuid4())
+
+        # Two L0 roots
+        s.create_node(node_id=a, kind="raw_source")
+        s.create_node(node_id=b, kind="raw_source")
+
+        # Two notes
+        s.create_node(node_id=note1, kind="note", tier="notes")
+        s.create_edge(
+            edge_id=str(uuid.uuid4()), type="provenance", relation="derived_from",
+            from_node=note1, to_node=a,
+        )
+        s._con.execute("UPDATE node SET confidence = 'medium' WHERE id = ?", (note1,))
+        s.create_node(node_id=note2, kind="note", tier="notes")
+        s.create_edge(
+            edge_id=str(uuid.uuid4()), type="provenance", relation="derived_from",
+            from_node=note2, to_node=b,
+        )
+        s._con.execute("UPDATE node SET confidence = 'medium' WHERE id = ?", (note2,))
+
+        # First synthesis: syn1 from note1 + note2 → medium
+        s.create_node(node_id=syn1, kind="synthesis", tier="synthesis")
+        s.create_edge(
+            edge_id=str(uuid.uuid4()), type="provenance", relation="derived_from",
+            from_node=syn1, to_node=note1,
+        )
+        s.create_edge(
+            edge_id=str(uuid.uuid4()), type="provenance", relation="derived_from",
+            from_node=syn1, to_node=note2,
+        )
+        s._con.execute("UPDATE node SET confidence = 'medium' WHERE id = ?", (syn1,))
+
+        # A third note
+        s.create_node(node_id=note3, kind="note", tier="notes")
+        s.create_edge(
+            edge_id=str(uuid.uuid4()), type="provenance", relation="derived_from",
+            from_node=note3, to_node=a,
+        )
+        s._con.execute("UPDATE node SET confidence = 'medium' WHERE id = ?", (note3,))
+
+        # Second synthesis: syn2 from syn1 + note3 → medium
+        s.create_node(node_id=syn2, kind="synthesis", tier="synthesis")
+        s.create_edge(
+            edge_id=str(uuid.uuid4()), type="provenance", relation="derived_from",
+            from_node=syn2, to_node=syn1,
+        )
+        s.create_edge(
+            edge_id=str(uuid.uuid4()), type="provenance", relation="derived_from",
+            from_node=syn2, to_node=note3,
+        )
+        s._con.execute("UPDATE node SET confidence = 'medium' WHERE id = ?", (syn2,))
+
+        # Verify starting confidences
+        for nid in (note1, note2, note3):
+            row = s._con.execute(
+                "SELECT confidence FROM node WHERE id = ?", (nid,)
+            ).fetchone()
+            assert row[0] == "medium", f"expected medium for {nid}, got {row[0]}"
+        row = s._con.execute(
+            "SELECT confidence FROM node WHERE id = ?", (syn1,)
+        ).fetchone()
+        assert row[0] == "medium", f"expected medium for syn1, got {row[0]}"
+        # syn2: min(syn1=medium, note3=medium) = medium
+        row = s._con.execute(
+            "SELECT confidence FROM node WHERE id = ?", (syn2,)
+        ).fetchone()
+        assert row[0] == "medium", f"expected medium for syn2, got {row[0]}"
+
+        # Contradicts: note1 → note2 (target = note2)
+        s.create_edge(
+            edge_id=str(uuid.uuid4()), type="association", relation="contradicts",
+            from_node=note1, to_node=note2,
+        )
+
+        # note2 becomes low
+        row = s._con.execute(
+            "SELECT confidence FROM node WHERE id = ?", (note2,)
+        ).fetchone()
+        assert row[0] == "low"
+
+        # syn1: descendant of note2, min(note1=medium, note2=low) = low
+        row = s._con.execute(
+            "SELECT confidence FROM node WHERE id = ?", (syn1,)
+        ).fetchone()
+        assert row[0] == "low", f"expected low for syn1, got {row[0]}"
+
+        # syn2: descendant of syn1, min(syn1=low, note3=medium) = low
+        row = s._con.execute(
+            "SELECT confidence FROM node WHERE id = ?", (syn2,)
+        ).fetchone()
+        assert row[0] == "low", f"expected low for syn2, got {row[0]}"
+

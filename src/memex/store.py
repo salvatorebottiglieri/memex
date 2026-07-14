@@ -422,7 +422,9 @@ class Store:
     def _propagate_contradiction(self, edge_id: str, target_node_id: str) -> None:
         """Open a contestation event, walk provenance descendants,
         link each descendant and the target node, and flag
-        previously-uncontested nodes.
+        previously-uncontested nodes. Also set target confidence to
+        low and cascade confidence recomputation through descendant
+        synthesis nodes.
 
         This entire sequence shares the caller's transaction — no commit here.
         """
@@ -441,6 +443,50 @@ class Store:
                     "UPDATE node SET is_contested = 1, contested_at = ? WHERE id = ? AND is_contested = 0",
                     (now, node_id),
                 )
+
+            # Confidence cascade: target node goes to low
+            self._con.execute(
+                "UPDATE node SET confidence = 'low' WHERE id = ?",
+                (target_node_id,),
+            )
+
+            # Cascade: recompute confidence for descendant synthesis nodes
+            # as min of their parents' confidence. Loop until stable
+            # (converges in at most depth-of-graph iterations).
+            changed = True
+            while changed:
+                changed = False
+                for node_id in descendants:
+                    row = self._con.execute(
+                        "SELECT tier FROM node WHERE id = ?", (node_id,)
+                    ).fetchone()
+                    if row is None or row["tier"] != "synthesis":
+                        continue
+                    # Get current confidence of this node's parents
+                    parents = self._con.execute(
+                        """
+                        SELECT n2.confidence FROM edge e
+                        JOIN node n2 ON n2.id = e.to_node
+                        WHERE e.from_node = ? AND e.type = 'provenance' AND e.relation = 'derived_from'
+                        """,
+                        (node_id,),
+                    ).fetchall()
+                    if not parents:
+                        continue
+                    confidences = [p["confidence"] for p in parents if p["confidence"]]
+                    if "low" in confidences:
+                        new_conf = "low"
+                    elif "medium" in confidences:
+                        new_conf = "medium"
+                    else:
+                        new_conf = "high" if confidences else "low"
+                    # Update if different
+                    cur = self._con.execute(
+                        "UPDATE node SET confidence = ? WHERE id = ? AND confidence != ?",
+                        (new_conf, node_id, new_conf),
+                    )
+                    if cur.rowcount > 0:
+                        changed = True
         except sqlite3.Error as e:
             raise StoreError(str(e)) from e
 
