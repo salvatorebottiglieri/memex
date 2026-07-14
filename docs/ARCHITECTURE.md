@@ -43,6 +43,13 @@ more conservative on scope (single user, no discovery/web-research subsystem).
 | Edit round-trip (Obsidian wikilink edits back into DB) | **by design: Obsidian is view-only** | ADR-0008: SQLite owns structure, markdown owns content — unidirectional render |
 | Trust cascade (child trust capped to lowest parent) | **designed** (ADR-0014) | Implemented in `store.update_trust_state` |
 | Synthesis tier (cross-source derivation) | **built** | `memex synthesize <id1> <id2> ...` |
+| Extraction of key ideas (lightweight, no full derive) | **built** | `memex extract <node-id>` |
+| Idea text search across extracted ideas | **built** | `memex ideas <query>` |
+| List filtering (kind, tier, trust-state, confidence, limit, offset) | **built** | `memex list --kind --tier --trust-state --limit --offset` |
+| Search includes L0 metadata (title, URL, canonical key) | **built** | `memex search <query>` (now hybrid: files + SQL) |
+| Delete node (logical, with transitive cascade) | **built** | `memex delete <node-id> [--cascade]` |
+| Retry failed source ingestion | **built** | `memex retry <node-id>` |
+| Vault statistics dashboard | **built** | `memex stats` |
 
 ## Map (as built)
 

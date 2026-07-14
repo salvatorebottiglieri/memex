@@ -16,6 +16,9 @@ class FakeLLMClientFailing:
         prose = "This derivation has no synthesis marker and is intentionally bad."
         return DerivationResult(prose=prose, synthesis_statements=[])
 
+    def extract_ideas(self, content: str) -> list[str]:
+        return ["Idea about topic"]
+
     def review(self, target_content: str, asserting_content: str, edge_payload: dict) -> None:
         raise NotImplementedError(
             "FakeLLMClientFailing is for derive-failure testing only; "

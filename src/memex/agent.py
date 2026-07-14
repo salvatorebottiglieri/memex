@@ -47,6 +47,10 @@ class Agent:
         """Infer a human-readable title from content and URL. Return None to skip."""
         return None
 
+    def extract_ideas(self, content: str) -> list[str]:
+        """Extract 3-5 key ideas from content. Return empty list by default."""
+        return []
+
 
 class DemoAgent:
     """Built-in demo agent — returns hardcoded content. No API key needed."""
@@ -83,6 +87,10 @@ class DemoAgent:
         if first_line and len(first_line) < 200:
             return first_line.removeprefix('# ').strip()
         return None
+
+    def extract_ideas(self, content: str) -> list[str]:
+        """Return hardcoded demo ideas."""
+        return ["Key idea 1", "Key idea 2", "Key idea 3"]
 
 
 class AnthropicAgent(Agent):
@@ -125,6 +133,33 @@ class AnthropicAgent(Agent):
             prose = raw
             synthesis_statements = []
         return DerivationResult(prose=prose, synthesis_statements=synthesis_statements)
+
+    def extract_ideas(self, content: str) -> list[str]:
+        """Extract 3-5 key ideas via Anthropic LLM."""
+        import anthropic
+
+        client = anthropic.Anthropic()
+        system_prompt = (
+            "You are an idea extraction assistant. Given source material, identify 3-5 "
+            "key ideas or concepts. Return ONLY a JSON array of strings, each 5-15 words."
+        )
+        message = client.messages.create(
+            model="claude-opus-4-5",
+            max_tokens=512,
+            system=system_prompt,
+            messages=[
+                {
+                    "role": "user",
+                    "content": f"Extract the key ideas from this content:\n\n{content}",
+                }
+            ],
+        )
+        raw = message.content[0].text
+        import json as _json
+        try:
+            return _json.loads(raw)
+        except (_json.JSONDecodeError, AttributeError, TypeError):
+            return []
 
     def review(
         self,
@@ -261,6 +296,20 @@ class PiAgent(Agent):
         statements = _re.findall(r"> Synthesis:\s*(.+)", prose)
         return DerivationResult(prose=prose, synthesis_statements=statements)
 
+    def extract_ideas(self, content: str) -> list[str]:
+        """Extract 3-5 key ideas via Pi CLI."""
+        prompt = (
+            "You are an idea extraction assistant. Given source material, identify 3-5 "
+            "key ideas or concepts. Return ONLY a JSON array of strings, each 5-15 words.\n\n"
+            f"Source material:\n\n{content}"
+        )
+        raw = self._call_pi(prompt)
+        import json as _json
+        try:
+            return _json.loads(raw)
+        except (_json.JSONDecodeError, AttributeError, TypeError):
+            return []
+
     def review(self, target_content: str, asserting_content: str, edge_payload: dict) -> ReviewProposal:
         prompt = (
             "You are a research analysis assistant. Given the target node's content "
@@ -357,15 +406,15 @@ class OMPAgent(PiAgent):
         return last_text
 
 def _verify_agent_methods(client: object, module_path: str) -> None:
-    """Verify the loaded agent instance has both derive and review callables.
+    """Verify the loaded agent instance has derive, review, and extract_ideas callables.
 
-    Raises ImportError if either method is missing or not callable.
+    Raises ImportError if any method is missing or not callable.
     """
-    for method_name in ("derive", "review"):
+    for method_name in ("derive", "review", "extract_ideas"):
         if not hasattr(client, method_name) or not callable(getattr(client, method_name)):
             raise ImportError(
                 f"Agent '{module_path}' is missing required method '{method_name}'. "
-                f"Loaded agent class must implement both derive() and review()."
+                f"Loaded agent class must implement derive(), review(), and extract_ideas()."
             )
 
 

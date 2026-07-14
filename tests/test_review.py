@@ -23,6 +23,9 @@ class FakeAgentValidRefs:
     def derive(self, content: str) -> dict:
         return {"prose": "fake", "synthesis_statements": []}
 
+
+    def extract_ideas(self, content: str) -> list[str]:
+        return ["Idea 1", "Idea 2"]
     def review(self, target_content: str, asserting_content: str, edge_payload: dict) -> dict:
         from memex.agent import ReviewProposal
         return ReviewProposal(
@@ -45,6 +48,9 @@ class FakeAgentThrowsOnReview:
         raise RuntimeError("Simulated LLM review failure")
 
 
+
+    def extract_ideas(self, content: str) -> list[str]:
+        return ["Idea 1", "Idea 2"]
 
 def _ingest(store, url: str) -> dict:
     result = _run_memex(

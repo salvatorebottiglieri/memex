@@ -8,6 +8,8 @@ ADR-0008 boundary: SQLite owns structure (Store), markdown owns content (CLI / V
 from __future__ import annotations
 
 import json
+import uuid
+
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -98,6 +100,15 @@ CREATE TABLE IF NOT EXISTS review_proposal (
     resolved_at           TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_review_proposal_status ON review_proposal(status);
+
+CREATE TABLE IF NOT EXISTS node_idea (
+    id         TEXT PRIMARY KEY,
+    node_id    TEXT NOT NULL REFERENCES node(id),
+    idea_text  TEXT NOT NULL,
+    rank       INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_node_idea_node ON node_idea(node_id);
 """
 
 
@@ -317,16 +328,41 @@ class Store:
             raise StoreError(str(e)) from e
     # ── Reads ─────────────────────────────────────────────────────
 
-    def list_nodes(self) -> list[dict[str, Any]]:
+    def list_nodes(
+        self,
+        *,
+        kind: str | None = None,
+        tier: str | None = None,
+        trust_state: str | None = None,
+        confidence: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> list[dict[str, Any]]:
         """All nodes with full metadata, ordered by created_at.
+
+        Optional filters: kind, tier, trust_state, confidence, limit, offset.
 
         Returns the same per-node fields as ``get_node``: ``{id, kind, tier,
         trust_state, depth, content_path, created_at, confidence, check_failures,
         is_contested, contested_at,
         canonical_key, source_url, title, fetched_at, failed}``.
         """
-        rows = self._con.execute(
-            """
+        clauses: list[str] = []
+        params: list[Any] = []
+        if kind is not None:
+            clauses.append("n.kind = ?")
+            params.append(kind)
+        if tier is not None:
+            clauses.append("n.tier = ?")
+            params.append(tier)
+        if trust_state is not None:
+            clauses.append("n.trust_state = ?")
+            params.append(trust_state)
+        if confidence is not None:
+            clauses.append("n.confidence = ?")
+            params.append(confidence)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        sql = f"""
             SELECT
                 n.id, n.kind, n.tier, n.trust_state, n.depth,
                 n.content_path, n.created_at, n.check_failures,
@@ -334,9 +370,14 @@ class Store:
                 s.canonical_key, s.source_url, s.title, s.fetched_at, s.failed
             FROM node n
             LEFT JOIN source s ON s.node_id = n.id
+            {where}
             ORDER BY n.created_at
-            """
-        ).fetchall()
+        """
+        if limit is not None:
+            sql += f" LIMIT {limit}"
+        if offset is not None:
+            sql += f" OFFSET {offset}"
+        rows = self._con.execute(sql, params).fetchall()
         result = []
         for r in rows:
             d = dict(r)
@@ -945,6 +986,198 @@ class Store:
                 "UPDATE source SET title = ? WHERE node_id = ?",
                 (title, node_id),
             )
+        except sqlite3.Error as e:
+            raise StoreError(str(e)) from e
+
+    # ── Ideas ─────────────────────────────────────────────────────
+
+    def set_node_ideas(self, node_id: str, ideas: list[str]) -> None:
+        """Replace all ideas for a node. Atomic (single transaction)."""
+        try:
+            self._con.execute("DELETE FROM node_idea WHERE node_id = ?", (node_id,))
+            for rank, idea_text in enumerate(ideas, start=1):
+                idea_id = str(uuid.uuid4())
+                now = datetime.now(timezone.utc).isoformat()
+                self._con.execute(
+                    "INSERT INTO node_idea (id, node_id, idea_text, rank, created_at) VALUES (?, ?, ?, ?, ?)",
+                    (idea_id, node_id, idea_text, rank, now),
+                )
+        except sqlite3.Error as e:
+            raise StoreError(str(e)) from e
+
+    def get_node_ideas(self, node_id: str) -> list[dict]:
+        """Return ideas for a node, sorted by rank."""
+        try:
+            rows = self._con.execute(
+                "SELECT id, node_id, idea_text, rank, created_at FROM node_idea WHERE node_id = ? ORDER BY rank",
+                (node_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        except sqlite3.Error as e:
+            raise StoreError(str(e)) from e
+
+    def search_ideas(self, query: str) -> list[dict]:
+        """Search ideas by text LIKE. Returns node metadata + idea details."""
+        try:
+            rows = self._con.execute(
+                """
+                SELECT ni.id AS idea_id, ni.idea_text, ni.rank AS match_rank,
+                       n.id AS node_id, n.kind AS node_kind, n.tier AS node_tier
+                FROM node_idea ni
+                JOIN node n ON n.id = ni.node_id
+                WHERE ni.idea_text LIKE ?
+                ORDER BY ni.rank
+                """,
+                (f"%{query}%",),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        except sqlite3.Error as e:
+            raise StoreError(str(e)) from e
+
+    # ── Delete ────────────────────────────────────────────────────
+
+    def delete_node(self, node_id: str, cascade: bool = False) -> dict:
+        """Remove a node, its edges, source, and contestation links.
+
+        When ``cascade=True``, also removes all provenance descendants
+        transitively. Returns ``{"status": "deleted", "removed": [node_id, ...]}``.
+        Returns ``{"status": "not_found"}`` when the node doesn't exist.
+        """
+        node = self.get_node(node_id)
+        if node is None:
+            return {"status": "not_found"}
+
+        # Check for incoming edges if not cascading
+        if not cascade:
+            incoming = self._con.execute(
+                "SELECT COUNT(*) FROM edge WHERE to_node = ?", (node_id,)
+            ).fetchone()[0]
+            if incoming > 0:
+                return {"status": "has_dependents", "incoming_edges": incoming,
+                        "detail": "Use --cascade to remove dependents"}
+
+        removed = self._delete_node_internal(node_id, cascade)
+        return {"status": "deleted", "removed": removed}
+
+    def _delete_node_internal(self, node_id: str, cascade: bool) -> list[str]:
+        """Delete a node and optionally its descendants. Returns list of all removed ids."""
+        removed = [node_id]
+
+        # Cascade: delete descendants first (deep-first)
+        if cascade:
+            descendants = self.find_provenance_descendants(node_id)
+            for desc_id in descendants:
+                desc_removed = self._delete_node_internal(desc_id, cascade=True)
+                removed.extend(desc_removed)
+
+        try:
+            # Remove contestation event links
+            open_events = self.get_node_open_events(node_id)
+            for event_id in open_events:
+                self._con.execute(
+                    "UPDATE event_queue SET status = 'closed', closed_at = ? WHERE id = ? AND status = 'pending'",
+                    (datetime.now(timezone.utc).isoformat(), event_id),
+                )
+                self._con.execute("DELETE FROM event_node_link WHERE event_id = ?", (event_id,))
+                self._con.execute(
+                    "UPDATE review_proposal SET status = 'dismissed', resolved_at = ? WHERE event_id = ? AND status = 'pending'",
+                    (datetime.now(timezone.utc).isoformat(), event_id),
+                )
+
+            # Remove edges (both directions)
+            self._con.execute(
+                "DELETE FROM edge WHERE from_node = ? OR to_node = ?",
+                (node_id, node_id),
+            )
+
+            # Remove ideas
+            self._con.execute("DELETE FROM node_idea WHERE node_id = ?", (node_id,))
+
+            # Remove source row
+            self._con.execute("DELETE FROM source WHERE node_id = ?", (node_id,))
+
+            # Remove node row
+            self._con.execute("DELETE FROM node WHERE id = ?", (node_id,))
+        except sqlite3.Error as e:
+            raise StoreError(str(e)) from e
+
+        return removed
+
+    # ── Stats ──────────────────────────────────────────────────────
+
+    def get_stats(self) -> dict:
+        """Return high-level vault statistics."""
+        try:
+            total = self._con.execute("SELECT COUNT(*) FROM node").fetchone()[0]
+
+            by_kind = dict(self._con.execute(
+                "SELECT kind, COUNT(*) FROM node GROUP BY kind ORDER BY kind"
+            ).fetchall())
+
+            by_tier = dict(self._con.execute(
+                "SELECT COALESCE(tier, 'raw_source'), COUNT(*) FROM node GROUP BY tier ORDER BY tier"
+            ).fetchall())
+
+            by_trust = dict(self._con.execute(
+                "SELECT trust_state, COUNT(*) FROM node GROUP BY trust_state"
+            ).fetchall())
+
+            by_conf = dict(self._con.execute(
+                "SELECT COALESCE(confidence, 'unset'), COUNT(*) FROM node GROUP BY confidence"
+            ).fetchall())
+
+            # Derivation coverage: pct of L0 nodes with at least one derivation
+            l0_total = self._con.execute(
+                "SELECT COUNT(*) FROM node WHERE kind = 'raw_source' AND tier IS NULL"
+            ).fetchone()[0]
+            l0_derived = self._con.execute(
+                """
+                SELECT COUNT(DISTINCT e.to_node) FROM edge e
+                JOIN node n ON n.id = e.to_node
+                WHERE e.type = 'provenance' AND e.relation = 'derived_from'
+                  AND n.kind = 'raw_source' AND n.tier IS NULL
+                """
+            ).fetchone()[0]
+            coverage = round(l0_derived / l0_total * 100, 1) if l0_total > 0 else 0.0
+
+            pending_reviews = self._con.execute(
+                "SELECT COUNT(*) FROM event_queue WHERE status = 'pending'"
+            ).fetchone()[0]
+
+            inbox_count = self._con.execute(
+                "SELECT COUNT(*) FROM inbox"
+            ).fetchone()[0]
+
+            return {
+                "total_nodes": total,
+                "by_kind": by_kind,
+                "by_tier": by_tier,
+                "by_trust_state": by_trust,
+                "by_confidence": by_conf,
+                "derivation_coverage_pct": coverage,
+                "pending_reviews": pending_reviews,
+                "inbox_count": inbox_count,
+            }
+        except sqlite3.Error as e:
+            raise StoreError(str(e)) from e
+
+    # ── Retry ──────────────────────────────────────────────────────
+
+    def reset_source_failed(self, node_id: str) -> bool:
+        """Set ``source.failed = 0`` and update ``content_path``.
+
+        Returns True if the node existed and was a failed source, False otherwise.
+        """
+        try:
+            row = self._con.execute(
+                "SELECT failed FROM source WHERE node_id = ?", (node_id,)
+            ).fetchone()
+            if row is None or not row["failed"]:
+                return False
+            self._con.execute(
+                "UPDATE source SET failed = 0 WHERE node_id = ?", (node_id,)
+            )
+            return True
         except sqlite3.Error as e:
             raise StoreError(str(e)) from e
 

@@ -32,6 +32,9 @@ class FakeAgent:
     def generate_title(self, content: str, url: str) -> str | None:
         return None
 
+    def extract_ideas(self, content: str) -> list[str]:
+        return ["Key idea 1", "Key idea 2", "Key idea 3"]
+
     def review(self, target_content: str, asserting_content: str, edge_payload: dict) -> ReviewProposal:
         rp_affected = self.review_affected_node_ids
         if rp_affected is None:

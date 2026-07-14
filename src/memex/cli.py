@@ -256,7 +256,15 @@ def ingest(db_path: Path, vault_path: Path, url: str | None, inbox_path: Path | 
     default=False,
     help="Return canonical keys captured from inbox but not yet ingested.",
 )
-def list_nodes(db_path: Path, vault_path: Path, show_pending: bool) -> None:
+@click.option("--kind", default=None, help="Filter by node kind (e.g. raw_source, summary).")
+@click.option("--tier", default=None, help="Filter by node tier (e.g. notes, synthesis).")
+@click.option("--trust-state", "trust_state", default=None, help="Filter by trust state (draft, auto-verified, human-approved, stale).")
+@click.option("--confidence", default=None, help="Filter by confidence (high, medium, low).")
+@click.option("--limit", default=None, type=int, help="Max results.")
+@click.option("--offset", default=None, type=int, help="Result offset for pagination.")
+def list_nodes(db_path: Path, vault_path: Path, show_pending: bool,
+               kind: str | None, tier: str | None, trust_state: str | None,
+               confidence: str | None, limit: int | None, offset: int | None) -> None:
     """Return JSON array of all nodes, or --pending captured-but-not-ingested keys."""
     from memex.store import Store
 
@@ -272,7 +280,10 @@ def list_nodes(db_path: Path, vault_path: Path, show_pending: bool) -> None:
                     seen.add(ckey)
             click.echo(json.dumps(pending))
         else:
-            click.echo(json.dumps(store.list_nodes()))
+            click.echo(json.dumps(store.list_nodes(
+                kind=kind, tier=tier, trust_state=trust_state,
+                confidence=confidence, limit=limit, offset=offset,
+            )))
 
 
 @cli.command()
@@ -633,19 +644,22 @@ def _derive_all(db_path: Path, vault_path: Path, limit: int) -> None:
 @_db_options
 @click.argument("query")
 def search(db_path: Path, vault_path: Path, query: str) -> None:
-    """Keyword search over derivation content. Returns JSON array (read-only).
+    """Keyword search over derivation content and L0 metadata. Returns JSON array (read-only).
 
-    Each result has: id, snippet, canonical_key, l0_node_id.
+    Each result has: id, snippet, canonical_key, l0_node_id, match_type.
     """
     from memex.store import Store
 
     _require_db(db_path)
     CONTEXT_CHARS = 120
     query_lower = query.lower()
+    query_param = f"%{query}%"
 
     with Store.open(db_path) as store:
+        # ── First pass: derivation content (file scan) ─────────
+        # Index results by l0_node_id for dedup
+        by_l0: dict[str, dict] = {}
         rows = store.list_edges(relation="derived_from", type="provenance")
-        results = []
         for edge in rows:
             deriv_id = edge["from_node"]
             deriv = store.get_node(deriv_id)
@@ -668,15 +682,115 @@ def search(db_path: Path, vault_path: Path, query: str) -> None:
                 snippet = snippet + "..."
 
             l0 = store.get_node(edge["to_node"])
-            canonical_key = l0.get("canonical_key") if l0 else None
+            ckey = l0.get("canonical_key") if l0 else None
+            l0_id = edge["to_node"]
 
-            results.append({
+            by_l0[l0_id] = {
                 "id": deriv_id,
                 "snippet": snippet,
-                "canonical_key": canonical_key,
-                "l0_node_id": edge["to_node"],
-            })
+                "canonical_key": ckey,
+                "l0_node_id": l0_id,
+                "match_type": "derivation",
+            }
 
+        # ── Second pass: L0 metadata (SQL) ────────────────────
+        meta_rows = store._con.execute(
+            """
+            SELECT n.id, s.title, s.source_url, s.canonical_key
+            FROM node n
+            JOIN source s ON s.node_id = n.id
+            WHERE s.title LIKE ? OR s.source_url LIKE ? OR s.canonical_key LIKE ?
+            """,
+            (query_param, query_param, query_param),
+        ).fetchall()
+
+        for row in meta_rows:
+            nid = row["id"]
+            # Determine which field matched
+            match_field = "title"
+            if query_lower in (row["source_url"] or "").lower():
+                match_field = "url"
+            elif query_lower in (row["canonical_key"] or "").lower():
+                match_field = "key"
+
+            if nid in by_l0:
+                by_l0[nid]["match_type"] = "multiple"
+            else:
+                # New result — show matched metadata as snippet
+                matched_val = row[match_field] or ""
+                by_l0[nid] = {
+                    "id": nid,
+                    "snippet": matched_val,
+                    "canonical_key": row["canonical_key"],
+                    "l0_node_id": nid,
+                    "match_type": match_field,
+                }
+
+    click.echo(json.dumps(list(by_l0.values())))
+
+
+@cli.command()
+@_db_options
+@click.argument("node_id")
+def extract(db_path: Path, vault_path: Path, node_id: str) -> None:
+    """Extract key ideas from a node. Uses LLM agent. Idempotent — re-run replaces ideas."""
+    from memex.agent import load_agent
+    from memex.store import Store
+    from memex.fetcher import load_fetcher
+
+    _require_db(db_path)
+    agent = load_agent(os.environ.get("MEMEX_AGENT") or os.environ.get("MEMEX_LLM_MODULE"))
+
+    with Store.open(db_path) as store:
+        node = store.get_node(node_id)
+        if node is None:
+            click.echo(json.dumps({"error": "not_found"}))
+            return
+
+        # Load content (from file or fetch fresh)
+        if node.get("content_path") and Path(node["content_path"]).exists():
+            content = Path(node["content_path"]).read_text(encoding="utf-8")
+        else:
+            try:
+                fetcher = load_fetcher(os.environ.get("MEMEX_FETCHER_MODULE"), vault_path=str(vault_path))
+                result = fetcher.fetch(node["source_url"])
+                content = result.content
+            except Exception as exc:
+                click.echo(json.dumps({"error": "no_content", "detail": str(exc)}))
+                return
+
+        try:
+            ideas = agent.extract_ideas(content)
+        except Exception as exc:
+            click.echo(json.dumps({"error": "agent_failed", "detail": str(exc)}))
+            return
+
+        store.set_node_ideas(node_id, ideas)
+
+    click.echo(json.dumps({
+        "node_id": node_id,
+        "ideas_count": len(ideas),
+        "ideas": ideas,
+    }))
+
+
+@cli.command()
+@_db_options
+@click.argument("query", required=False, default="")
+def ideas(db_path: Path, vault_path: Path, query: str) -> None:
+    """Search across extracted ideas. Returns JSON array of matching ideas with node metadata.
+
+    Empty query returns all ideas. No match returns [].
+    """
+    from memex.store import Store
+
+    _require_db(db_path)
+    with Store.open(db_path) as store:
+        # Check if node_idea table exists (pre-migration safety)
+        try:
+            results = store.search_ideas(query if query else "%")
+        except Exception:
+            results = []
     click.echo(json.dumps(results))
 
 
@@ -952,5 +1066,82 @@ def contradict(db_path: Path, vault_path: Path, target_id: str, asserted_by: str
         "asserted_by": asserted_by,
         "written_by": "human",
     }))
+
+
+@cli.command()
+@_db_options
+@click.argument("node_id")
+@click.option("--cascade", is_flag=True, default=False, help="Remove node and all provenance descendants transitively.")
+def delete(db_path: Path, vault_path: Path, node_id: str, cascade: bool) -> None:
+    """Remove a node from the vault (logical delete). File .md is kept on disk.
+
+    Use --cascade to also remove all provenance descendants transitively.
+    """
+    from memex.store import Store
+
+    _require_db(db_path)
+    with Store.open(db_path) as store:
+        result = store.delete_node(node_id, cascade=cascade)
+    click.echo(json.dumps(result))
+
+
+@cli.command()
+@_db_options
+@click.argument("node_id")
+def retry(db_path: Path, vault_path: Path, node_id: str) -> None:
+    """Re-fetch a failed source URL. Updates content on success."""
+    from memex.store import Store
+    from memex.fetcher import load_fetcher, FetchError
+
+    _require_db(db_path)
+
+    with Store.open(db_path) as store:
+        node = store.get_node(node_id)
+        if node is None:
+            click.echo(json.dumps({"error": "not_found"}))
+            return
+
+        source_url = node.get("source_url")
+        if not source_url or not node.get("failed"):
+            click.echo(json.dumps({"error": "not_failed"}))
+            return
+
+        fetcher = load_fetcher(os.environ.get("MEMEX_FETCHER_MODULE"), vault_path=str(vault_path))
+        try:
+            result = fetcher.fetch(source_url)
+            content = result.content
+            content_path = result.content_path
+        except FetchError as exc:
+            click.echo(json.dumps({"error": "fetch_failed", "detail": str(exc)}))
+            return
+
+        # Write content file
+        vault_path.mkdir(parents=True, exist_ok=True)
+        md_path = vault_path / f"{node_id}.md"
+        md_path.write_text(content, encoding="utf-8")
+
+        # Update node content_path and reset failed
+        store._con.execute(
+            "UPDATE node SET content_path = ? WHERE id = ?",
+            (str(md_path), node_id),
+        )
+        store.reset_source_failed(node_id)
+
+    click.echo(json.dumps({
+        "status": "retried",
+        "id": node_id,
+        "content_path": str(md_path),
+    }))
+
+
+@cli.command()
+@_db_options
+def stats(db_path: Path, vault_path: Path) -> None:
+    """Return high-level vault statistics as JSON."""
+    from memex.store import Store
+
+    _require_db(db_path)
+    with Store.open(db_path) as store:
+        click.echo(json.dumps(store.get_stats()))
 if __name__ == "__main__":
     cli()

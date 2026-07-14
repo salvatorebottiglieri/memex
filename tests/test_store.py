@@ -29,7 +29,7 @@ class TestSchema:
             "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
         ).fetchall()
         names = {r[0] for r in tables if not r[0].startswith("sqlite_")}
-        assert names == {"node", "source", "edge", "cursor", "inbox", "event_queue", "event_node_link", "review_proposal"}
+        assert names == {"node", "source", "edge", "cursor", "inbox", "event_queue", "event_node_link", "review_proposal", "node_idea"}
 
     def test_init_schema_is_idempotent(self):
         store = _store()
@@ -38,7 +38,7 @@ class TestSchema:
             "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
         ).fetchall()
         names = {r[0] for r in tables if not r[0].startswith("sqlite_")}
-        assert names == {"node", "source", "edge", "cursor", "inbox", "event_queue", "event_node_link", "review_proposal"}
+        assert names == {"node", "source", "edge", "cursor", "inbox", "event_queue", "event_node_link", "review_proposal", "node_idea"}
 
     def test_init_schema_adds_new_columns(self):
         """Verify is_contested, contested_at on node and written_by on edge exist."""
@@ -1048,6 +1048,208 @@ class TestGetNodeOpenEvents:
         result = store.get_node_open_events(l0)
         assert result == []
 
+
+
+class TestNodeIdeas:
+    """Tests for set_node_ideas, get_node_ideas, and search_ideas."""
+
+    def test_set_and_get_node_ideas(self):
+        store = _store()
+        store.create_node(node_id="n1", kind="raw_source")
+        ideas = ["First idea", "Second idea", "Third idea"]
+        store.set_node_ideas("n1", ideas)
+        result = store.get_node_ideas("n1")
+        assert len(result) == 3
+        for i, row in enumerate(result):
+            assert row["node_id"] == "n1"
+            assert row["idea_text"] == ideas[i]
+            assert row["rank"] == i + 1
+            assert isinstance(row["id"], str) and len(row["id"]) > 0
+            assert isinstance(row["created_at"], str) and len(row["created_at"]) > 0
+
+    def test_re_extraction_replaces_ideas(self):
+        store = _store()
+        store.create_node(node_id="n1", kind="raw_source")
+        store.set_node_ideas("n1", ["Idea A", "Idea B", "Idea C"])
+        store.set_node_ideas("n1", ["Replacement A", "Replacement B"])
+        result = store.get_node_ideas("n1")
+        assert len(result) == 2
+        assert result[0]["idea_text"] == "Replacement A"
+        assert result[1]["idea_text"] == "Replacement B"
+
+    def test_search_ideas_matches(self):
+        store = _store()
+        store.create_node(node_id="n1", kind="raw_source")
+        store.create_node(node_id="n2", kind="summary", depth=1)
+        store.set_node_ideas("n1", ["Alpha idea", "Beta concept"])
+        store.set_node_ideas("n2", ["Gamma notion", "Delta principle"])
+        result = store.search_ideas("Beta")
+        assert len(result) == 1
+        row = result[0]
+        assert row["node_id"] == "n1"
+        assert row["node_kind"] == "raw_source"
+        assert row["idea_text"] == "Beta concept"
+        assert row["match_rank"] == 2
+        assert isinstance(row["idea_id"], str) and len(row["idea_id"]) > 0
+
+    def test_search_ideas_no_match(self):
+        store = _store()
+        store.create_node(node_id="n1", kind="raw_source")
+        store.set_node_ideas("n1", ["Unique thought"])
+        assert store.search_ideas("xyzzynonsense") == []
+
+    def test_search_ideas_empty_query(self):
+        store = _store()
+        store.create_node(node_id="n1", kind="raw_source")
+        store.create_node(node_id="n2", kind="summary", depth=1)
+        store.set_node_ideas("n1", ["Alpha"])
+        store.set_node_ideas("n2", ["Beta"])
+        result = store.search_ideas("")
+        assert len(result) >= 2
+
+    def test_fk_violation(self):
+        store = _store()
+        with pytest.raises(StoreError):
+            store.set_node_ideas("nonexistent", ["Should fail"])
+
+
+class TestListNodesFiltering:
+    """Tests for list_nodes with filters, limit, and offset."""
+
+    def test_list_nodes_filter_by_kind(self):
+        store = _store()
+        store.create_node(node_id="n1", kind="raw_source")
+        store.create_node(node_id="n2", kind="summary", depth=1)
+        result = store.list_nodes(kind="raw_source")
+        assert len(result) == 1
+        assert result[0]["id"] == "n1"
+
+    def test_list_nodes_filter_composes(self):
+        store = _store()
+        store.create_node(node_id="n1", kind="raw_source", trust_state="draft")
+        store.create_node(node_id="n2", kind="raw_source", trust_state="human-approved")
+        store.create_node(node_id="n3", kind="summary", depth=1, trust_state="draft")
+        result = store.list_nodes(kind="raw_source", trust_state="draft")
+        assert len(result) == 1
+        assert result[0]["id"] == "n1"
+
+    def test_list_nodes_limit_and_offset(self):
+        store = _store()
+        for i in range(1, 6):
+            store.create_node(
+                node_id=f"n{i}", kind="raw_source",
+                created_at=f"2024-01-{i:02d}T00:00:00",
+            )
+        limited = store.list_nodes(limit=2)
+        assert len(limited) == 2
+        assert limited[0]["id"] == "n1"
+        assert limited[1]["id"] == "n2"
+        offset = store.list_nodes(limit=2, offset=2)
+        assert len(offset) == 2
+        assert offset[0]["id"] == "n3"
+        assert offset[1]["id"] == "n4"
+
+
+class TestDeleteNode:
+    """Tests for delete_node."""
+
+    def test_delete_node_removes_node_and_source(self):
+        store = _store()
+        store.create_node(node_id="n1", kind="raw_source")
+        store.attach_source(node_id="n1", canonical_key="https://a.com", source_url="https://a.com")
+        result = store.delete_node("n1")
+        assert result["status"] == "deleted"
+        assert "n1" in result["removed"]
+        assert store.get_node("n1") is None
+        assert store.lookup_by_canonical_key("https://a.com") is None
+
+    def test_delete_nonexistent_node(self):
+        store = _store()
+        assert store.delete_node("nonexistent") == {"status": "not_found"}
+
+    def test_delete_node_with_dependents(self):
+        store = _store()
+        store.create_node(node_id="l0", kind="raw_source")
+        store.create_node(node_id="d1", kind="summary", depth=1)
+        store.create_edge(
+            edge_id=str(uuid.uuid4()), type="provenance",
+            relation="derived_from", from_node="d1", to_node="l0",
+        )
+        result = store.delete_node("l0")
+        assert result["status"] == "has_dependents"
+        assert result["incoming_edges"] == 1
+
+    def test_delete_node_cascade(self):
+        store = _store()
+        store.create_node(node_id="l0", kind="raw_source")
+        store.create_node(node_id="d1", kind="summary", depth=1)
+        store.create_edge(
+            edge_id=str(uuid.uuid4()), type="provenance",
+            relation="derived_from", from_node="d1", to_node="l0",
+        )
+        result = store.delete_node("l0", cascade=True)
+        assert result["status"] == "deleted"
+        assert "l0" in result["removed"]
+        assert "d1" in result["removed"]
+        assert store.get_node("l0") is None
+        assert store.get_node("d1") is None
+
+
+class TestGetStats:
+    """Tests for get_stats."""
+
+    def test_get_stats_empty_vault(self):
+        store = _store()
+        stats = store.get_stats()
+        assert stats["total_nodes"] == 0
+        assert stats["by_kind"] == {}
+        assert stats["by_tier"] == {}
+        assert stats["by_trust_state"] == {}
+        assert stats["derivation_coverage_pct"] == 0.0
+        assert stats["pending_reviews"] == 0
+        assert stats["inbox_count"] == 0
+
+    def test_get_stats_with_data(self):
+        store = _store()
+        store.create_node(node_id="n1", kind="raw_source", tier=None, trust_state="draft")
+        store.create_node(node_id="n2", kind="raw_source", tier=None, trust_state="auto-verified")
+        store.create_node(node_id="n3", kind="summary", depth=1, tier="notes", trust_state="draft")
+        stats = store.get_stats()
+        assert stats["total_nodes"] == 3
+        assert stats["by_kind"] == {"raw_source": 2, "summary": 1}
+        assert stats["by_trust_state"] == {"draft": 2, "auto-verified": 1}
+        assert stats["pending_reviews"] == 0
+        assert stats["inbox_count"] == 0
+
+
+class TestResetSourceFailed:
+    """Tests for reset_source_failed."""
+
+    def test_reset_failed_source(self):
+        store = _store()
+        store.create_node(node_id="n1", kind="raw_source")
+        store.attach_source(
+            node_id="n1", canonical_key="https://a.com",
+            source_url="https://a.com", failed=True,
+        )
+        assert store.reset_source_failed("n1") is True
+        row = store._con.execute(
+            "SELECT failed FROM source WHERE node_id = ?", ("n1",)
+        ).fetchone()
+        assert row["failed"] == 0
+
+    def test_reset_not_failed(self):
+        store = _store()
+        store.create_node(node_id="n1", kind="raw_source")
+        store.attach_source(
+            node_id="n1", canonical_key="https://a.com",
+            source_url="https://a.com",
+        )
+        assert store.reset_source_failed("n1") is False
+
+    def test_reset_nonexistent(self):
+        store = _store()
+        assert store.reset_source_failed("nonexistent") is False
 
 class TestEdgeCursor:
     def test_edge_methods_exist(self):
