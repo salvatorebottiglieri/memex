@@ -455,6 +455,11 @@ def _do_derive(store, vault_path, l0_id, l0_content, agent, use_retry=False):
         to_node=l0_id,
     )
 
+    # Notes-tier with 1 parent → medium confidence
+    store._con.execute(
+        "UPDATE node SET confidence = 'medium' WHERE id = ?", (deriv_id,)
+    )
+
     check_result = run_checks(store._con, deriv_id, md_path)
     trust_state = "auto-verified" if check_result.passed else "draft"
     store.update_trust_state(
@@ -522,6 +527,22 @@ def _do_synthesize(store, vault_path, parent_ids, agent):
             from_node=deriv_id,
             to_node=pid,
         )
+
+    # Synthesis: confidence = min(parents' confidence)
+    confidences = []
+    for pid in parent_ids:
+        p = store.get_node(pid)
+        if p and p.get("confidence"):
+            confidences.append(p["confidence"])
+    if "low" in confidences:
+        synth_conf = "low"
+    elif "medium" in confidences:
+        synth_conf = "medium"
+    else:
+        synth_conf = "low"
+    store._con.execute(
+        "UPDATE node SET confidence = ? WHERE id = ?", (synth_conf, deriv_id)
+    )
 
     check_result = run_checks(store._con, deriv_id, md_path)
     trust_state = "auto-verified" if check_result.passed else "draft"

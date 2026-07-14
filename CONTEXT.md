@@ -46,6 +46,18 @@ _Avoid_: status, validation flag
 **Confidence**:
 A `high | medium | low` quality signal derived from source count and contradictions. Distinct from trust state.
 
+    high    2+ direct provenance parents AND no incoming contradicts edges
+    medium  1 direct provenance parent AND no incoming contradicts edges
+    low     Any incoming contradicts edge, OR 0 parents (L0 nodes)
+
+Synthesis nodes inherit the **minimum** confidence of their parent set (matching the trust cascade pattern).
+When a ``contradicts`` edge targets a node, its confidence drops to ``low``,
+and the minimum-confidence rule cascades transitively to all synthesis
+descendants via ``find_provenance_descendants``.
+Computed eagerly at node creation (column in the ``node`` table) and
+recomputed when a ``contradicts`` edge is written. Exposed in ``show``,
+``list``, and ``render`` YAML frontmatter.
+
 ### Ingestion
 
 **Capture**:

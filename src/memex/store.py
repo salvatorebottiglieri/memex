@@ -158,6 +158,13 @@ class Store:
             )
         except sqlite3.OperationalError:
             pass  # column already exists
+        try:
+            self._con.execute(
+                "ALTER TABLE node ADD COLUMN confidence TEXT CHECK (confidence IN ('high','medium','low'))"
+            )
+        except sqlite3.OperationalError:
+            pass  # column already exists
+        self._backfill_confidence()
 
     # ── Ledger ────────────────────────────────────────────────────
 
@@ -186,20 +193,104 @@ class Store:
         depth: int = 0,
         content_path: str = "",
         created_at: str | None = None,
+        confidence: str | None = None,
     ) -> None:
-        """Insert a node row. ``created_at`` defaults to now (UTC ISO)."""
+        """Insert a node row. ``created_at`` defaults to now (UTC ISO).
+
+        When ``confidence`` is omitted, it is computed automatically.
+        """
         if created_at is None:
             created_at = datetime.now(timezone.utc).isoformat()
+        if confidence is None:
+            confidence = "low"  # default for fresh nodes with no edges yet
         try:
             self._con.execute(
                 """
-                INSERT INTO node (id, kind, tier, trust_state, depth, content_path, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO node (id, kind, tier, trust_state, depth, content_path, created_at, confidence)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (node_id, kind, tier, trust_state, depth, content_path, created_at),
+                (node_id, kind, tier, trust_state, depth, content_path, created_at, confidence),
             )
         except sqlite3.Error as e:
             raise StoreError(str(e)) from e
+
+    def _backfill_confidence(self) -> None:
+        """Set confidence for nodes created before the column existed.
+
+        L0 (no tier, no provenance edge) → low.
+        Notes tier → medium (1 parent after creation).
+        Synthesis tier → min(parents' confidence), or low when unresolvable.
+        """
+        # L0 nodes: no tier → low
+        self._con.execute(
+            "UPDATE node SET confidence = 'low' WHERE confidence IS NULL AND tier IS NULL"
+        )
+        # Notes tier → medium
+        self._con.execute(
+            "UPDATE node SET confidence = 'medium' WHERE confidence IS NULL AND tier = 'notes'"
+        )
+        # Synthesis tier: min of parents' confidence
+        rows = self._con.execute(
+            "SELECT n.id FROM node n WHERE n.confidence IS NULL AND n.tier = 'synthesis'"
+        ).fetchall()
+        for row in rows:
+            nid = row["id"]
+            parents = self._con.execute(
+                """
+                SELECT n2.confidence FROM edge e
+                JOIN node n2 ON n2.id = e.to_node
+                WHERE e.from_node = ? AND e.type = 'provenance' AND e.relation = 'derived_from'
+                """,
+                (nid,),
+            ).fetchall()
+            if parents:
+                confidences = [p["confidence"] for p in parents if p["confidence"]]
+                if "low" in confidences:
+                    min_c = "low"
+                elif "medium" in confidences:
+                    min_c = "medium"
+                else:
+                    min_c = "high"
+            else:
+                min_c = "low"
+            self._con.execute(
+                "UPDATE node SET confidence = ? WHERE id = ?", (min_c, nid)
+            )
+
+    def compute_node_confidence(self, node_id: str) -> str:
+        """Compute confidence score for a node per the formula.
+
+        | Confidence | Condition |
+        |---|---|
+        | high | 2+ direct provenance parents AND no incoming contradicts |
+        | medium | 1 direct provenance parent AND no incoming contradicts |
+        | low | Any incoming contradicts, OR 0 parents (L0 nodes) |
+
+        Raises ``ValueError`` if ``node_id`` is not found.
+        """
+        node = self.get_node(node_id)
+        if node is None:
+            raise ValueError(f"node not found: {node_id}")
+
+        # Check incoming contradicts first — overrides everything
+        contradicts = self._con.execute(
+            "SELECT COUNT(*) FROM edge WHERE to_node = ? AND type = 'association' AND relation = 'contradicts'",
+            (node_id,),
+        ).fetchone()[0]
+        if contradicts > 0:
+            return "low"
+        # Count incoming provenance (derived_from) edges — from_node=this_node means
+        # this node was derived from its parents (to_node = parent)
+        parents = self._con.execute(
+            "SELECT COUNT(*) FROM edge WHERE from_node = ? AND type = 'provenance' AND relation = 'derived_from'",
+            (node_id,),
+        ).fetchone()[0]
+        if parents >= 2:
+            return "high"
+        elif parents == 1:
+            return "medium"
+        else:
+            return "low"
 
     # ── Sources ───────────────────────────────────────────────────
 
@@ -230,7 +321,7 @@ class Store:
         """All nodes with full metadata, ordered by created_at.
 
         Returns the same per-node fields as ``get_node``: ``{id, kind, tier,
-        trust_state, depth, content_path, created_at, check_failures,
+        trust_state, depth, content_path, created_at, confidence, check_failures,
         is_contested, contested_at,
         canonical_key, source_url, title, fetched_at, failed}``.
         """
@@ -239,7 +330,7 @@ class Store:
             SELECT
                 n.id, n.kind, n.tier, n.trust_state, n.depth,
                 n.content_path, n.created_at, n.check_failures,
-                n.is_contested, n.contested_at,
+                n.is_contested, n.contested_at, n.confidence,
                 s.canonical_key, s.source_url, s.title, s.fetched_at, s.failed
             FROM node n
             LEFT JOIN source s ON s.node_id = n.id
@@ -265,7 +356,7 @@ class Store:
         """Full node + source by id.
 
         Returns ``{id, kind, tier, trust_state, depth, content_path, created_at,
-        check_failures, is_contested, contested_at,
+        confidence, check_failures, is_contested, contested_at,
         canonical_key, source_url, title, fetched_at, failed}`` or ``None``.
         """
         row = self._con.execute(
@@ -273,7 +364,7 @@ class Store:
             SELECT
                 n.id, n.kind, n.tier, n.trust_state, n.depth, n.content_path, n.created_at,
                 n.check_failures,
-                n.is_contested, n.contested_at,
+                n.is_contested, n.contested_at, n.confidence,
                 s.canonical_key, s.source_url, s.title, s.fetched_at, s.failed
             FROM node n
             LEFT JOIN source s ON s.node_id = n.id
