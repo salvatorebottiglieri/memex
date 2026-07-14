@@ -305,6 +305,10 @@ class PiAgent(Agent):
         )
         raw = self._call_pi(prompt)
         import json as _json
+        import re as _re
+        # Strip markdown code fences (```json ... ```) that omp/Pi may wrap around JSON
+        raw = _re.sub(r'^```\w*\n?', '', raw.strip())
+        raw = _re.sub(r'\n?```$', '', raw)
         try:
             return _json.loads(raw)
         except (_json.JSONDecodeError, AttributeError, TypeError):
