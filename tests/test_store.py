@@ -10,16 +10,9 @@ from pathlib import Path
 
 from memex.store import Store, StoreError
 
-
-def _store():
-    con = sqlite3.connect(":memory:")
-    s = Store(con)
-    s.init_schema()
-    return s
+from tests.conftest import _store, _utcnow
 
 
-def _utcnow() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 class TestSchema:

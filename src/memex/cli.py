@@ -76,9 +76,6 @@ def _fail(error: str, **kwargs: Any) -> None:
     raise SystemExit(1)
 
 
-def _require_db(db_path: Path) -> None:
-    """Exit with clean JSON error if the database file doesn't exist."""
-
 
 @click.group()
 def cli() -> None:
@@ -189,10 +186,10 @@ def ingest(db_path: Path, vault_path: Path, url: str | None, inbox_path: Path | 
             "Provide a URL argument, --inbox <file>, or --from-inbox."
         )
 
-    _require_db(db_path)
+    
     fetcher = load_fetcher(os.environ.get("MEMEX_FETCHER_MODULE"), vault_path=str(vault_path))
 
-    title_agent = load_agent(os.environ.get("MEMEX_AGENT") or os.environ.get("MEMEX_LLM_MODULE"))
+    title_agent = load_agent(os.environ.get("MEMEX_AGENT"))
  
     with Store.open(db_path) as store:
         if from_inbox:
@@ -291,7 +288,7 @@ def list_nodes(db_path: Path, vault_path: Path, show_pending: bool,
     """Return JSON array of all nodes, or --pending captured-but-not-ingested keys."""
     from memex.store import Store
 
-    _require_db(db_path)
+    
     with Store.open(db_path) as store:
         if show_pending:
             ingested = store.list_ingested_canonical_keys()
@@ -316,7 +313,7 @@ def show(db_path: Path, vault_path: Path, node_id: str) -> None:
     """Return JSON with a node's content, metadata, trust state, and provenance (read-only)."""
     from memex.store import Store
 
-    _require_db(db_path)
+    
     with Store.open(db_path) as store:
         node = store.get_node(node_id)
 
@@ -354,7 +351,7 @@ def derive(db_path: Path, vault_path: Path, node_id: str | None = None,
     from memex.agent import load_agent
     from memex.store import Store
 
-    _require_db(db_path)
+    
 
     if derive_all:
         _derive_all(db_path, vault_path, limit)
@@ -383,8 +380,8 @@ def synthesize(db_path: Path, vault_path: Path, node_ids: tuple[str, ...]) -> No
     from memex.agent import load_agent
     from memex.store import Store
 
-    _require_db(db_path)
-    agent = load_agent(os.environ.get("MEMEX_AGENT") or os.environ.get("MEMEX_LLM_MODULE"))
+    
+    agent = load_agent(os.environ.get("MEMEX_AGENT"))
 
     parent_ids = list(node_ids)
 
@@ -419,7 +416,7 @@ def _derive_single(db_path: Path, vault_path: Path, node_id: str) -> None:
     from memex.agent import load_agent
     from memex.store import Store
 
-    agent = load_agent(os.environ.get("MEMEX_AGENT") or os.environ.get("MEMEX_LLM_MODULE"))
+    agent = load_agent(os.environ.get("MEMEX_AGENT"))
 
     with Store.open(db_path) as store:
         # --- Load the L0 node ---
@@ -612,7 +609,7 @@ def _derive_all(db_path: Path, vault_path: Path, limit: int) -> None:
         click.echo(json.dumps([]))
         return
 
-    agent = load_agent(os.environ.get("MEMEX_AGENT") or os.environ.get("MEMEX_LLM_MODULE"))
+    agent = load_agent(os.environ.get("MEMEX_AGENT"))
 
     with Store.open(db_path) as store:
         # Find un-derived L0s
@@ -681,7 +678,7 @@ def search(db_path: Path, vault_path: Path, query: str) -> None:
     """
     from memex.store import Store
 
-    _require_db(db_path)
+    
     CONTEXT_CHARS = 120
     query_lower = query.lower()
     query_param = f"%{query}%"
@@ -769,8 +766,8 @@ def extract(db_path: Path, vault_path: Path, node_id: str) -> None:
     from memex.store import Store
     from memex.fetcher import load_fetcher
 
-    _require_db(db_path)
-    agent = load_agent(os.environ.get("MEMEX_AGENT") or os.environ.get("MEMEX_LLM_MODULE"))
+    
+    agent = load_agent(os.environ.get("MEMEX_AGENT"))
 
     with Store.open(db_path) as store:
         node = store.get_node(node_id)
@@ -815,7 +812,7 @@ def ideas(db_path: Path, vault_path: Path, query: str) -> None:
     """
     from memex.store import Store
 
-    _require_db(db_path)
+    
     with Store.open(db_path) as store:
         # Check if node_idea table exists (pre-migration safety)
         try:
@@ -836,7 +833,7 @@ def render(db_path: Path, vault_path: Path) -> None:
     """
     from memex.renderer import render as _render
 
-    _require_db(db_path)
+    
     if not vault_path.exists():
         _fail("vault_not_found", vault_path=str(vault_path))
 
@@ -864,7 +861,7 @@ def capture(db_path: Path, vault_path: Path) -> None:
     )
     from memex.store import Store
 
-    _require_db(db_path)
+    
     source_module = os.environ.get("MEMEX_TELEGRAM_SOURCE")
     try:
         source = load_telegram_source(source_module)
@@ -929,8 +926,8 @@ def _cmd_review_batch(db_path: Path, vault_path: Path) -> None:
     from memex.agent import load_agent, call_with_retry
     from memex.store import Store
 
-    _require_db(db_path)
-    agent = load_agent(os.environ.get("MEMEX_AGENT") or os.environ.get("MEMEX_LLM_MODULE"))
+    
+    agent = load_agent(os.environ.get("MEMEX_AGENT"))
 
     with Store.open(db_path) as store:
         events = store.get_pending_events_without_proposal()
@@ -1006,7 +1003,7 @@ def review_list(ctx: click.Context) -> None:
 
     db_path = ctx.parent.params["db_path"]
     vault_path = ctx.parent.params["vault_path"]
-    _require_db(db_path)
+    
     with Store.open(db_path) as store:
         queue = store.get_review_queue()
     click.echo(json.dumps(queue))
@@ -1021,7 +1018,7 @@ def review_accept(ctx: click.Context, proposal_id: int, note: str | None) -> Non
     from memex.store import Store
     db_path = ctx.parent.params["db_path"]
     vault_path = ctx.parent.params["vault_path"]
-    _require_db(db_path)
+    
     with Store.open(db_path) as store:
         result = store.accept_proposal(proposal_id, human_note=note)
     click.echo(json.dumps(result))
@@ -1036,7 +1033,7 @@ def review_reject(ctx: click.Context, proposal_id: int, note: str | None) -> Non
     from memex.store import Store
     db_path = ctx.parent.params["db_path"]
     vault_path = ctx.parent.params["vault_path"]
-    _require_db(db_path)
+    
     with Store.open(db_path) as store:
         result = store.reject_proposal(proposal_id, human_note=note)
     click.echo(json.dumps(result))
@@ -1051,7 +1048,7 @@ def review_dismiss(ctx: click.Context, proposal_id: int, note: str | None) -> No
     from memex.store import Store
     db_path = ctx.parent.params["db_path"]
     vault_path = ctx.parent.params["vault_path"]
-    _require_db(db_path)
+    
     with Store.open(db_path) as store:
         result = store.dismiss_proposal(proposal_id, human_note=note)
     click.echo(json.dumps(result))
@@ -1080,7 +1077,7 @@ def contradict(db_path: Path, vault_path: Path, target_id: str, asserted_by: str
 
     from memex.store import Store
 
-    _require_db(db_path)
+    
     edge_id = str(uuid.uuid4())
     with Store.open(db_path) as store:
         store.create_edge(
@@ -1110,7 +1107,7 @@ def delete(db_path: Path, vault_path: Path, node_id: str, cascade: bool) -> None
     """
     from memex.store import Store
 
-    _require_db(db_path)
+    
     with Store.open(db_path) as store:
         result = store.delete_node(node_id, cascade=cascade)
     click.echo(json.dumps(result))
@@ -1124,7 +1121,7 @@ def retry(db_path: Path, vault_path: Path, node_id: str) -> None:
     from memex.store import Store
     from memex.fetcher import load_fetcher, FetchError
 
-    _require_db(db_path)
+    
 
     with Store.open(db_path) as store:
         node = store.get_node(node_id)
@@ -1173,7 +1170,7 @@ def stats(db_path: Path, vault_path: Path) -> None:
     """Return high-level vault statistics as JSON."""
     from memex.store import Store
 
-    _require_db(db_path)
+    
     with Store.open(db_path) as store:
         click.echo(json.dumps(store.get_stats()))
 if __name__ == "__main__":

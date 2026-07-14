@@ -46,3 +46,41 @@ class FakeAgent:
             rationale_md="Fake review: the contested claim affects downstream nodes.",
             confidence=self.review_confidence,
         )
+
+class FakeAgentValidRefs:
+    """Fake agent returning realistic referencable values.
+
+    Unlike FakeAgent (which returns fake node IDs like 'n1','n2'),
+    this agent returns damage_boundary_node_id=None to satisfy the FK constraint.
+    """
+
+    def derive(self, content: str) -> dict:
+        return {"prose": "fake", "synthesis_statements": []}
+
+
+    def extract_ideas(self, content: str) -> list[str]:
+        return ["Idea 1", "Idea 2"]
+    def review(self, target_content: str, asserting_content: str, edge_payload: dict) -> dict:
+        return ReviewProposal(
+            affected_node_ids=[],
+            damage_boundary_node_id=None,
+            rationale_md="Fake review: all good.",
+            confidence="high",
+        )
+
+class FakeAgentThrowsOnReview:
+    """Fake agent that raises on every review() call.
+
+    Used to test per-event error recovery in the review batch command.
+    """
+
+    def derive(self, content: str) -> dict:
+        return {"prose": "fake", "synthesis_statements": []}
+
+    def review(self, target_content: str, asserting_content: str, edge_payload: dict) -> None:
+        raise RuntimeError("Simulated LLM review failure")
+
+
+
+    def extract_ideas(self, content: str) -> list[str]:
+        return ["Idea 1", "Idea 2"]

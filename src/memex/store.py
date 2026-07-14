@@ -429,11 +429,6 @@ class Store:
         d["is_contested"] = bool(d["is_contested"])
         return d
 
-    # ── Connection ────────────────────────────────────────────────
-
-    def close(self) -> None:
-        self._con.close()
-
     # ── Edges ──────────────────────────────────────────────────────
 
     def create_edge(self, *, edge_id: str, type: str, relation: str,

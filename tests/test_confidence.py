@@ -12,21 +12,11 @@ import uuid
 
 from memex.store import Store
 
-from tests.conftest import _run_memex, FAKE_FETCHER, ingest
+from tests.conftest import _run_memex, FAKE_FETCHER, ingest, _store, _utcnow
 
 FAKE_AGENT = "tests.fake_llm_client:FakeAgent"
 
 
-def _store():
-    con = sqlite3.connect(":memory:")
-    s = Store(con)
-    s.init_schema()
-    return s
-
-
-def _utcnow() -> str:
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc).isoformat()
 
 
 # ── Schema ──────────────────────────────────────────────────────────────

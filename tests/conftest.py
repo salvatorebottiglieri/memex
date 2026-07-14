@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import shutil
 import sqlite3
+from datetime import datetime, timezone
 import subprocess
 import sys
 from pathlib import Path
@@ -49,6 +50,17 @@ def _run_memex(args: list[str], cwd: Path | None = None, env: dict | None = None
         cwd=cwd,
         env=full_env,
     )
+
+
+def _store():
+    con = sqlite3.connect(":memory:")
+    s = Store(con)
+    s.init_schema()
+    return s
+
+
+def _utcnow() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 @pytest.fixture
