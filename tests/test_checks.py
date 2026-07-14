@@ -292,6 +292,67 @@ class TestSizeBoundsCheck:
 
 
 # ---------------------------------------------------------------------------
+# Check 5: Tier / depth consistency
+# ---------------------------------------------------------------------------
+
+class TestTierDepthConsistency:
+    def test_notes_tier_with_wrong_depth_fails(self, tmp_path):
+        """A node with tier=notes but depth=0 fails tier/depth check."""
+        con, deriv_id, content_path = _setup_db(tmp_path)
+        con.execute("UPDATE node SET depth = 0 WHERE id = ?", (deriv_id,))
+        con.commit()
+        result = run_checks(con, deriv_id, content_path)
+        con.close()
+        assert not result.passed
+        assert any("Tier/depth" in f for f in result.failures)
+
+    def test_notes_tier_depth_1_passes(self, tmp_path):
+        """A node with tier=notes and depth=1 passes tier/depth check."""
+        con, deriv_id, content_path = _setup_db(tmp_path)
+        # deriv already has tier='notes', depth=1
+        result = run_checks(con, deriv_id, content_path)
+        con.close()
+        assert result.passed is True
+
+    def test_synthesis_tier_depth_2_passes(self, tmp_path):
+        """A node with tier=synthesis and depth=2 passes tier/depth check."""
+        con, deriv_id, content_path = _setup_db(tmp_path)
+        con.execute("UPDATE node SET tier = 'synthesis', depth = 2 WHERE id = ?", (deriv_id,))
+        con.commit()
+        result = run_checks(con, deriv_id, content_path)
+        con.close()
+        assert result.passed is True
+
+    def test_synthesis_tier_depth_1_fails(self, tmp_path):
+        """A node with tier=synthesis but depth=1 fails tier/depth check."""
+        con, deriv_id, content_path = _setup_db(tmp_path)
+        con.execute("UPDATE node SET tier = 'synthesis' WHERE id = ?", (deriv_id,))
+        con.commit()
+        result = run_checks(con, deriv_id, content_path)
+        con.close()
+        assert not result.passed
+        assert any("Tier/depth" in f for f in result.failures)
+
+    def test_null_tier_depth_0_passes(self, tmp_path):
+        """A raw_source (NULL tier) with depth=0 passes tier/depth check."""
+        con, deriv_id, content_path = _setup_db(tmp_path)
+        l0_id = con.execute("SELECT id FROM node WHERE kind = 'raw_source'").fetchone()[0]
+        # L0 has tier=NULL, depth=0 — run check on it
+        result = run_checks(con, l0_id, content_path)
+        con.close()
+        # Tier check should not produce any failure even if other checks fail
+        assert not any("Tier/depth" in f for f in result.failures)
+
+    def test_null_tier_depth_1_fails(self, tmp_path):
+        """A node with NULL tier but depth=1 fails tier/depth check."""
+        con, deriv_id, content_path = _setup_db(tmp_path)
+        con.execute("UPDATE node SET tier = NULL, depth = 1 WHERE id = ?", (deriv_id,))
+        con.commit()
+        result = run_checks(con, deriv_id, content_path)
+        con.close()
+        assert not result.passed
+        assert any("Tier/depth" in f for f in result.failures)
+
 # Multiple failures accumulate
 # ---------------------------------------------------------------------------
 
