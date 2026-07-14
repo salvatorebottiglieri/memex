@@ -50,6 +50,7 @@ more conservative on scope (single user, no discovery/web-research subsystem).
 | Delete node (logical, with transitive cascade) | **built** | `memex delete <node-id> [--cascade]` |
 | Retry failed source ingestion | **built** | `memex retry <node-id>` |
 | Vault statistics dashboard | **built** | `memex stats` |
+| Human-readable filenames (slug from title/heading) | **built** | `derive`/`synthesize`/`ingest` use `goodbye-slop.md` not `uuid.md` |
 
 ## Map (as built)
 
