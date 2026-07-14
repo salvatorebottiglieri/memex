@@ -182,7 +182,7 @@ def ingest(db_path: Path, vault_path: Path, url: str | None, inbox_path: Path | 
                 ckey = canonical_key(item["url"])
                 if ckey not in ingested_keys:
                     result = ingest_single_url(store, vault_path, item["url"], fetcher)
-                    if title_agent and result.get("status") == "ingested" and result.get("content_path"):
+                    if not result.get("title") and title_agent and result.get("status") == "ingested" and result.get("content_path"):
                         cp = Path(result["content_path"])
                         if cp.exists():
                             t = title_agent.generate_title(cp.read_text(encoding="utf-8"), item["url"])
@@ -221,7 +221,7 @@ def ingest(db_path: Path, vault_path: Path, url: str | None, inbox_path: Path | 
                     item_timestamp=item["timestamp"],
                     item_note=item.get("note"),
                 )
-                if title_agent and result.get("status") == "ingested" and result.get("content_path"):
+                if not result.get("title") and title_agent and result.get("status") == "ingested" and result.get("content_path"):
                     cp = Path(result["content_path"])
                     if cp.exists():
                         t = title_agent.generate_title(cp.read_text(encoding="utf-8"), item["url"])
@@ -237,7 +237,7 @@ def ingest(db_path: Path, vault_path: Path, url: str | None, inbox_path: Path | 
             click.echo(json.dumps(results))
         else:
             result = ingest_single_url(store, vault_path, url, fetcher)
-            if title_agent and result.get("status") == "ingested" and result.get("content_path"):
+            if not result.get("title") and title_agent and result.get("status") == "ingested" and result.get("content_path"):
                 cp = Path(result["content_path"])
                 if cp.exists():
                     t = title_agent.generate_title(cp.read_text(encoding="utf-8"), url)
