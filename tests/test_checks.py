@@ -192,24 +192,23 @@ class TestProvenanceCheck:
 
 
 # ---------------------------------------------------------------------------
-# Check 2: No dangling references (provenance target is L0 / raw_source)
+# Check 2: No dangling references — provenance target must exist
 # ---------------------------------------------------------------------------
 
 class TestDanglingRefCheck:
-    def test_provenance_target_is_not_raw_source_fails(self, tmp_path):
-        """A derivation whose provenance target is not kind=raw_source fails the dangling-ref check."""
+    def test_provenance_target_is_notes_passes(self, tmp_path):
+        """A derivation whose provenance target is a notes-tier node now passes (synthesis case)."""
         con, deriv_id, content_path = _setup_db(tmp_path)
-        # Change the l0 node's kind to something other than raw_source
+        # Change the L0 node's kind and set tier to simulate a notes target
         con.execute(
-            "UPDATE node SET kind = 'summary' WHERE kind = 'raw_source'",
+            "UPDATE node SET kind = 'summary', tier = 'notes' WHERE kind = 'raw_source'",
         )
         con.commit()
 
         result = run_checks(con, deriv_id, content_path)
         con.close()
 
-        assert result.passed is False
-        assert any("dangling" in f.lower() or "raw_source" in f.lower() or "l0" in f.lower() for f in result.failures)
+        assert result.passed is True
 
 
 # ---------------------------------------------------------------------------
