@@ -25,6 +25,7 @@ memex exposes a JSON-only CLI (one command per operation, all output is structur
 | `memex derive --db <path> --vault <path> <node-id>` | Generate a notes-tier derivation from an L0 (agent via `MEMEX_AGENT`) |
 | `memex derive --db <path> --vault <path> --all [--limit N]` | Batch-derive all un-derived L0 nodes (default limit: 10) |
 | `memex search --db <path> --vault <path> <query>` | Keyword search over derivation content (read-only) |
+| `memex synthesize --db <path> --vault <path> <node-id> [<node-id> ...]` | Generate a synthesis-tier derivation from one or more nodes (agent via `MEMEX_AGENT`) |
 | `memex render --db <path> --vault <path>` | Project SQLite graph -> YAML frontmatter + wikilinks on markdown files (slice 1: metadata + tags + aliases) |
 | `memex capture --db <path> --vault <path>` | Poll Telegram Saved Messages and persist new captures to the inbox (env: `MEMEX_TELEGRAM_SOURCE`) |
 | `memex review --db <path> --vault <path>` | Batch-generate review proposals for all pending contestation events |

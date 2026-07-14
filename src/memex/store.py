@@ -719,6 +719,34 @@ class Store:
         ).fetchone()
         return dict(row) if row is not None else None
 
+    def find_synthesis_by_parents(self, parent_ids: list[str]) -> dict | None:
+        """Find a synthesis node whose unordered derived_from set matches *exactly*.
+
+        Returns the full node dict (via ``get_node``) or ``None``.
+        """
+        if not parent_ids:
+            return None
+        n = len(parent_ids)
+        placeholders = ",".join("?" * n)
+        row = self._con.execute(
+            f"""
+            SELECT e.from_node FROM edge e
+            JOIN node n ON n.id = e.from_node
+            WHERE e.type = 'provenance' AND e.relation = 'derived_from'
+              AND n.tier = 'synthesis'
+              AND e.to_node IN ({placeholders})
+            GROUP BY e.from_node
+            HAVING COUNT(*) = ?
+               AND (SELECT COUNT(*) FROM edge e2
+                    WHERE e2.from_node = e.from_node
+                      AND e2.type = 'provenance' AND e2.relation = 'derived_from') = ?
+            """,
+            (*parent_ids, n, n),
+        ).fetchone()
+        if row is None:
+            return None
+        return self.get_node(row["from_node"])
+
     # ── Cursors ────────────────────────────────────────────────────
 
     def get_cursor(self, source_name: str) -> str | None:

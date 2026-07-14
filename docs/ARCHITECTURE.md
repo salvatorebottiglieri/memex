@@ -42,7 +42,7 @@ more conservative on scope (single user, no discovery/web-research subsystem).
 | Edge authorship tracking | **built** | `edge.written_by` column |
 | Edit round-trip (Obsidian wikilink edits back into DB) | **by design: Obsidian is view-only** | ADR-0008: SQLite owns structure, markdown owns content — unidirectional render |
 | Trust cascade (child trust capped to lowest parent) | **designed** (ADR-0014) | Implemented in `store.update_trust_state` |
-| Synthesis tier (cross-source derivation) | **designed** (ADR-0014) | `memex synthesize <id1> <id2> ...` |
+| Synthesis tier (cross-source derivation) | **built** | `memex synthesize <id1> <id2> ...` |
 
 ## Map (as built)
 

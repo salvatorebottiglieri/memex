@@ -330,6 +330,55 @@ def derive(db_path: Path, vault_path: Path, node_id: str | None = None,
         _derive_single(db_path, vault_path, node_id)
 
 
+
+@cli.command()
+@_db_options
+@click.argument("node_ids", nargs=-1, required=True)
+def synthesize(db_path: Path, vault_path: Path, node_ids: tuple[str, ...]) -> None:
+    """Generate a synthesis-tier derivation from one or more nodes using an LLM.
+
+    Synthesizes across the given parent nodes, writing the result as a new markdown
+    file in the vault, and creating a node with tier=synthesis and derived_from
+    provenance edges back to each parent.
+
+    Idempotent: calling synthesize with the same unordered set of parent IDs returns
+    the existing synthesis without re-running the agent.
+
+    Example: memex synthesize --db DB --vault V <id1> <id2> <id3>
+    """
+    from memex.agent import load_agent
+    from memex.store import Store
+
+    _require_db(db_path)
+    agent = load_agent(os.environ.get("MEMEX_AGENT") or os.environ.get("MEMEX_LLM_MODULE"))
+
+    parent_ids = list(node_ids)
+
+    with Store.open(db_path) as store:
+        # --- Validate all parent nodes exist ---
+        for pid in parent_ids:
+            parent = store.get_node(pid)
+            if parent is None:
+                _fail("not_found", node_id=pid)
+
+        # --- Idempotency check: unordered parent set ---
+        existing = store.find_synthesis_by_parents(parent_ids)
+        if existing is not None:
+            click.echo(json.dumps({
+                "id": existing["id"],
+                "status": "already_synthesized",
+                "parent_ids": parent_ids,
+            }))
+            return
+
+        # --- Run synthesis ---
+        try:
+            result = _do_synthesize(store, vault_path, parent_ids, agent)
+        except Exception as exc:
+            _fail("agent_failed", detail=str(exc))
+
+    click.echo(json.dumps(result))
+
 def _derive_single(db_path: Path, vault_path: Path, node_id: str) -> None:
     """Derive a single L0 node (the original behavior)."""
     from memex.fetcher import load_fetcher
@@ -418,6 +467,74 @@ def _do_derive(store, vault_path, l0_id, l0_content, agent, use_retry=False):
         "id": deriv_id,
         "status": "derived",
         "l0_node_id": l0_id,
+        "trust_state": trust_state,
+        "check_failures": check_result.failures,
+    }
+
+
+def _do_synthesize(store, vault_path, parent_ids, agent):
+    """Run agent synthesis across multiple parents, write markdown, create node+edges, run checks.
+
+    Returns a result dict on success. Raises on agent failure.
+    """
+    from memex.checks import run_checks
+    from memex.agent import call_with_retry
+
+    # Load parent nodes and compute max depth
+    max_depth = 0
+    contents = []
+    for pid in parent_ids:
+        parent = store.get_node(pid)
+        if parent is None:
+            raise ValueError(f"parent node not found: {pid}")
+        max_depth = max(max_depth, parent["depth"])
+        content_path = parent.get("content_path") or ""
+        if content_path and Path(content_path).exists():
+            contents.append(Path(content_path).read_text(encoding="utf-8"))
+        else:
+            contents.append("")
+
+    combined_content = "\n\n---\n\n".join(contents)
+    deriv_fn = lambda: agent.derive(combined_content)
+    deriv = call_with_retry(deriv_fn)
+
+    deriv_id = str(uuid.uuid4())
+    vault_path.mkdir(parents=True, exist_ok=True)
+    md_path = vault_path / f"{deriv_id}.md"
+    md_path.write_text(deriv.prose, encoding="utf-8")
+
+    now = datetime.now(timezone.utc).isoformat()
+    store.create_node(
+        node_id=deriv_id,
+        kind="summary",
+        tier="synthesis",
+        trust_state="draft",
+        depth=max_depth + 1,
+        content_path=str(md_path),
+        created_at=now,
+    )
+
+    for pid in parent_ids:
+        store.create_edge(
+            edge_id=str(uuid.uuid4()),
+            type="provenance",
+            relation="derived_from",
+            from_node=deriv_id,
+            to_node=pid,
+        )
+
+    check_result = run_checks(store._con, deriv_id, md_path)
+    trust_state = "auto-verified" if check_result.passed else "draft"
+    store.update_trust_state(
+        node_id=deriv_id,
+        trust_state=trust_state,
+        check_failures=check_result.failures,
+    )
+
+    return {
+        "id": deriv_id,
+        "status": "synthesized",
+        "parent_ids": list(parent_ids),
         "trust_state": trust_state,
         "check_failures": check_result.failures,
     }
