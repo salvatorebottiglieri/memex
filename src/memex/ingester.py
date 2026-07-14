@@ -14,6 +14,15 @@ from memex.canonical_key import canonical_key
 from memex.fetcher import FetchError
 
 
+def _slugify(text: str, max_length: int = 80) -> str:
+    """Convert text to a filesystem-safe slug (lowercase, hyphens only)."""
+    import re
+    slug = text.lower().strip()
+    slug = re.sub(r'[^\w\s-]', '', slug)
+    slug = re.sub(r'[-\s]+', '-', slug)
+    slug = slug.strip('-')
+    return slug[:max_length].rstrip('-')
+
 def ingest_single_url(
     store,
     vault_path: Path,
@@ -84,7 +93,8 @@ def ingest_single_url(
     content_path = ""
     if not failed and content is not None and len(content) >= 100:
         vault_path.mkdir(parents=True, exist_ok=True)
-        md_path = vault_path / f"{node_id}.md"
+        name = _slugify(title) if title else node_id
+        md_path = vault_path / f"{name}.md"
         md_path.write_text(content, encoding="utf-8")
         content_path = str(md_path)
     elif fetched_content_path:

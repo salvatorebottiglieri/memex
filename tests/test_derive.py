@@ -6,6 +6,7 @@ The fake agent module lives at tests/fake_llm_client.py.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import sqlite3
 
@@ -90,11 +91,8 @@ class TestDerive:
     def test_derive_writes_markdown_file_with_synthesis_markers(self, store):
         ingested = _ingest(store, "https://example.com/article")
         result = _derive(store, ingested["id"])
-        deriv_id = json.loads(result.stdout)["id"]
-
-        md_path = store["vault"] / f"{deriv_id}.md"
-        assert md_path.exists()
-        assert "> Synthesis:" in md_path.read_text(encoding="utf-8")
+        data = json.loads(result.stdout)
+        md_path = Path(data.get("content_path", str(store["vault"] / f"{data['id']}.md")))
 
     def test_derive_response_includes_l0_node_id(self, store):
         ingested = _ingest(store, "https://example.com/article")

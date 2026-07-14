@@ -17,6 +17,29 @@ from memex.ingester import ingest_single_url
 import functools
 
 
+def _slugify(text: str, max_length: int = 80) -> str:
+    """Convert text to a filesystem-safe slug (lowercase, hyphens only)."""
+    import re
+    slug = text.lower().strip()
+    slug = re.sub(r'[^\w\s-]', '', slug)
+    slug = re.sub(r'[-\s]+', '-', slug)
+    slug = slug.strip('-')
+    return slug[:max_length].rstrip('-')
+
+
+def _human_path(vault_path: Path, name: str, suffix: str = ".md") -> Path:
+    """Return a human-readable file path, appending a suffix on collision."""
+    base = vault_path / f"{_slugify(name)}{suffix}"
+    if not base.exists():
+        return base
+    # Collision: append a short discriminator
+    for i in range(1, 100):
+        candidate = vault_path / f"{_slugify(name)}-{i}{suffix}"
+        if not candidate.exists():
+            return candidate
+    return base  # fallback (unlikely)
+
+
 _DEFAULT_VAULT: Path | None = None
 _OBSIDIAN_CANDIDATES = [
     "notes/notes",
@@ -445,7 +468,10 @@ def _do_derive(store, vault_path, l0_id, l0_content, agent, use_retry=False):
 
     deriv_id = str(uuid.uuid4())
     vault_path.mkdir(parents=True, exist_ok=True)
-    md_path = vault_path / f"{deriv_id}.md"
+    # Extract heading from prose for human-readable filename
+    first_line = deriv.prose.split('\n')[0].strip()
+    head_name = first_line.lstrip('# ').strip().strip('"').strip("'") or deriv_id
+    md_path = _human_path(vault_path, head_name)
     md_path.write_text(deriv.prose, encoding="utf-8")
 
     now = datetime.now(timezone.utc).isoformat()
@@ -484,6 +510,7 @@ def _do_derive(store, vault_path, l0_id, l0_content, agent, use_retry=False):
         "status": "derived",
         "l0_node_id": l0_id,
         "trust_state": trust_state,
+        "content_path": str(md_path),
         "check_failures": check_result.failures,
     }
 
@@ -516,7 +543,10 @@ def _do_synthesize(store, vault_path, parent_ids, agent):
 
     deriv_id = str(uuid.uuid4())
     vault_path.mkdir(parents=True, exist_ok=True)
-    md_path = vault_path / f"{deriv_id}.md"
+    # Extract heading from prose for human-readable filename
+    first_line = deriv.prose.split('\n')[0].strip()
+    head_name = first_line.lstrip('# ').strip().strip('"').strip("'") or deriv_id
+    md_path = _human_path(vault_path, head_name)
     md_path.write_text(deriv.prose, encoding="utf-8")
 
     now = datetime.now(timezone.utc).isoformat()
@@ -568,6 +598,7 @@ def _do_synthesize(store, vault_path, parent_ids, agent):
         "status": "synthesized",
         "parent_ids": list(parent_ids),
         "trust_state": trust_state,
+        "content_path": str(md_path),
         "check_failures": check_result.failures,
     }
 
@@ -1115,9 +1146,11 @@ def retry(db_path: Path, vault_path: Path, node_id: str) -> None:
             click.echo(json.dumps({"error": "fetch_failed", "detail": str(exc)}))
             return
 
-        # Write content file
+        # Write content file with human-readable name
         vault_path.mkdir(parents=True, exist_ok=True)
-        md_path = vault_path / f"{node_id}.md"
+        title = node.get("title")
+        name = _slugify(title) if title else node_id
+        md_path = _human_path(vault_path, name)
         md_path.write_text(content, encoding="utf-8")
 
         # Update node content_path and reset failed

@@ -67,6 +67,30 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _md_path(store, node: str | dict) -> Path:
+    """Return the filesystem path for a node's markdown file.
+
+    Accepts a node dict (from ``_ingest``/``_derive``) or a node id string.
+    Resolves via the node's ``content_path`` in the database.
+    """
+    if isinstance(node, dict):
+        cp = node.get("content_path")
+        if cp:
+            return Path(cp)
+        node_id = node["id"]
+    else:
+        node_id = node
+    # Fallback: query DB for content_path
+    con = sqlite3.connect(store["db"])
+    try:
+        row = con.execute("SELECT content_path FROM node WHERE id = ?", (node_id,)).fetchone()
+        if row and row[0]:
+            return Path(row[0])
+    finally:
+        con.close()
+    return store["vault"] / f"{node_id}.md"
+
+
 def _make_node(store, *, node_id: str | None = None, kind: str = "raw_source",
                content: str | None = None,
                content_path: str | None = None,
@@ -129,7 +153,7 @@ class TestRenderL0:
         assert results[0]["node_id"] == node_id
         assert results[0]["status"] == "rendered"
 
-        md_path = store["vault"] / f"{node_id}.md"
+        md_path = _md_path(store, data)
         fm, body = _read_frontmatter(md_path)
 
         assert fm["id"] == node_id
@@ -155,7 +179,7 @@ class TestRenderL0:
         node_id = data["id"]
 
         # Read the original body before render
-        md_path = store["vault"] / f"{node_id}.md"
+        md_path = _md_path(store, data)
         original_body = md_path.read_text(encoding="utf-8")
 
         _render(store)
@@ -171,7 +195,7 @@ class TestRenderL0:
         node_id = data["id"]
         _render(store)
 
-        md_path = store["vault"] / f"{node_id}.md"
+        md_path = _md_path(store, data)
         fm, _ = _read_frontmatter(md_path)
         # The source_url preserves the original, canonical_key is separate
         assert fm["source_url"] == "https://example.com/article?utm_source=twitter"
@@ -205,7 +229,7 @@ class TestRenderDerivation:
         assert statuses[l0_id] == "rendered"
         assert statuses[deriv_id] == "rendered"
 
-        md_path = store["vault"] / f"{deriv_id}.md"
+        md_path = _md_path(store, d_data)
         fm, body = _read_frontmatter(md_path)
 
         assert fm["id"] == deriv_id
@@ -235,7 +259,7 @@ class TestRenderIdempotency:
         node_id = data["id"]
 
         _render(store)
-        md_path = store["vault"] / f"{node_id}.md"
+        md_path = _md_path(store, data)
         fm1, body1 = _read_frontmatter(md_path)
 
         _render(store)
@@ -304,7 +328,7 @@ class TestRenderEdgeCases:
         data = _ingest(store, "https://example.com/article")
         node_id = data["id"]
 
-        md_path = store["vault"] / f"{node_id}.md"
+        md_path = _md_path(store, data)
         original_body = md_path.read_text(encoding="utf-8")
 
         _render(store)
@@ -333,13 +357,13 @@ class TestRenderEdgeWikilinks:
 
         _render(store)
 
-        md_path = store["vault"] / f"{deriv_id}.md"
+        md_path = _md_path(store, deriv_id)
         fm, _ = _read_frontmatter(md_path)
 
         assert "derived_from" in fm, f"Expected derived_from in {fm}"
         assert fm["derived_from"] == f"[[{l0_id}]]", f"got {fm['derived_from']!r}"
         # L0 node should NOT have derived_from (it's the target, not source)
-        l0_fm, _ = _read_frontmatter(store["vault"] / f"{l0_id}.md")
+        l0_fm, _ = _read_frontmatter(_md_path(store, data))
         assert "derived_from" not in l0_fm
 
     def test_related_edge_yields_wikilink(self, store):
@@ -406,7 +430,7 @@ class TestRenderEdgeWikilinks:
         data = _ingest(store, "https://example.com/article")
         _render(store)
 
-        md_path = store["vault"] / f"{data['id']}.md"
+        md_path = _md_path(store, data)
         fm, _ = _read_frontmatter(md_path)
 
         # Should have slice 1 fields but no edge fields
@@ -427,7 +451,7 @@ class TestRenderEdgeWikilinks:
         _render(store)
         _render(store)
 
-        fm_a, _ = _read_frontmatter(store["vault"] / f"{node_a}.md")
+        fm_a, _ = _read_frontmatter(_md_path(store, node_a))
         assert fm_a["related"] == f"[[{node_b}]]"
 
     def test_derived_from_edge_is_scalar_not_list(self, store):
@@ -439,7 +463,7 @@ class TestRenderEdgeWikilinks:
 
         _render(store)
 
-        md_path = store["vault"] / f"{deriv_id}.md"
+        md_path = _md_path(store, deriv_id)
         fm, _ = _read_frontmatter(md_path)
         assert isinstance(fm["derived_from"], str), \
             f"Expected scalar string, got {type(fm['derived_from']).__name__}: {fm['derived_from']}"
@@ -463,7 +487,7 @@ def test_render_multiple_types(store):
 
     # Check a derivation's frontmatter
     for r in results:
-        fm, _ = _read_frontmatter(store["vault"] / f"{r['node_id']}.md")
+        fm, _ = _read_frontmatter(_md_path(store, r["node_id"]))
         assert "id" in fm
         assert "kind" in fm
         assert "depth" in fm

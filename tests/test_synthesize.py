@@ -5,6 +5,7 @@ The fake agent module lives at tests/fake_llm_client.py.
 """
 from __future__ import annotations
 
+from pathlib import Path
 import json
 import sqlite3
 
@@ -99,7 +100,7 @@ class TestSynthesize:
         assert result.returncode == 0, result.stderr
         data = json.loads(result.stdout)
 
-        md_path = store["vault"] / f"{data['id']}.md"
+        md_path = Path(data.get("content_path", str(store["vault"] / f"{data['id']}.md")))
         assert md_path.exists()
         content = md_path.read_text(encoding="utf-8")
         assert "> Synthesis:" in content

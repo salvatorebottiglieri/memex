@@ -62,7 +62,7 @@ def test_ingest_single_url_writes_markdown(tmp_path):
         store.init_schema()
         result = ingest_single_url(store, vault_path, "https://example.com/article", FakeFetcher())
 
-    md_path = vault_path / f"{result['id']}.md"
+    md_path = Path(result.get("content_path", str(vault_path / f"{result['id']}.md")))
     assert md_path.exists()
     assert "Content for" in md_path.read_text()
 
@@ -81,7 +81,7 @@ def test_ingest_single_url_pdf_url(tmp_path):
 
     assert result["status"] == "ingested"
     assert result["canonical_key"] == "https://example.com/paper.pdf"
-    md_path = vault_path / f"{result['id']}.md"
+    md_path = Path(result.get("content_path", str(vault_path / f"{result['id']}.md")))
     assert md_path.exists()
     assert "Content for" in md_path.read_text()
     assert "content_path" in result
