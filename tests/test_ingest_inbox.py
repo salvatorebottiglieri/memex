@@ -71,7 +71,7 @@ def test_ingest_inbox_advances_cursor(store):
     result = _ingest_inbox(store, FIXTURE_EXPORT)
     assert result.returncode == 0, result.stderr
     data = json.loads(result.stdout)
-    # Cursor moved past all 3 items → nothing to process
+    # Cursor moved past all 3 items -> nothing to process
     assert data == []
 
     con = sqlite3.connect(store["db"])

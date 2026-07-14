@@ -1,6 +1,6 @@
 """Renderer — projects SQLite graph into markdown frontmatter (ADR-0008).
 
-One-way, DB → markdown. Reads every node from the Store, computes YAML
+One-way, DB -> markdown. Reads every node from the Store, computes YAML
 frontmatter with metadata + tags + aliases, and writes it into the node's
 markdown file with the body preserved. Idempotent.
 """

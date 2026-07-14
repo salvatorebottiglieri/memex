@@ -40,7 +40,7 @@ The computed `max(parent depth) + 1` over the provenance DAG. An audit signal, n
 _Avoid_: level, tier
 
 **Trust state**:
-A node's position in `draft → auto-verified → human-approved → stale`. Gates whether the agent may stop on the node.
+A node's position in `draft -> auto-verified -> human-approved -> stale`. Gates whether the agent may stop on the node.
 _Avoid_: status, validation flag
 
 **Confidence**:

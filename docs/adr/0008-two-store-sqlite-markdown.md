@@ -1,6 +1,6 @@
 # Two-store architecture: SQLite owns structure, markdown owns content
 
-**SQLite is the source of truth for structure** — provenance + association edges, tier, trust state, computed depth, confidence, ledger, cursors. **Markdown files are the source of truth for content** — L0 raw and derivation prose. The two are joined by a stable node id. Frontmatter mirrors relations so Obsidian's graph works, but SQLite is authoritative for those fields; a **render step** projects edges to `[[wikilinks]]` one-way (DB → markdown), keeping Obsidian a **view-only** surface.
+**SQLite is the source of truth for structure** — provenance + association edges, tier, trust state, computed depth, confidence, ledger, cursors. **Markdown files are the source of truth for content** — L0 raw and derivation prose. The two are joined by a stable node id. Frontmatter mirrors relations so Obsidian's graph works, but SQLite is authoritative for those fields; a **render step** projects edges to `[[wikilinks]]` one-way (DB -> markdown), keeping Obsidian a **view-only** surface.
 
 ## Considered Options
 

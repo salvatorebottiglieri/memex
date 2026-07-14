@@ -14,10 +14,10 @@ Examples:
 
 | Parent change | Child effect |
 |---|---|
-| `auto-verified → draft` | Child capped at `draft` |
-| `human-approved → stale` | Child capped at `stale` |
-| `draft → stale` | Child capped at `stale` |
-| `draft → auto-verified` (upgrade) | **No cascade** — the rule is one-way conservative. Children only lose trust, never gain it automatically. Re-promotion requires explicit re-derive or human adjudication. |
+| `auto-verified -> draft` | Child capped at `draft` |
+| `human-approved -> stale` | Child capped at `stale` |
+| `draft -> stale` | Child capped at `stale` |
+| `draft -> auto-verified` (upgrade) | **No cascade** — the rule is one-way conservative. Children only lose trust, never gain it automatically. Re-promotion requires explicit re-derive or human adjudication. |
 
 This is the strictest valid policy: any regression in the source material immediately degrades everything built on it. The system never presents content as trustworthy when its foundation has been called into question.
 

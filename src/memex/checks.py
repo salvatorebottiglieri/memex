@@ -1,4 +1,4 @@
-"""Deterministic Checks module for the draft → auto-verified trust-state transition.
+"""Deterministic Checks module for the draft -> auto-verified trust-state transition.
 
 All checks are pure: no LLM calls, no network, no randomness.
 """
@@ -21,7 +21,7 @@ class CheckResult:
 
 
 def run_checks(con: sqlite3.Connection, node_id: str, content_path: Path | str) -> CheckResult:
-    """Run all deterministic checks for the draft → auto-verified transition.
+    """Run all deterministic checks for the draft -> auto-verified transition.
 
     Args:
         con:          Open SQLite connection (foreign_keys may or may not be ON).

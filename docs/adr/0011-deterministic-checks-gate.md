@@ -1,4 +1,4 @@
-# Deterministic Checks module gates the draft → auto-verified transition
+# Deterministic Checks module gates the draft -> auto-verified transition
 
 Every derivation that comes out of `memex derive` is run through a fixed set of **deterministic checks** before its trust state is decided: if all checks pass, the node is promoted to `auto-verified`; if any fail, it stays in `draft` and the failure list is persisted as `node.check_failures` JSON. The Checks module is the cheap end of the trust-state machine that ADR-0004 describes.
 
