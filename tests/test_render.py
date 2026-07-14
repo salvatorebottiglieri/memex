@@ -136,6 +136,9 @@ class TestRenderL0:
         assert fm["kind"] == "raw_source"
         assert fm["depth"] == 0
         assert "created_at" in fm
+        # confidence should be present for all nodes
+        assert fm["confidence"] in ("high", "medium", "low")
+        assert fm["confidence"] == "low"  # L0 (raw_source, no tier) defaults to low
         assert "tags" in fm
         assert "kind/raw_source" in fm["tags"]
         assert fm["source_url"] == "https://example.com/article"
@@ -217,6 +220,9 @@ class TestRenderDerivation:
         # check_failures should be present for derivation nodes
         assert "check_failures" in fm
         assert isinstance(fm["check_failures"], list)
+        # confidence should be present for derivation nodes
+        assert fm["confidence"] in ("high", "medium", "low")
+        assert fm["confidence"] == "medium"  # notes-tier derivation
 
 
 # ── Idempotency ───────────────────────────────────────────────────
