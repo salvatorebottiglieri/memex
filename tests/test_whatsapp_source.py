@@ -37,13 +37,13 @@ class TestParseWhatsAppExport:
 
     def test_timestamp_is_extracted_as_iso8601(self):
         items = list(parse_whatsapp_export(FIXTURE_EXPORT))
-        # [01/06/2024, 09:15:32] → 2024-06-01T09:15:32
+        # [01/06/2024, 09:15:32] -> 2024-06-01T09:15:32
         assert items[0]["timestamp"] == "2024-06-01T09:15:32"
 
     def test_note_is_adjacent_text_without_url(self):
         items = list(parse_whatsapp_export(FIXTURE_EXPORT))
         # "Check this out https://news.example.com/story interesting read"
-        # → note = "Check this out  interesting read" (stripped)
+        # -> note = "Check this out  interesting read" (stripped)
         assert items[1]["note"] == "Check this out interesting read"
 
     def test_note_is_none_when_message_is_only_url(self):

@@ -20,10 +20,10 @@ RoutingFetcher.fetch(url):
 | ckey prefix | Fetcher |
 |---|---|
 | `youtube://` | `YouTubeTranscriptFetcher` |
-| `http://` / `https://` → URL ends with `.pdf` | `PDFFetcher` |
+| `http://` / `https://` -> URL ends with `.pdf` | `PDFFetcher` |
 | `http://` / `https://` (default) | `HttpFetcher` |
 
-The router is composed at construction time from a `{prefix: FetcherClass}` dict. The interface remains `ContentFetcher.fetch(url) → FetchResult` — all callers (`ingest_single_url`, `_derive_single`) are unchanged.
+The router is composed at construction time from a `{prefix: FetcherClass}` dict. The interface remains `ContentFetcher.fetch(url) -> FetchResult` — all callers (`ingest_single_url`, `_derive_single`) are unchanged.
 
 ### FetchResult now includes `content_path`
 
@@ -37,7 +37,7 @@ class FetchResult:
 
 For media sources whose L0 is metadata-only (YouTube), `content_path` points to a **cached transcript** in `$VAULT/.cache/`. The agent receives both `content` and `content_path` and may choose to read the file incrementally.
 
-`content_path` is **opt-in**: `HttpFetcher` and `PDFFetcher` never set it. Only fetchers that produce an artifact external to the L0 markdown file (transcripts, audio → text) set this field.
+`content_path` is **opt-in**: `HttpFetcher` and `PDFFetcher` never set it. Only fetchers that produce an artifact external to the L0 markdown file (transcripts, audio -> text) set this field.
 
 ### Cache location
 
@@ -60,15 +60,15 @@ This cache is **immutable once written**: re-derive reuses the cached artifact. 
 
 `YouTubeTranscriptFetcher.fetch()` never raises `FetchError` for content issues:
 
-- **Transcript available** → writes cache, returns metadata in `content`, `content_path` set
-- **Transcript disabled / unavailable** → returns metadata in `content`, `content_path = None`
-- **Network / rate limiting** → raises `FetchError` (same as any fetcher)
+- **Transcript available** -> writes cache, returns metadata in `content`, `content_path` set
+- **Transcript disabled / unavailable** -> returns metadata in `content`, `content_path = None`
+- **Network / rate limiting** -> raises `FetchError` (same as any fetcher)
 
 The derive caller checks `content_path`: if None and the node has no markdown file, derive fails gracefully. This keeps the fetcher interface clean: `FetchError` only for infrastructure failures, never for expected content absences.
 
 ### Extensibility
 
-New extractors add a canonical key prefix → fetcher class mapping to `RoutingFetcher._select()`. No changes to the caller chain.
+New extractors add a canonical key prefix -> fetcher class mapping to `RoutingFetcher._select()`. No changes to the caller chain.
 
 ## Consequences
 

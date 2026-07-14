@@ -316,7 +316,7 @@ class TestRenderEdgeCases:
 
 
 class TestRenderEdgeWikilinks:
-    """Tests for outgoing edge → [[wikilink]] frontmatter fields."""
+    """Tests for outgoing edge -> [[wikilink]] frontmatter fields."""
 
     def test_derivation_has_derived_from_wikilink(self, store):
         """Ingest + derive, render, assert derived_from: [[l0-uuid]]."""

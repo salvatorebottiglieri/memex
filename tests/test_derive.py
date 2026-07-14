@@ -164,7 +164,7 @@ class TestDeriveAll:
         return results
 
     def test_derive_all_capped_by_limit(self, store):
-        """5 L0s, --limit 3 → only 3 derivations created."""
+        """5 L0s, --limit 3 -> only 3 derivations created."""
         l0s = self._ingest_n(store, 5)
         result = self._derive_all(store, limit=3)
         assert result.returncode == 0, result.stderr
@@ -181,7 +181,7 @@ class TestDeriveAll:
         assert count == 3, f"expected 3 derivations, got {count}"
 
     def test_derive_all_skips_already_derived(self, store):
-        """5 L0s, derive 2 manually, then --all → 3 new derivations + 2 already_derived."""
+        """5 L0s, derive 2 manually, then --all -> 3 new derivations + 2 already_derived."""
         l0s = self._ingest_n(store, 5)
         # Derive first 2 manually
         for l0 in l0s[:2]:
@@ -209,7 +209,7 @@ class TestDeriveAll:
         assert count == 5
 
     def test_derive_all_no_un_derived(self, store):
-        """All L0s already derived → all reported as already_derived."""
+        """All L0s already derived -> all reported as already_derived."""
         l0s = self._ingest_n(store, 3)
         for l0 in l0s:
             d = _run_memex(
@@ -251,7 +251,7 @@ class TestDeriveAll:
         assert "check_failures" in entry
 
     def test_derive_all_limit_zero(self, store):
-        """limit=0 → empty result."""
+        """limit=0 -> empty result."""
         self._ingest_n(store, 3)
         result = self._derive_all(store, limit=0)
         assert result.returncode == 0, result.stderr
@@ -271,7 +271,7 @@ class TestDeriveAll:
             assert "Simulated LLM failure" in entry["detail"]
 
     def test_derive_all_idempotent(self, store):
-        """Re-run with same state → all reported as already_derived."""
+        """Re-run with same state -> all reported as already_derived."""
         l0s = self._ingest_n(store, 3)
         result = self._derive_all(store, limit=10)
         assert result.returncode == 0, result.stderr
@@ -287,7 +287,7 @@ class TestDeriveAll:
         assert all(r["status"] == "already_derived" for r in data)
 
     def test_derive_all_no_l0s(self, store):
-        """No L0s at all → empty result."""
+        """No L0s at all -> empty result."""
         result = self._derive_all(store, limit=10)
         assert result.returncode == 0, result.stderr
         data = json.loads(result.stdout)

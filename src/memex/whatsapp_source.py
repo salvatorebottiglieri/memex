@@ -58,7 +58,7 @@ def parse_whatsapp_export(text: str) -> Iterator[CapturedItem]:
         if not url_match:
             continue
 
-        # Parse timestamp → ISO 8601 (handle 2 or 4 digit year, optional seconds)
+        # Parse timestamp -> ISO 8601 (handle 2 or 4 digit year, optional seconds)
         raw_date = date_str
         if len(date_str.split("/")[-1]) == 2:
             # Two-digit year: assume 20xx

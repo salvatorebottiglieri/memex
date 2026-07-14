@@ -45,23 +45,23 @@ human-approved > auto-verified > draft > stale
 
 | Parent change | Child effect |
 |---|---|
-| `auto-verified → draft` | Child capped at `draft` |
-| `human-approved → stale` | Child capped at `stale` |
-| `draft → stale` | Child capped at `stale` |
-| Any upgrade (e.g. `draft → auto-verified`) | **No cascade** — upgrades never propagate. Re-promotion requires explicit action |
+| `auto-verified -> draft` | Child capped at `draft` |
+| `human-approved -> stale` | Child capped at `stale` |
+| `draft -> stale` | Child capped at `stale` |
+| Any upgrade (e.g. `draft -> auto-verified`) | **No cascade** — upgrades never propagate. Re-promotion requires explicit action |
 
 The cascade is implemented in `store.update_trust_state()` — after updating the target node, it walks outgoing provenance edges (`from_node = target`) and recurses on children that are now above the allowed ceiling.
 
 **Edge cases**:
 
-- **Multiple parents**: child's trust state is capped to the **lowest** parent's state. If synthesis has three parents (auto-verified, human-approved, draft) → synthesis capped at `draft`.
-- **Human-approved → stale**: the most aggressive cascade. A human-approved node becomes stale if any ancestor regresses below it. The user explicitly accepted this in review — correctness over convenience.
+- **Multiple parents**: child's trust state is capped to the **lowest** parent's state. If synthesis has three parents (auto-verified, human-approved, draft) -> synthesis capped at `draft`.
+- **Human-approved -> stale**: the most aggressive cascade. A human-approved node becomes stale if any ancestor regresses below it. The user explicitly accepted this in review — correctness over convenience.
 - **Stale propagation**: `stale` is the bottom of the ordinal. Once a chain hits stale, everything downstream is stale. Recovery requires explicit re-derive or adjudication.
 
 ## Consequences
 
 - **Positive**: Consistency — trust state is a DAG-wide invariant, not just a per-node label.
 - **Positive**: Safety — the agent never shows high-trust content built on a low-trust foundation.
-- **Positive**: Coverage — also covers the existing `contradicts` → contested path (ADR-0012), since contested is orthogonal and the cascade covers the trust state dimension.
+- **Positive**: Coverage — also covers the existing `contradicts` -> contested path (ADR-0012), since contested is orthogonal and the cascade covers the trust state dimension.
 - **Negative**: State loss — a human-approved node can lose its status if a distant ancestor regresses. Mitigation: the agent explains why (shows the regression path) and offers re-derive.
 - **Negative**: Cascade misses partial upgrades — if parent A improves from draft to auto-verified but parent B stays draft, child stays draft. Only explicit re-synthesis can fix this.

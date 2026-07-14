@@ -254,7 +254,7 @@ class TestAnthropicAgent:
 
         assert isinstance(rp, ReviewProposal)
         assert rp.affected_node_ids == ["n1"]
-        # missing fields → None / low default
+        # missing fields -> None / low default
         assert rp.damage_boundary_node_id is None
         assert rp.confidence == "low"
         assert "Partial response." in rp.rationale_md
