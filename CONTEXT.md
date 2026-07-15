@@ -58,6 +58,16 @@ Computed eagerly at node creation (column in the ``node`` table) and
 recomputed when a ``contradicts`` edge is written. Exposed in ``show``,
 ``list``, and ``render`` YAML frontmatter.
 
+**Synthesis statements**:
+The structured list of inferences a derivation emits *beyond* what its
+provenance parent(s) state. Persisted on the ``node`` row as a JSON column
+(``synthesis_statements``) by the agent at derivation time. Independent of
+the markdown body — the body may or may not render the same statements as
+``> Synthesis:`` lines, but the column is the source of truth that the
+deterministic check, the ``memex list --synthesis-statement`` filter, the
+``memex backfill-synthesis`` migration, and the renderer's frontmatter all
+marker is presentation (markdown).
+
 ### Ingestion
 
 **Capture**:

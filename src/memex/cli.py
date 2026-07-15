@@ -280,15 +280,22 @@ def ingest(db_path: Path, vault_path: Path, url: str | None, inbox_path: Path | 
 @click.option("--tier", default=None, help="Filter by node tier (e.g. notes, synthesis).")
 @click.option("--trust-state", "trust_state", default=None, help="Filter by trust state (draft, auto-verified, human-approved, stale).")
 @click.option("--confidence", default=None, help="Filter by confidence (high, medium, low).")
+@click.option(
+    "--synthesis-statement",
+    "synthesis_statement",
+    default=None,
+    help="Substring match against any synthesis statement (uses the structured column).",
+)
 @click.option("--limit", default=None, type=int, help="Max results.")
 @click.option("--offset", default=None, type=int, help="Result offset for pagination.")
 def list_nodes(db_path: Path, vault_path: Path, show_pending: bool,
                kind: str | None, tier: str | None, trust_state: str | None,
-               confidence: str | None, limit: int | None, offset: int | None) -> None:
+               confidence: str | None, synthesis_statement: str | None,
+               limit: int | None, offset: int | None) -> None:
     """Return JSON array of all nodes, or --pending captured-but-not-ingested keys."""
     from memex.store import Store
 
-    
+
     with Store.open(db_path) as store:
         if show_pending:
             ingested = store.list_ingested_canonical_keys()
@@ -300,11 +307,20 @@ def list_nodes(db_path: Path, vault_path: Path, show_pending: bool,
                     seen.add(ckey)
             click.echo(json.dumps(pending))
         else:
-            click.echo(json.dumps(store.list_nodes(
+            results = store.list_nodes(
                 kind=kind, tier=tier, trust_state=trust_state,
                 confidence=confidence, limit=limit, offset=offset,
-            )))
-
+            )
+            if synthesis_statement:
+                needle = synthesis_statement.lower()
+                results = [
+                    n for n in results
+                    if n.get("synthesis_statements") and any(
+                        needle in s.lower()
+                        for s in n["synthesis_statements"]
+                    )
+                ]
+            click.echo(json.dumps(results))
 
 @cli.command()
 @_db_options
@@ -480,6 +496,7 @@ def _do_derive(store, vault_path, l0_id, l0_content, agent, use_retry=False):
         depth=1,
         content_path=str(md_path),
         created_at=now,
+        synthesis_statements=deriv.synthesis_statements,
     )
     store.create_edge(
         edge_id=str(uuid.uuid4()),
@@ -555,6 +572,7 @@ def _do_synthesize(store, vault_path, parent_ids, agent):
         depth=max_depth + 1,
         content_path=str(md_path),
         created_at=now,
+        synthesis_statements=deriv.synthesis_statements,
     )
 
     for pid in parent_ids:
@@ -1163,6 +1181,59 @@ def retry(db_path: Path, vault_path: Path, node_id: str) -> None:
         "content_path": str(md_path),
     }))
 
+@cli.command("backfill-synthesis")
+@_db_options
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Report what would change without writing to the DB.",
+)
+def backfill_synthesis(db_path: Path, vault_path: Path, dry_run: bool) -> None:
+    """Backfill the synthesis_statements column from '> Synthesis:' markers in
+    derivation markdown files. Idempotent — skips nodes whose column is already
+    populated. Use after upgrading a vault that pre-dates the column.
+    """
+    import re as _re
+    from memex.store import Store
+
+    marker_re = _re.compile(r"^>\s*\*{0,2}Synthesis:\*{0,2}\s*(.+)$", _re.M)
+
+    with Store.open(db_path) as store:
+        candidates = [
+            n for n in store.list_nodes()
+            if n["kind"] != "raw_source"
+            and not n.get("synthesis_statements")
+            and n.get("content_path")
+            and Path(n["content_path"]).exists()
+        ]
+        results: list[dict] = []
+        for n in candidates:
+            text = Path(n["content_path"]).read_text(encoding="utf-8")
+            stmts = marker_re.findall(text)
+            entry = {
+                "id": n["id"],
+                "content_path": n["content_path"],
+                "extracted": len(stmts),
+                "preview": stmts[0][:80] if stmts else None,
+            }
+            if stmts and not dry_run:
+                store._con.execute(
+                    "UPDATE node SET synthesis_statements = ? WHERE id = ?",
+                    (json.dumps(stmts), n["id"]),
+                )
+                entry["status"] = "updated"
+            elif stmts:
+                entry["status"] = "would_update"
+            else:
+                entry["status"] = "no_marker_found"
+            results.append(entry)
+        click.echo(json.dumps({
+            "dry_run": dry_run,
+            "scanned": len(candidates),
+            "results": results,
+        }))
+
 
 @cli.command()
 @_db_options
@@ -1170,7 +1241,6 @@ def stats(db_path: Path, vault_path: Path) -> None:
     """Return high-level vault statistics as JSON."""
     from memex.store import Store
 
-    
     with Store.open(db_path) as store:
         click.echo(json.dumps(store.get_stats()))
 if __name__ == "__main__":

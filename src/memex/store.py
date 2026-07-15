@@ -172,6 +172,12 @@ class Store:
         try:
             self._con.execute(
                 "ALTER TABLE node ADD COLUMN confidence TEXT CHECK (confidence IN ('high','medium','low'))"
+        )
+        except sqlite3.OperationalError:
+            pass  # column already exists
+        try:
+            self._con.execute(
+                "ALTER TABLE node ADD COLUMN synthesis_statements TEXT"
             )
         except sqlite3.OperationalError:
             pass  # column already exists
@@ -205,22 +211,30 @@ class Store:
         content_path: str = "",
         created_at: str | None = None,
         confidence: str | None = None,
+        synthesis_statements: list[str] | None = None,
     ) -> None:
         """Insert a node row. ``created_at`` defaults to now (UTC ISO).
 
         When ``confidence`` is omitted, it is computed automatically.
+        ``synthesis_statements`` is persisted as JSON for structured querying.
         """
         if created_at is None:
             created_at = datetime.now(timezone.utc).isoformat()
         if confidence is None:
             confidence = "low"  # default for fresh nodes with no edges yet
+        synth_json = json.dumps(synthesis_statements) if synthesis_statements else None
         try:
             self._con.execute(
                 """
-                INSERT INTO node (id, kind, tier, trust_state, depth, content_path, created_at, confidence)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO node (
+                    id, kind, tier, trust_state, depth, content_path, created_at, confidence, synthesis_statements
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (node_id, kind, tier, trust_state, depth, content_path, created_at, confidence),
+                (
+                    node_id, kind, tier, trust_state, depth,
+                    content_path, created_at, confidence, synth_json,
+                ),
             )
         except sqlite3.Error as e:
             raise StoreError(str(e)) from e
@@ -344,7 +358,7 @@ class Store:
 
         Returns the same per-node fields as ``get_node``: ``{id, kind, tier,
         trust_state, depth, content_path, created_at, confidence, check_failures,
-        is_contested, contested_at,
+        synthesis_statements, is_contested, contested_at,
         canonical_key, source_url, title, fetched_at, failed}``.
         """
         clauses: list[str] = []
@@ -366,6 +380,7 @@ class Store:
             SELECT
                 n.id, n.kind, n.tier, n.trust_state, n.depth,
                 n.content_path, n.created_at, n.check_failures,
+                n.synthesis_statements,
                 n.is_contested, n.contested_at, n.confidence,
                 s.canonical_key, s.source_url, s.title, s.fetched_at, s.failed
             FROM node n
@@ -388,6 +403,11 @@ class Store:
                 d["check_failures"] = json.loads(cf_json)
             else:
                 d["check_failures"] = None
+            ss_json = d.pop("synthesis_statements", None)
+            if ss_json is not None:
+                d["synthesis_statements"] = json.loads(ss_json)
+            else:
+                d["synthesis_statements"] = None
             # is_contested and contested_at are plain int/TEXT — no JSON decoding needed
             d["is_contested"] = bool(d["is_contested"])
             result.append(d)
@@ -395,9 +415,8 @@ class Store:
 
     def get_node(self, node_id: str) -> dict[str, Any] | None:
         """Full node + source by id.
-
         Returns ``{id, kind, tier, trust_state, depth, content_path, created_at,
-        confidence, check_failures, is_contested, contested_at,
+        confidence, check_failures, synthesis_statements, is_contested, contested_at,
         canonical_key, source_url, title, fetched_at, failed}`` or ``None``.
         """
         row = self._con.execute(
@@ -405,6 +424,7 @@ class Store:
             SELECT
                 n.id, n.kind, n.tier, n.trust_state, n.depth, n.content_path, n.created_at,
                 n.check_failures,
+                n.synthesis_statements,
                 n.is_contested, n.contested_at, n.confidence,
                 s.canonical_key, s.source_url, s.title, s.fetched_at, s.failed
             FROM node n
@@ -425,11 +445,16 @@ class Store:
             d["check_failures"] = json.loads(cf_json)
         else:
             d["check_failures"] = None
+        # Decode synthesis_statements: None for L0 nodes / nodes without an LLM pass.
+        ss_json = d.pop("synthesis_statements", None)
+        if ss_json is not None:
+            d["synthesis_statements"] = json.loads(ss_json)
+        else:
+            d["synthesis_statements"] = None
         # is_contested and contested_at are plain int/TEXT — no JSON decoding needed
         d["is_contested"] = bool(d["is_contested"])
         return d
 
-    # ── Edges ──────────────────────────────────────────────────────
 
     def create_edge(self, *, edge_id: str, type: str, relation: str,
                     from_node: str, to_node: str,

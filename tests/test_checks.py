@@ -168,6 +168,26 @@ class TestSynthesisMarkerCheck:
 
         assert result.passed is True
 
+    def test_synthesis_statements_column_passes_even_without_marker(self, tmp_path):
+        """A derivation whose synthesis_statements column is populated passes the
+        synthesis check even when the markdown has no '> Synthesis:' marker."""
+        import json as _json
+        con, deriv_id, content_path = _setup_db(tmp_path)
+        # Overwrite content: drop the marker
+        content_without_marker = "This derivation is long enough but has no synthesis marker. " * 5
+        content_path.write_text(content_without_marker, encoding="utf-8")
+        # Persist the structured statements
+        con.execute(
+            "UPDATE node SET synthesis_statements = ? WHERE id = ?",
+            (_json.dumps(["Inference A.", "Inference B."]), deriv_id),
+        )
+        con.commit()
+
+        result = run_checks(con, deriv_id, content_path)
+        con.close()
+
+        assert result.passed is True
+
 
 # ---------------------------------------------------------------------------
 # Check 4: Size / scope bounds

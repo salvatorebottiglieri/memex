@@ -9,9 +9,23 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-
 from memex.canonical_key import canonical_key
 from memex.fetcher import FetchError
+
+
+def _human_path(vault_path: Path, name: str, suffix: str = ".md") -> Path:
+    """Return a collision-aware human-readable file path. Mirror of
+    ``memex.cli._human_path``; duplicated here to avoid a circular import
+    (cli -> ingester -> cli). Keep in sync if either changes.
+    """
+    base = vault_path / f"{_slugify(name)}{suffix}"
+    if not base.exists():
+        return base
+    for i in range(1, 100):
+        candidate = vault_path / f"{_slugify(name)}-{i}{suffix}"
+        if not candidate.exists():
+            return candidate
+    return base
 
 
 def _slugify(text: str, max_length: int = 80) -> str:
@@ -90,17 +104,31 @@ def ingest_single_url(
 
 
     # --- Write L0 markdown file (only on success, skip stubs < 100 chars) ---
+    # The L0 file MUST live in the vault root (not in a hidden subfolder) so
+    # Obsidian can index it and wikilinks from derivations resolve in the
+    # graph view. When a fetcher provides its own cache path (YouTube,
+    # PDF, etc.) we copy that file into the vault root and point
+    # ``content_path`` at the copy. The original cache file is left in place
+    # for debugging.
     content_path = ""
     if not failed and content is not None and len(content) >= 100:
         vault_path.mkdir(parents=True, exist_ok=True)
         name = _slugify(title) if title else node_id
-        md_path = vault_path / f"{name}.md"
+        md_path = _human_path(vault_path, name)
         md_path.write_text(content, encoding="utf-8")
         content_path = str(md_path)
     elif fetched_content_path:
-        # Content too short (e.g. YouTube metadata only), but fetcher provided a cache path
-        content_path = fetched_content_path
-    # --- Insert node + source rows ---
+        # Fetcher cached the content outside the vault (e.g. .cache/youtube-*).
+        # Mirror it into the vault root so Obsidian can index the L0.
+        cache_file = Path(fetched_content_path)
+        if cache_file.exists():
+            vault_path.mkdir(parents=True, exist_ok=True)
+            name = _slugify(title) if title else cache_file.stem
+            md_path = _human_path(vault_path, name)
+            md_path.write_text(cache_file.read_text(encoding="utf-8"), encoding="utf-8")
+            content_path = str(md_path)
+        else:
+            content_path = fetched_content_path
     store.create_node(
         node_id=node_id,
         kind="raw_source",

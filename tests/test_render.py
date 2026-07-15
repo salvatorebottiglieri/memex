@@ -361,7 +361,10 @@ class TestRenderEdgeWikilinks:
         fm, _ = _read_frontmatter(md_path)
 
         assert "derived_from" in fm, f"Expected derived_from in {fm}"
-        assert fm["derived_from"] == f"[[{l0_id}]]", f"got {fm['derived_from']!r}"
+        # Renderer emits `[[<target-filename>|<title>]]`. Obsidian resolves
+        # wikilinks by filename; the title (after |) is the display text.
+        assert fm["derived_from"] == "[[fake-article-title|Fake Article Title]]", \
+            f"got {fm['derived_from']!r}"
         # L0 node should NOT have derived_from (it's the target, not source)
         l0_fm, _ = _read_frontmatter(_md_path(store, data))
         assert "derived_from" not in l0_fm
@@ -376,7 +379,7 @@ class TestRenderEdgeWikilinks:
 
         fm_a, _ = _read_frontmatter(store["vault"] / f"{node_a}.md")
         assert "related" in fm_a, f"Expected related in {fm_a}"
-        assert fm_a["related"] == f"[[{node_b}]]", f"got {fm_a['related']!r}"
+        assert fm_a["related"] == f"[[{node_b}|{node_b}]]", f"got {fm_a['related']!r}"
 
         # node_b has no outgoing edges, should have no wikilinks
         fm_b, _ = _read_frontmatter(store["vault"] / f"{node_b}.md")
@@ -393,7 +396,7 @@ class TestRenderEdgeWikilinks:
 
         fm_a, _ = _read_frontmatter(store["vault"] / f"{node_a}.md")
         assert "contradicts" in fm_a
-        assert fm_a["contradicts"] == f"[[{node_b}]]"
+        assert fm_a["contradicts"] == f"[[{node_b}|{node_b}]]"
 
     def test_refines_edge_yields_wikilink(self, store):
         """Node with outgoing refines edge renders refines: [[uuid]]."""
@@ -405,7 +408,7 @@ class TestRenderEdgeWikilinks:
 
         fm_a, _ = _read_frontmatter(store["vault"] / f"{node_a}.md")
         assert "refines" in fm_a
-        assert fm_a["refines"] == f"[[{node_b}]]"
+        assert fm_a["refines"] == f"[[{node_b}|{node_b}]]"
 
     def test_multiple_edges_same_relation_yields_list(self, store):
         """Node with 2+ related edges renders related as a YAML list."""
@@ -422,8 +425,8 @@ class TestRenderEdgeWikilinks:
         rel = fm_a["related"]
         assert isinstance(rel, list), f"Expected list, got {type(rel).__name__}: {rel}"
         assert len(rel) == 2, f"Expected 2 items, got {len(rel)}: {rel}"
-        assert f"[[{node_b}]]" in rel
-        assert f"[[{node_c}]]" in rel
+        assert f"[[{node_b}|{node_b}]]" in rel
+        assert f"[[{node_c}|{node_c}]]" in rel
 
     def test_node_with_no_edges_unchanged(self, store):
         """Node with zero outgoing edges produces same frontmatter as slice 1."""
@@ -452,7 +455,7 @@ class TestRenderEdgeWikilinks:
         _render(store)
 
         fm_a, _ = _read_frontmatter(_md_path(store, node_a))
-        assert fm_a["related"] == f"[[{node_b}]]"
+        assert fm_a["related"] == f"[[{node_b}|{node_b}]]"
 
     def test_derived_from_edge_is_scalar_not_list(self, store):
         """Single derived_from edge renders as scalar [[uuid]], not a list."""

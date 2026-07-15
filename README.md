@@ -32,6 +32,8 @@ memex exposes a JSON-only CLI (one command per operation, all output is structur
 | `memex retry <node-id>` | Re-fetch a failed source URL |
 | `memex stats` | Vault statistics dashboard (counts by kind/tier/trust/confidence, coverage) |
 | `memex render` | Project SQLite graph -> YAML frontmatter + wikilinks on markdown files |
+| `memex list --synthesis-statement "<substring>"` | Substring match against derivation synthesis statements |
+| `memex backfill-synthesis [--dry-run]` | One-shot migration: parse `> Synthesis:` markers from existing derivation files into the structured column |
 | `memex capture` | Poll Telegram Saved Messages, persist to inbox |
 | `memex review` | Batch-generate review proposals for all pending contestation events |
 | `memex review list` | Show the review queue (pending events + proposals) |

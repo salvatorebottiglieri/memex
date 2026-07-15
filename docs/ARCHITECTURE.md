@@ -37,20 +37,10 @@ more conservative on scope (single user, no discovery/web-research subsystem).
 | Lazy derivation trigger | demand only (ADR-0003) | `memex derive`/`synthesize` on explicit action; density trigger deferred (YAGNI) |
 | Render step (DB -> frontmatter + wikilinks for Obsidian) | **built** (slice 1: metadata + tags + aliases) | `memex render` |
 | Per-type extractors (YouTube transcript, PDF) | **built** (slices 1+2) | Fetcher router dispatched via canonical key; `youtube-transcript-api` + `pypdf` |
-| Staleness propagation (contested -> triage -> accept/reject/dismiss) | **built** | `memex review accept/reject/dismiss` |
-| Human review queue / targeted review | **built** | `memex review` + `memex review list` |
-| Edge authorship tracking | **built** | `edge.written_by` column |
-| Edit round-trip (Obsidian wikilink edits back into DB) | **by design: Obsidian is view-only** | ADR-0008: SQLite owns structure, markdown owns content — unidirectional render |
-| Trust cascade (child trust capped to lowest parent) | **designed** (ADR-0014) | Implemented in `store.update_trust_state` |
-| Synthesis tier (cross-source derivation) | **built** | `memex synthesize <id1> <id2> ...` |
-| Extraction of key ideas (lightweight, no full derive) | **built** | `memex extract <node-id>` |
-| Idea text search across extracted ideas | **built** | `memex ideas <query>` |
-| List filtering (kind, tier, trust-state, confidence, limit, offset) | **built** | `memex list --kind --tier --trust-state --limit --offset` |
-| Search includes L0 metadata (title, URL, canonical key) | **built** | `memex search <query>` (now hybrid: files + SQL) |
-| Delete node (logical, with transitive cascade) | **built** | `memex delete <node-id> [--cascade]` |
-| Retry failed source ingestion | **built** | `memex retry <node-id>` |
-| Vault statistics dashboard | **built** | `memex stats` |
-| Human-readable filenames (slug from title/heading) | **built** | `derive`/`synthesize`/`ingest` use `goodbye-slop.md` not `uuid.md` |
+| L0 stored at vault root (Obsidian-indexable) for non-HTML fetchers | **built** | Ingester mirrors fetcher cache into vault root so wikilinks resolve |
+| Structured `synthesis_statements` column (vs markdown marker only) | **built** | Agent emits JSON; `run_checks` reads the column; renderer surfaces in frontmatter |
+| `memex list --synthesis-statement` filter | **built** | Substring match against the structured column |
+| `memex backfill-synthesis` migration | **built** | One-shot CLI for legacy vaults (parses `> Synthesis:` markers into the column) |
 
 ## Map (as built)
 

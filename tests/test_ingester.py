@@ -110,16 +110,15 @@ def test_ingest_single_url_youtube_metadata_only(tmp_path):
         result = ingest_single_url(
             store, vault_path, "https://www.youtube.com/watch?v=abc123", FakeYouTubeFetcher()
         )
-
     assert result["status"] == "ingested"
     assert result["canonical_key"] == "youtube://abc123"
     assert result["content_path"] is not None
-    assert result["content_path"].endswith("youtube-abc123.md")  # cache file path
-
-    # No L0 markdown file was written (content < 100 chars)
-    l0_md = vault_path / f"{result['id']}.md"
-    assert not l0_md.exists()
-
-    # But the content_path points to the cache file
-    assert Path(result["content_path"]).exists()
+    # L0 mirrors the fetcher cache into the vault root so Obsidian can index it.
+    assert result["content_path"].endswith("my-youtube-video.md")
+    # The mirror lives in the vault root, not in any subfolder.
+    assert Path(result["content_path"]).parent == vault_path
+    # The original cache file is preserved (L0 is immutable at the fetcher level).
+    assert cache_file.exists()
+    assert "Transcript" in cache_file.read_text()
+    # The mirror's content matches the cache.
     assert "Transcript" in Path(result["content_path"]).read_text()

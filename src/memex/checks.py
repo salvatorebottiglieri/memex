@@ -89,12 +89,25 @@ def run_checks(con: sqlite3.Connection, node_id: str, content_path: Path | str) 
         content = ""
 
     # ------------------------------------------------------------------
-    # Check 3: > Synthesis: marker present
+    # Check 3: at least one synthesis statement (read from the column, not the markdown)
     # ------------------------------------------------------------------
-    if "> Synthesis:" not in content:
+    # Preferred: structured field persisted by the agent (synthesis_statements JSON).
+    # Fallback: the old "> Synthesis:" marker in markdown — kept for legacy nodes whose
+    # row predates the column or for hand-edited files that dropped the field.
+    ss_row = con.execute(
+        "SELECT synthesis_statements FROM node WHERE id = ?", (node_id,)
+    ).fetchone()
+    has_structured = False
+    if ss_row is not None and ss_row[0]:
+        try:
+            import json as _json
+            has_structured = bool(_json.loads(ss_row[0]))
+        except _json.JSONDecodeError:
+            has_structured = False
+    if not has_structured and "> Synthesis:" not in content:
         failures.append(
             "Synthesis marker check failed: derivation must contain at least one "
-            '"> Synthesis:" statement'
+            '"> Synthesis:" statement (or have a non-empty synthesis_statements column)'
         )
 
     # ------------------------------------------------------------------
