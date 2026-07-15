@@ -41,6 +41,7 @@ more conservative on scope (single user, no discovery/web-research subsystem).
 | Structured `synthesis_statements` column (vs markdown marker only) | **built** | Agent emits JSON; `run_checks` reads the column; renderer surfaces in frontmatter |
 | `memex list --synthesis-statement` filter | **built** | Substring match against the structured column |
 | `memex backfill-synthesis` migration | **built** | One-shot CLI for legacy vaults (parses `> Synthesis:` markers into the column) |
+| Cross-device vault sharing (git + env vars) | **built** | `MEMEX_VAULT` / `MEMEX_DB` env vars (ADR-0015); vault-as-git-repo workflow |
 
 ## Map (as built)
 

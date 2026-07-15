@@ -39,8 +39,9 @@ memex exposes a JSON-only CLI (one command per operation, all output is structur
 | `memex review list` | Show the review queue (pending events + proposals) |
 | `memex review accept/reject/dismiss <proposal-id>` | Adjudicate a review proposal |
 | `memex contradict <target-id> --asserted-by <node-id>` | Write a contradicts edge, triggering contested propagation |
+| `memex sync [--no-push] [--install-hooks]` | Commit vault state: render → git add → commit → push in one shot. `--install-hooks` writes a git post-merge hook that auto-renders after pull |
 
-All commands accept `--db <path>` and `--vault <path>` (auto-detected defaults).
+All commands accept `--db <path>` and `--vault <path>` (or set `MEMEX_DB` / `MEMEX_VAULT` env vars; CLI flags take precedence). Auto-detected defaults: Obsidian vault via `~/.obsidian`, DB at `<vault>/.memex/memex.db`.
 
 ## Design
 
@@ -68,3 +69,76 @@ Tests inject fake collaborators without touching network or paying for LLM calls
 | `MEMEX_AGENT` | `memex derive`, `extract`, `synthesize`, `review` | Replaces the default `DemoAgent` with a module:Class string (e.g. `tests.fake_llm_client:FakeAgent`, or `memex.agent:OMPAgent`). Omit to use `DemoAgent` (no API key needed, hardcoded output). |
 
 Both follow the `module:Class` import-string convention so the seam is a one-line change with no monkeypatching.
+
+## Sharing between devices
+
+The vault folder (markdown files + SQLite DB) can be shared between machines via git.
+
+### Bootstrap
+
+```bash
+# Device A — pick a path, init, then git init
+mkdir -p ~/vault
+cd ~/vault
+memex init
+# export MEMEX_VAULT=~/vault in your shell rc so every command finds it
+git init
+echo -e ".obsidian/\n.cache/\n__pycache__/\n*.pyc\n*.pyo" > .gitignore
+git add -A && git commit -m "init"
+```
+
+### Clone on device B
+
+```bash
+git clone <remote> ~/vault
+# export MEMEX_VAULT=~/vault in your shell rc
+memex init                    # idempotent — safe on existing DB
+memex sync --install-hooks    # install auto-render on git pull (optional)
+```
+
+### Daily sync
+
+```bash
+# On either device — all three steps in one command:
+memex sync
+
+# On the other device — pull + auto-render (if hooks installed):
+git pull                       # post-merge hook auto-runs memex render
+
+# Without hooks:
+git pull && memex render
+```
+
+`memex sync` does render → `git add -A` → `git commit -m "sync"` → `git push`.
+Use `--no-push` to skip the push step (e.g. batch multiple changes before pushing).
+
+### Git hooks (optional)
+
+```bash
+# Install a post-merge hook so every `git pull` auto-runs memex render:
+memex sync --install-hooks
+```
+
+
+### Remote and credentials
+
+`memex sync` calls `git push` without specifying a remote — it uses the default
+remote configured in the vault repo. Set it up once:
+
+```bash
+git remote add origin <url>   # GitHub, GitLab, your own server, etc.
+```
+
+Credentials are handled entirely by git: SSH keys, `git-credential-libsecret`,
+`git-credential-oauth`, tokens in `~/.netrc` — anything git supports.
+`memex sync` never touches credentials, never asks for a password, never
+manages tokens. If `git push` fails for auth, git's error is reported verbatim.
+
+### `memex` must be on PATH
+
+The git hook (`memex sync --install-hooks`) writes `exec memex render --vault …`.
+It only works if `memex` is installed and reachable on PATH (e.g. via
+`pip install memex` or `uv tool install memex`). During development, edit the
+hook manually to point at `uv run python -m memex.cli render` instead.
+
+See [ADR-0015](docs/adr/0015-shared-vault-git-sync.md) for rationale and tradeoffs.

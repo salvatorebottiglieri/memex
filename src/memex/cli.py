@@ -63,11 +63,15 @@ def _detect_vault() -> Path | None:
 
 
 def _resolve_paths(db_path, vault_path):
-    """Fill in default db/vault from Obsidian detection or fallback."""
-    vp = Path(vault_path) if vault_path else _detect_vault()
+    """Fill in default db/vault from env, Obsidian detection, or fallback."""
+    vp = Path(vault_path) if vault_path else (
+        Path(os.environ["MEMEX_VAULT"]) if "MEMEX_VAULT" in os.environ else _detect_vault()
+    )
     if vp is None:
         vp = Path.home() / "memex-vault"
-    dp = Path(db_path) if db_path else vp / ".memex" / "memex.db"
+    dp = Path(db_path) if db_path else (
+        Path(os.environ["MEMEX_DB"]) if "MEMEX_DB" in os.environ else vp / ".memex" / "memex.db"
+    )
     return dp, vp
 
 def _fail(error: str, **kwargs: Any) -> None:
@@ -1243,5 +1247,59 @@ def stats(db_path: Path, vault_path: Path) -> None:
 
     with Store.open(db_path) as store:
         click.echo(json.dumps(store.get_stats()))
+
+
+@cli.command()
+@_db_options
+@click.option("--push/--no-push", default=True, help="Push to remote after committing (default: push)")
+@click.option("--install-hooks", is_flag=True, help="Install git post-merge hook for auto-render on pull")
+def sync(db_path: Path, vault_path: Path, push: bool, install_hooks: bool) -> None:
+    """Commit vault state to git and optionally push."""
+    if install_hooks:
+        _install_sync_hooks(vault_path)
+        return
+
+    from memex.renderer import render
+    import subprocess
+
+    # 1. Render DB -> frontmatter
+    results = render(db_path, vault_path)
+    rendered = sum(1 for r in results if r["status"] == "rendered")
+
+    # 2. Git add + commit — ponytail: subprocess for 3 calls, not a library
+    r = subprocess.run(["git", "add", "-A"], cwd=vault_path, capture_output=True, text=True)
+    if r.returncode != 0:
+        _fail("git-add-failed", stderr=r.stderr)
+
+    r = subprocess.run(["git", "commit", "-m", "sync"], cwd=vault_path, capture_output=True, text=True)
+    committed = r.returncode == 0
+
+    # 3. Optional push
+    pushed = False
+    if push and committed:
+        r = subprocess.run(["git", "push"], cwd=vault_path, capture_output=True, text=True)
+        if r.returncode != 0:
+            _fail("git-push-failed", stderr=r.stderr)
+        pushed = True
+
+    click.echo(json.dumps({
+        "rendered": rendered,
+        "committed": committed,
+        "pushed": pushed,
+    }))
+
+
+def _install_sync_hooks(vault_path: Path) -> None:
+    """Write git post-merge hook that re-renders frontmatter on pull."""
+    hooks_dir = vault_path / ".git" / "hooks"
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    hook = hooks_dir / "post-merge"
+    # ponytail: absolute vault path so MEMEX_VAULT env var is optional
+    hook.write_text(
+        "#!/bin/sh\n"
+        f'exec memex render --vault "{vault_path}"\n'
+    )
+    hook.chmod(0o755)
+    click.echo(json.dumps({"hook_installed": str(hook)}))
 if __name__ == "__main__":
     cli()

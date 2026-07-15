@@ -157,3 +157,19 @@ def test_init_created_flags_reflect_actual_creation(tmp_path, run_memex):
     assert first_data["vault_created"] is True
     assert second_data["db_created"] is False
     assert second_data["vault_created"] is False
+
+
+def test_resolve_paths_uses_env_vars(tmp_path, run_memex):
+    """MEMEX_VAULT and MEMEX_DB env vars are picked up by _resolve_paths."""
+    vault = tmp_path / "my-vault"
+    vault.mkdir()
+    db = tmp_path / "custom.db"
+    db.write_text("")  # placeholder so init is safe
+
+    env = {"MEMEX_VAULT": str(vault), "MEMEX_DB": str(db)}
+    result = run_memex(["status"], env=env)
+
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["vault_path"] == str(vault)
+    assert data["db_path"] == str(db)
