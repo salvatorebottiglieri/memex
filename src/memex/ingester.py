@@ -63,16 +63,16 @@ def ingest_single_url(
         suitable for JSON output.
     """
     ckey = canonical_key(url)
-    now = datetime.now(timezone.utc).isoformat
+    now = datetime.now(timezone.utc).isoformat()
 
     # Record the inbox capture if this came from an inbox source
     if source_name is not None:
         store.add_inbox_item(
             source_name=source_name,
             url=url,
-            timestamp=item_timestamp or now(),
+            timestamp=item_timestamp or now,
             note=item_note,
-            captured_at=now(),
+            captured_at=now,
         )
 
     # --- Ledger check ---
@@ -135,14 +135,14 @@ def ingest_single_url(
         trust_state="draft",
         depth=0,
         content_path=content_path,
-        created_at=now(),
+        created_at=now,
     )
     store.attach_source(
         node_id=node_id,
         canonical_key=ckey,
         source_url=url,
         title=title,
-        fetched_at=now(),
+        fetched_at=now,
         failed=failed,
     )
 
