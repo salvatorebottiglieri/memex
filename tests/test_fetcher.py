@@ -6,6 +6,7 @@ handling, and the content_path field.
 from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+import os
 
 import pytest
 
@@ -576,3 +577,150 @@ class TestResolveUrlTracking:
         result = resolve_url("https://arxiv.org/abs/2304.12345?foo=bar")
         assert result.type == "arxiv"
         assert result.direct_url == "https://arxiv.org/pdf/2304.12345"
+class TestIngestBlocking:
+    """Ingest blocks/resolves non-ingestable URLs (X/Twitter, media).
+
+    Uses run_memex directly with explicit env to control resolver behavior.
+    """
+
+    # Build a PATH that includes uv/.local/bin but excludes pi's nvm directory
+    _RESOLVER_FREE_PATH = ":".join(
+        p for p in os.environ.get("PATH", "").split(":")
+        if "nvm" not in p
+    )
+
+    def test_ingest_x_com_fails_without_resolver(self, store, run_memex):
+        """Without a resolver, ingest should fail for non-ingestable URLs."""
+        from tests.conftest import WORKTREE, FAKE_FETCHER
+        env = {
+            "MEMEX_FETCHER_MODULE": FAKE_FETCHER,
+            "PATH": self._RESOLVER_FREE_PATH,
+        }
+        proc = run_memex(
+            [
+                "ingest",
+                "--db", str(store["db"]),
+                "--vault", str(store["vault"]),
+                "https://x.com/user/status/123",
+            ],
+            cwd=WORKTREE,
+            env=env,
+        )
+        assert proc.returncode != 0
+        import json
+        data = json.loads(proc.stderr)
+        assert "error" in data
+        assert "url" in data
+        assert data["url"] == "https://x.com/user/status/123"
+
+    def test_ingest_media_url_fails_without_resolver(self, store, run_memex):
+        """Ingest of direct media URLs fails without a resolver."""
+        from tests.conftest import WORKTREE, FAKE_FETCHER
+        env = {
+            "MEMEX_FETCHER_MODULE": FAKE_FETCHER,
+            "PATH": self._RESOLVER_FREE_PATH,
+        }
+        proc = run_memex(
+            [
+                "ingest",
+                "--db", str(store["db"]),
+                "--vault", str(store["vault"]),
+                "https://example.com/photo.jpg",
+            ],
+            cwd=WORKTREE,
+            env=env,
+        )
+        assert proc.returncode != 0
+        import json
+        data = json.loads(proc.stderr)
+        assert "error" in data
+
+    def test_ingest_normal_url_succeeds(self, store, run_memex):
+        """Normal ingestable URLs still work fine."""
+        from tests.conftest import WORKTREE, FAKE_FETCHER
+        env = {
+            "MEMEX_FETCHER_MODULE": FAKE_FETCHER,
+            "PATH": self._RESOLVER_FREE_PATH,
+        }
+        proc = run_memex(
+            [
+                "ingest",
+                "--db", str(store["db"]),
+                "--vault", str(store["vault"]),
+                "https://example.com/article",
+            ],
+            cwd=WORKTREE,
+            env=env,
+        )
+        assert proc.returncode == 0, proc.stderr
+        import json
+        data = json.loads(proc.stdout)
+        assert data["status"] in ("ingested", "already_exists")
+
+    def test_ingest_x_com_with_resolver_custom_cmd(self, store, run_memex):
+        """When MEMEX_RESOLVER_CMD is set, the custom resolver is used first."""
+        import os
+        from tests.conftest import WORKTREE, FAKE_FETCHER
+        env = {
+            "MEMEX_FETCHER_MODULE": FAKE_FETCHER,
+            "MEMEX_RESOLVER_CMD": "echo fail_placeholder",
+            "PATH": os.environ.get("PATH", ""),
+        }
+        proc = run_memex(
+            [
+                "ingest",
+                "--db", str(store["db"]),
+                "--vault", str(store["vault"]),
+                "https://x.com/user/status/123",
+            ],
+            cwd=WORKTREE,
+            env=env,
+        )
+        # echo outputs the placeholder + URL — not a valid URL, resolver fails
+        assert proc.returncode != 0
+        import json
+        lines = proc.stderr.strip().splitlines()
+        data = json.loads(lines[-1])  # last line is the error JSON
+        assert "error" in data
+
+    def test_ingest_x_com_with_resolver_fails_gracefully(self, store, run_memex):
+        """When auto-resolution fails, we get a ResolverError."""
+        from tests.conftest import WORKTREE, FAKE_FETCHER
+        import os
+        env = {
+            "MEMEX_FETCHER_MODULE": FAKE_FETCHER,
+            "MEMEX_RESOLVER_CMD": "echo fail_placeholder",
+            "PATH": os.environ.get("PATH", ""),
+        }
+        proc = run_memex(
+            [
+                "ingest",
+                "--db", str(store["db"]),
+                "--vault", str(store["vault"]),
+                "https://x.com/user/status/123",
+            ],
+            cwd=WORKTREE,
+            env=env,
+        )
+        assert proc.returncode != 0
+        import json
+        lines = proc.stderr.strip().splitlines()
+        data = json.loads(lines[-1])
+        assert "error" in data
+        assert "return a valid URL" in data["error"] or "timed out" in data["error"]
+
+    def test_resolve_media_url_returns_ingestable_false(self):
+        """Verify resolve_url marks media URLs as non-ingestable."""
+        from memex.fetcher import resolve_url
+        result = resolve_url("https://example.com/image.png")
+        assert result.ingestable is False
+        assert result.type == "unknown"
+
+    def test_resolve_x_com_url_returns_ingestable_false_with_note(self):
+        """Verify resolve_url marks X/Twitter URLs as non-ingestable with a note."""
+        from memex.fetcher import resolve_url
+        result = resolve_url("https://x.com/user/status/123")
+        assert result.ingestable is False
+        assert result.note is not None
+        assert result.type == "unknown"
+
