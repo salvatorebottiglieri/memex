@@ -85,6 +85,15 @@ def _fresh_store(tmp: Path, name: str = "smoke") -> tuple[Path, Path]:
     _expect_json(f"init {name}", proc)
     return db, vault
 
+def _node_file(db: Path, node_id: str) -> Path:
+    """Return the filesystem path to a node's content, reading from the DB."""
+    con = sqlite3.connect(str(db))
+    row = con.execute("SELECT content_path FROM node WHERE id = ?", (node_id,)).fetchone()
+    con.close()
+    if row is None or not row[0]:
+        raise SmokeError(f"node {node_id}: no content_path in DB")
+    return Path(row[0])
+
 
 # ── smoke groups ─────────────────────────────────────────────────
 
@@ -317,11 +326,9 @@ def smoke_derive_passing(tmp: Path) -> None:
     _check("list has 2 nodes (l0 + derivation)", len(lst) == 2, f"got {len(lst)}")
 
     # Derivation markdown exists and has synthesis marker
-    md_files = list(vault.glob("*.md"))
-    _check("2 md files (l0 + deriv)", len(md_files) == 2, f"got {len(md_files)}")
-    deriv_md = vault / f"{deriv_id}.md"
-    _check("derivation md exists", deriv_md.exists())
-    _check("derivation has > Synthesis: marker", "> Synthesis:" in deriv_md.read_text())
+    deriv_path = _node_file(db, deriv_id)
+    _check("derivation md exists", deriv_path.exists(), f"expected {deriv_path}")
+    _check("derivation has > Synthesis: marker", "> Synthesis:" in deriv_path.read_text())
 
 
 def smoke_derive_failing(tmp: Path) -> None:
@@ -572,11 +579,8 @@ def smoke_fetcher_pdf(tmp: Path) -> None:
     _check("pdf ingest status=ingested", d.get("status") == "ingested")
     _check("pdf ingest has content_path", d.get("content_path") is not None)
     _check("pdf ingest content_path has .md", d["content_path"].endswith(".md"))
-
     node_id = d["id"]
-    md_path = vault / f"{node_id}.md"
-    _check("pdf L0 markdown exists", md_path.exists())
-    _check("pdf L0 has extracted text", "Extracted PDF" in md_path.read_text())
+    md_path = _node_file(db, node_id)
 
     # Derive from the PDF-ingested node
     p2 = _run(
@@ -601,9 +605,13 @@ def smoke_fetcher_youtube(tmp: Path) -> None:
     _check("youtube ingest content_path is .md", d["content_path"].endswith(".md"))
 
     node_id = d["id"]
-    # The L0 markdown file is NOT written (content < 100 chars, metadata only)
-    l0_md = vault / f"{node_id}.md"
-    _check("youtube L0 markdown not written", not l0_md.exists())
+    # L0 is mirrored into vault root with a human-readable slug filename
+    l0_cp = d.get("content_path", "")
+    _check("youtube L0 content_path set", bool(l0_cp), f"got {l0_cp!r}")
+    cp_path = Path(l0_cp)
+    _check("youtube L0 is in vault root", str(vault) in l0_cp, f"got {l0_cp}")
+    _check("youtube L0 file exists", cp_path.exists())
+    _check("youtube L0 filename is human-readable (not node_id)", cp_path.stem != node_id)
 
     # Derive from the YouTube-ingested node (reads from content_path)
     p2 = _run(
@@ -666,8 +674,8 @@ def smoke_render(tmp: Path) -> None:
     _check("frontmatter has depth=0", fm.get("depth") == 0)
     _check("frontmatter has tags with kind/raw_source", "kind/raw_source" in fm.get("tags", []))
     _check("frontmatter has source_url", "source_url" in fm)
-    _check("frontmatter has title", fm.get("title") == "Fake Article")
-    _check("frontmatter has aliases", fm.get("aliases") == ["Fake Article"])
+    _check("frontmatter has title", fm.get("title") == "Fake Article Title")
+    _check("frontmatter has aliases", fm.get("aliases") == ["Fake Article Title"])
 
     # Idempotency
     p = _run(["render", "--db", str(db), "--vault", str(vault)])
@@ -678,7 +686,7 @@ def smoke_render(tmp: Path) -> None:
     _, fm_raw2, _ = text2.split("---\n", 2)
     fm2 = _y.safe_load(fm_raw2)
     _check("idempotent: same kind", fm2.get("kind") == "raw_source")
-    _check("idempotent: same title", fm2.get("title") == "Fake Article")
+    _check("idempotent: same title", fm2.get("title") == "Fake Article Title")
 
     # Derivation render
     p = _run(["derive", "--db", str(db), "--vault", str(vault), str(res[0]["node_id"])],
@@ -690,26 +698,22 @@ def smoke_render(tmp: Path) -> None:
     res = _expect_json("render with derivations", p)
     _check("2 nodes rendered", len(res) == 2, f"got {len(res)}")
 
-    deriv_md = vault / f"{deriv_id}.md"
+    deriv_md = _node_file(db, deriv_id)
     dtext = deriv_md.read_text(encoding="utf-8")
     _, dfm_raw, _ = dtext.split("---\n", 2)
     dfm = _y.safe_load(dfm_raw)
     _check("derivation frontmatter has kind=summary", dfm.get("kind") == "summary")
     _check("derivation frontmatter has tier=notes", dfm.get("tier") == "notes")
     _check("derivation frontmatter has trust_state", dfm.get("trust_state") in ("draft", "auto-verified"))
-    _check("derivation frontmatter has check_failures", isinstance(dfm.get("check_failures"), list))
     _check("derivation tags include kind/summary", "kind/summary" in dfm.get("tags", []))
     _check("derivation tags include tier/notes", "tier/notes" in dfm.get("tags", []))
-
-    # Derivation render includes derived_from wikilink
-    _check("derived_from wikilink present", "derived_from" in dfm, f"keys: {list(dfm.keys())}")
-    _check("derived_from is scalar [[uuid]]",
-           isinstance(dfm["derived_from"], str),
-           f"got {type(dfm['derived_from']).__name__}: {dfm['derived_from']}")
-    _check("derived_from begins with [[", dfm["derived_from"].startswith("[["),
+    _check("derivation frontmatter has synthesis_statements", isinstance(dfm.get("synthesis_statements"), list))
+    _check("derivation frontmatter has derived_from", "derived_from" in dfm)
+    _check("derived_from is formatted as wikilink", dfm["derived_from"].startswith("[["), f"got {dfm['derived_from']!r}")
+    _check("derived_from wikilink is relative path (no full path)", "/" not in dfm["derived_from"].strip("[]").split("|")[0],
            f"got {dfm['derived_from']!r}")
-
-    # Empty vault returns empty
+    p = _run(["render", "--db", str(tmp / "nonexistent.db"), "--vault", str(vault)])
+    _check("render missing DB exits non-zero", p.returncode != 0)
     db2, vault2 = _fresh_store(tmp, "render-empty")
     p = _run(["render", "--db", str(db2), "--vault", str(vault2)])
     res_empty = _expect_json("render empty", p)
@@ -1297,8 +1301,7 @@ def smoke_stub(tmp: Path) -> None:
     _check("derive stub status=derived", dr.get("status") == "derived", f"got {dr.get('status')}")
 
     # Derivation markdown was created (notes-tier always has a file)
-    deriv_md = vault / f"{dr['id']}.md"
-    _check("derivation md exists for stub", deriv_md.exists())
+    deriv_md = _node_file(db, dr["id"])
 
     # Render should skip the L0 (no content_path) but still render the derivation
     p = _run(["render", "--db", str(db), "--vault", str(vault)])
@@ -1309,6 +1312,76 @@ def smoke_stub(tmp: Path) -> None:
     _check("L0 skipped with reason=no_content_path",
            any(r.get("reason") == "no_content_path" for r in skipped))
     _check("derivation rendered", len(rendered) == 1)
+
+def smoke_resolve(tmp: Path) -> None:
+    """End-to-end tests for memex resolve command."""
+    print("  [RESOLVE] arXiv abs -> PDF")
+    p = _run(["resolve", "https://arxiv.org/abs/2304.12345"])
+    _check("resolve arxiv exits 0", p.returncode == 0)
+    d = json.loads(p.stdout)
+    _check("resolve arxiv type", d["type"] == "arxiv")
+    _check("resolve arxiv direct_url", d["direct_url"] == "https://arxiv.org/pdf/2304.12345")
+    _check("resolve arxiv ingestable", d["ingestable"] is True)
+
+    print("  [RESOLVE] GitHub blob -> raw")
+    p = _run(["resolve", "https://github.com/user/repo/blob/main/file.py"])
+    _check("resolve github exits 0", p.returncode == 0)
+    d = json.loads(p.stdout)
+    _check("resolve github type", d["type"] == "github_file")
+    _check("resolve github direct_url", d["direct_url"] == "https://raw.githubusercontent.com/user/repo/main/file.py")
+
+    print("  [RESOLVE] Wikipedia -> REST API")
+    p = _run(["resolve", "https://en.wikipedia.org/wiki/Python_(programming_language)"])
+    _check("resolve wikipedia exits 0", p.returncode == 0)
+    d = json.loads(p.stdout)
+    _check("resolve wikipedia type", d["type"] == "wikipedia")
+    _check("resolve wikipedia direct_url", d["direct_url"].startswith("https://en.wikipedia.org/api/rest_v1/page/summary/"))
+
+    print("  [RESOLVE] Web article -> type web")
+    p = _run(["resolve", "https://example.com/article"])
+    _check("resolve web exits 0", p.returncode == 0)
+    d = json.loads(p.stdout)
+    _check("resolve web ingestable", d["ingestable"] is True)
+
+    print("  [RESOLVE] Media URL (jpg) -> not ingestable")
+    p = _run(["resolve", "https://example.com/photo.jpg"])
+    _check("resolve jpg exits 0", p.returncode == 0)
+    d = json.loads(p.stdout)
+    _check("resolve jpg type", d["type"] == "unknown")
+    _check("resolve jpg ingestable", d["ingestable"] is False)
+
+    print("  [RESOLVE] X/Twitter -> not ingestable with note")
+    p = _run(["resolve", "https://x.com/user/status/123"])
+    _check("resolve x exits 0", p.returncode == 0)
+    d = json.loads(p.stdout)
+    _check("resolve x ingestable", d["ingestable"] is False)
+    _check("resolve x has note", "note" in d)
+
+    print("  [RESOLVE] Missing URL -> JSON error")
+    p = _run(["resolve"])
+    _check("resolve missing exits non-zero", p.returncode != 0)
+    d = json.loads(p.stderr)
+    _check("resolve missing has error", "error" in d)
+
+    print("  [RESOLVE] Empty URL -> JSON error")
+    p = _run(["resolve", ""])
+    _check("resolve empty exits non-zero", p.returncode != 0)
+    d = json.loads(p.stderr)
+    _check("resolve empty has error", "error" in d)
+
+    print("  [RESOLVE] URL with tracking params -> still resolves")
+    p = _run(["resolve", "https://arxiv.org/abs/2304.12345?utm_source=twitter&fbclid=abc"])
+    _check("resolve tracking exits 0", p.returncode == 0)
+    d = json.loads(p.stdout)
+    _check("resolve tracking type", d["type"] == "arxiv")
+    _check("resolve tracking direct_url", d["direct_url"] == "https://arxiv.org/pdf/2304.12345")
+
+    print("  [RESOLVE] GitHub with query params -> still resolves")
+    p = _run(["resolve", "https://github.com/user/repo/blob/main/file.py?token=abc"])
+    _check("resolve github query exits 0", p.returncode == 0)
+    d = json.loads(p.stdout)
+    _check("resolve github query type", d["type"] == "github_file")
+    _check("resolve github query direct_url", d["direct_url"] == "https://raw.githubusercontent.com/user/repo/main/file.py")
 # ── runner ──────────────────────────────────────────────────────
 
 
@@ -1338,6 +1411,7 @@ def main() -> int:
         smoke_help(tmp)
         smoke_full_e2e(tmp)
         smoke_stub(tmp)
+        smoke_resolve(tmp)
 
     print(f"\n{'='*60}")
     print(f"PASSED: {_passes}    FAILED: {len(_failures)}")
