@@ -174,6 +174,47 @@ class ArxivRule(ResolutionRule):
         return None
 
 
+class GitHubBlobRule(ResolutionRule):
+    """Rule that matches github.com/{owner}/{repo}/blob/{branch}/{path} and resolves to raw content."""
+
+    _PATTERN = re.compile(r"^https?://github\.com/([^/]+)/([^/]+)/blob/([^/]+)/([^?#]+)")
+
+    def match(self, url: str) -> Resolution | None:
+        m = self._PATTERN.match(url)
+        if m:
+            owner, repo, branch, path = m.groups()
+            raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}"
+            return Resolution(
+                url=url,
+                type="github_file",
+                ingestable=True,
+                fetcher="HttpFetcher",
+                direct_url=raw_url,
+            )
+        return None
+
+
+class WikipediaRule(ResolutionRule):
+    """Rule that matches *.wikipedia.org/wiki/{title} and resolves to REST API summary."""
+
+    _PATTERN = re.compile(r"^https?://([a-z][a-z-]*)\.wikipedia\.org/wiki/([^?#]+)")
+
+    def match(self, url: str) -> Resolution | None:
+        m = self._PATTERN.match(url)
+        if m:
+            lang = m.group(1)
+            title = m.group(2)
+            api_url = f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/{title}"
+            return Resolution(
+                url=url,
+                type="wikipedia",
+                ingestable=True,
+                fetcher="HttpFetcher",
+                direct_url=api_url,
+            )
+        return None
+
+
 class DefaultRule(ResolutionRule):
     """Fallback rule: matches any http/https URL as a generic web page."""
 
@@ -189,7 +230,7 @@ class DefaultRule(ResolutionRule):
 
 
 # Rule registry: first match wins
-_rules: list[ResolutionRule] = [ArxivRule(), DefaultRule()]
+_rules: list[ResolutionRule] = [ArxivRule(), GitHubBlobRule(), WikipediaRule(), DefaultRule()]
 
 
 def resolve_url(url: str) -> Resolution:
