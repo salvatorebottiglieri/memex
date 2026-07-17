@@ -260,6 +260,30 @@ def ingest(db_path: Path, vault_path: Path, url: str | None, inbox_path: Path | 
 
             click.echo(json.dumps(results))
         else:
+            # Pre-flight: attempt resolution for non-ingestable URLs
+            from memex.fetcher import resolve_url
+            resolution = resolve_url(url)
+            if not resolution.ingestable:
+                from memex.resolver import detect_resolver, ResolverError
+                resolver = detect_resolver()
+                if resolver is not None:
+                    click.echo(json.dumps({"status": "resolving_via_agent", "url": url}), err=True)
+                    try:
+                        resolved = resolver.resolve(url)
+                        result = ingest_single_url(store, vault_path, resolved, fetcher)
+                        if not result.get("title") and title_agent and result.get("status") == "ingested" and result.get("content_path"):
+                            cp = Path(result["content_path"])
+                            if cp.exists():
+                                t = title_agent.generate_title(cp.read_text(encoding="utf-8"), resolved)
+                                if t:
+                                    store.update_source_title(result["id"], t)
+                                    result["title"] = t
+                        click.echo(json.dumps(result))
+                        return
+                    except ResolverError as e:
+                        _fail(str(e), url=url)
+                else:
+                    _fail(resolution.note or "Cannot ingest this URL", url=url)
             result = ingest_single_url(store, vault_path, url, fetcher)
             if not result.get("title") and title_agent and result.get("status") == "ingested" and result.get("content_path"):
                 cp = Path(result["content_path"])
@@ -283,6 +307,26 @@ def resolve(url: str | None) -> None:
     from memex.fetcher import resolve_url
     result = resolve_url(url)
     click.echo(json.dumps(dataclasses.asdict(result)))
+
+
+@cli.command()
+@click.argument("url", required=False, default=None)
+def resolve_agent(url: str | None) -> None:
+    """Resolve a URL using an external agent (Pi/Claude) with a browser.
+
+    Returns JSON with the resolved URL, or an error if no agent is available.
+    """
+    if not url:
+        _fail("Missing required argument 'URL'.")
+    from memex.resolver import detect_resolver, ResolverError
+    resolver = detect_resolver()
+    if resolver is None:
+        _fail("No resolver agent available. Install pi or set MEMEX_RESOLVER_CMD.")
+    try:
+        resolved = resolver.resolve(url)
+        click.echo(json.dumps({"resolved_url": resolved}))
+    except ResolverError as e:
+        _fail(str(e))
 
 
 @cli.command("list")
