@@ -4,6 +4,7 @@ All output is JSON (AXI standard: structured, token-frugal, machine-readable).
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import uuid
@@ -15,7 +16,6 @@ import click
 from memex.canonical_key import canonical_key
 from memex.ingester import ingest_single_url
 import functools
-
 
 def _slugify(text: str, max_length: int = 80) -> str:
     """Convert text to a filesystem-safe slug (lowercase, hyphens only)."""
@@ -269,6 +269,20 @@ def ingest(db_path: Path, vault_path: Path, url: str | None, inbox_path: Path | 
                         store.update_source_title(result["id"], t)
                         result["title"] = t
             click.echo(json.dumps(result))
+
+
+@cli.command()
+@click.argument("url", required=False, default=None)
+def resolve(url: str | None) -> None:
+    """Resolve a URL through resolution rules and return JSON.
+
+    Returns the type, ingestability, and direct_url (if applicable).
+    """
+    if url is None:
+        _fail("Missing required argument 'URL'.")
+    from memex.fetcher import resolve_url
+    result = resolve_url(url)
+    click.echo(json.dumps(dataclasses.asdict(result)))
 
 
 @cli.command("list")

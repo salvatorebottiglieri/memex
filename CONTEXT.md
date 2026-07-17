@@ -130,3 +130,17 @@ _Avoid_: pending list, worklist
 **Adjudication**:
 The human act of closing a contestation event with `accept`, `reject`, or `dismiss`. The only path out of the review queue.
 _Avoid_: close, resolve, settle
+
+### Fetch resolution
+
+**RoutingFetcher**:
+The deterministic dispatcher that maps a canonical key prefix to the appropriate fetcher (e.g. `youtube://` → `YouTubeTranscriptFetcher`, `arxiv.org/abs/` → `PDFFetcher`). Zero LLM, sub-millisecond. Covers all known URL types.
+_Avoid_: router, dispatcher, fetcher selector
+
+**Resolve**:
+The `memex resolve <url>` CLI command that classifies a URL and tells the external agent whether it can be ingested directly. Returns a JSON envelope with type, suggested fetcher, and ingestability. No LLM, only canonical-key matching + resolution rules.
+_Avoid_: url classifier, pre-flight check, link analyzer
+
+**Resolution rule**:
+A deterministic, code-registered pattern mapping a URL class (prefix, host pattern, or page structure) to a specific fetcher or transformation (e.g. `arxiv.org/abs/` → rewrite to PDF before fetch, `github.com` → use raw content API, `wikipedia.org` → use REST API). No LLM needed.
+_Avoid_: shortcut, site-specific path, custom fetcher

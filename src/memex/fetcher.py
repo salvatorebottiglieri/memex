@@ -1,13 +1,14 @@
 """Content fetcher: HttpFetcher + load_fetcher for test injection."""
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
+import re
 
 
 class FetchError(Exception):
     """Raised when content cannot be fetched."""
-
 
 @dataclass
 class FetchResult:
@@ -16,6 +17,18 @@ class FetchResult:
     content: str  # Markdown-compatible article text
     title: str | None = None
     content_path: str | None = None
+
+
+@dataclass
+class Resolution:
+    """Result of URL resolution — describes what a URL represents."""
+
+    url: str
+    type: str
+    ingestable: bool
+    fetcher: str | None = None
+    direct_url: str | None = None
+    note: str | None = None
 
 
 class ContentFetcher:
@@ -134,6 +147,65 @@ class YouTubeTranscriptFetcher(ContentFetcher):
             raise FetchError(str(exc)) from exc
 
 
+class ResolutionRule(ABC):
+    """Abstract base for URL resolution rules."""
+
+    @abstractmethod
+    def match(self, url: str) -> Resolution | None: ...
+
+
+class ArxivRule(ResolutionRule):
+    """Rule that matches arxiv.org/abs/ URLs and resolves to PDF."""
+
+    _ARXIV_PATTERN = re.compile(r"^https?://arxiv\.org/abs/(\d+\.\d+)(v\d+)?")
+
+    def match(self, url: str) -> Resolution | None:
+        m = self._ARXIV_PATTERN.match(url)
+        if m:
+            paper_id = m.group(1)
+            version = m.group(2) or ""
+            return Resolution(
+                url=url,
+                type="arxiv",
+                ingestable=True,
+                fetcher="PDFFetcher",
+                direct_url=f"https://arxiv.org/pdf/{paper_id}{version}",
+            )
+        return None
+
+
+class DefaultRule(ResolutionRule):
+    """Fallback rule: matches any http/https URL as a generic web page."""
+
+    def match(self, url: str) -> Resolution | None:
+        if url.startswith(("http://", "https://")):
+            return Resolution(
+                url=url,
+                type="web",
+                ingestable=True,
+                fetcher="HttpFetcher",
+            )
+        return None
+
+
+# Rule registry: first match wins
+_rules: list[ResolutionRule] = [ArxivRule(), DefaultRule()]
+
+
+def resolve_url(url: str) -> Resolution:
+    """Apply resolution rules and return the first match."""
+    for rule in _rules:
+        result = rule.match(url)
+        if result is not None:
+            return result
+    return Resolution(
+        url=url,
+        type="error",
+        ingestable=False,
+        note=f"No rule matched URL: {url}",
+    )
+
+
 class RoutingFetcher(ContentFetcher):
     """Fetcher that dispatches to specific fetchers based on canonical key prefix.
 
@@ -158,7 +230,13 @@ class RoutingFetcher(ContentFetcher):
             return HttpFetcher()
         return HttpFetcher()
 
+    def _preprocess_url(self, url: str) -> str:
+        """Apply resolution rules and return the direct URL if applicable."""
+        resolution = resolve_url(url)
+        return resolution.direct_url or url
+
     def fetch(self, url: str) -> FetchResult:
+        url = self._preprocess_url(url)
         from memex.canonical_key import canonical_key
         ckey = canonical_key(url)
         fetcher = self._select(ckey)

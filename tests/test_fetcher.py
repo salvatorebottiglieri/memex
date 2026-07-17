@@ -346,3 +346,71 @@ class TestYouTubeTranscriptFetcher:
                 f = YouTubeTranscriptFetcher(vault_path=str(tmp_path))
                 with pytest.raises(FetchError, match="youtube-transcript-api"):
                     f.fetch("https://www.youtube.com/watch?v=abc123")
+# ── Resolution rules ──────────────────────────────────────────────
+
+
+class TestArxivRule:
+    def test_matches_arxiv_abs_url(self):
+        from memex.fetcher import ArxivRule
+        rule = ArxivRule()
+        result = rule.match("https://arxiv.org/abs/2304.12345")
+        assert result is not None
+        assert result.type == "arxiv"
+        assert result.ingestable is True
+        assert result.direct_url == "https://arxiv.org/pdf/2304.12345"
+
+    def test_does_not_match_arxiv_pdf_url(self):
+        from memex.fetcher import ArxivRule
+        rule = ArxivRule()
+        result = rule.match("https://arxiv.org/pdf/2304.12345")
+        assert result is None
+
+    def test_does_not_match_plain_http(self):
+        from memex.fetcher import ArxivRule
+        rule = ArxivRule()
+        result = rule.match("https://example.com/article")
+        assert result is None
+
+
+class TestDefaultRule:
+    def test_matches_any_http_url(self):
+        from memex.fetcher import DefaultRule
+        rule = DefaultRule()
+        result = rule.match("https://example.com/article")
+        assert result is not None
+        assert result.type == "web"
+        assert result.ingestable is True
+        assert result.fetcher == "HttpFetcher"
+
+    def test_matches_any_https_url(self):
+        from memex.fetcher import DefaultRule
+        rule = DefaultRule()
+        result = rule.match("https://arxiv.org/pdf/2304.12345")
+        assert result is not None
+        assert result.type == "web"
+
+    def test_does_not_match_ftp(self):
+        from memex.fetcher import DefaultRule
+        rule = DefaultRule()
+        result = rule.match("ftp://example.com/file")
+        assert result is None
+
+
+class TestResolveUrl:
+    def test_resolve_arxiv_url(self):
+        from memex.fetcher import resolve_url
+        result = resolve_url("https://arxiv.org/abs/2304.12345")
+        assert result.type == "arxiv"
+        assert result.direct_url == "https://arxiv.org/pdf/2304.12345"
+
+    def test_resolve_web_url(self):
+        from memex.fetcher import resolve_url
+        result = resolve_url("https://example.com/article")
+        assert result.type == "web"
+        assert result.ingestable is True
+
+    def test_resolve_non_http_url_returns_error_type(self):
+        from memex.fetcher import resolve_url
+        result = resolve_url("ftp://example.com/file")
+        assert result.type == "error"
+        assert result.ingestable is False
