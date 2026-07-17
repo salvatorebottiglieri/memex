@@ -329,6 +329,45 @@ def resolve_agent(url: str | None) -> None:
         _fail(str(e))
 
 
+@cli.command("cookies-export")
+@click.argument("domain", default="x.com")
+@click.option("--output", "-o", default=None, help="Output file (default: stdout)")
+def cookies_export(domain: str, output: str | None) -> None:
+    """Export cookies for a domain (e.g. x.com) to use with resolve-agent.
+
+    Opens a headless browser; login if needed, then cookies are saved.
+    Compatible with MEMEX_COOKIES_FILE env var.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        _fail("Playwright is required: pip install playwright && playwright install chromium")
+
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            ctx = browser.new_context()
+            page = ctx.new_page()
+            click.echo(f"Navigating to https://{domain}...", err=True)
+            page.goto(f"https://{domain}", wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_timeout(3000)
+            click.echo(f"Current URL: {page.url}", err=True)
+            click.echo("If login is required, login now, then press Enter here...", err=True)
+            input()
+            page.wait_for_timeout(2000)
+            cookies = ctx.cookies()
+            browser.close()
+            import json as _json
+            data = _json.dumps(cookies, indent=2)
+            if output:
+                Path(output).write_text(data)
+                click.echo(json.dumps({"status": "saved", "file": output, "count": len(cookies)}))
+            else:
+                click.echo(data)
+    except Exception as e:
+        _fail(str(e))
+
+
 @cli.command("list")
 @_db_options
 @click.option(

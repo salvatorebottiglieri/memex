@@ -30,6 +30,87 @@ class Resolver(ABC):
         """Return True if this resolver's CLI is installed."""
 
 
+
+class PlaywrightResolver(Resolver):
+    """Resolver that uses Playwright (headless Chromium) to resolve URLs.
+
+    Opens the URL in a headless browser, waits for the page, and extracts
+    the actual content URL from meta tags (og:url, twitter:url) or redirects.
+    """
+
+    @classmethod
+    def available(cls) -> bool:
+        try:
+            import playwright  # noqa: F401
+            return True
+        except ImportError:
+            return False
+    def resolve(self, url: str) -> str:
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            raise ResolverError("Playwright is not installed")
+
+        try:
+            cookies_file = os.environ.get("MEMEX_COOKIES_FILE")
+            with sync_playwright() as pw:
+                browser = pw.chromium.launch(headless=True)
+                ctx = browser.new_context()
+
+                if cookies_file and os.path.isfile(cookies_file):
+                    import json as _json
+                    try:
+                        with open(cookies_file) as f:
+                            cookies = _json.load(f)
+                            ctx.add_cookies(cookies if isinstance(cookies, list) else [cookies])
+                    except Exception as e:
+                        raise ResolverError(f"Failed to load cookies from {cookies_file}: {e}")
+
+                page = ctx.new_page()
+                page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                page.wait_for_timeout(2000)
+
+                resolved = page.evaluate("""() => {
+                    const skipDomains = ['x.com', 'twitter.com', 'facebook.com', 'instagram.com', 'tiktok.com'];
+                    const isSocial = (u) => skipDomains.some(d => u.includes(d));
+                    const cur = document.URL.toLowerCase();
+                    if (cur.includes('/login') || cur.includes('/onboarding') || cur.includes('/auth')) {
+                        return '__LOGIN_REQUIRED__';
+                    }
+                    const og = document.querySelector('meta[property="og:url"]');
+                    if (og && !isSocial(og.content)) return og.content;
+                    const tw = document.querySelector('meta[name="twitter:url"]');
+                    if (tw && !isSocial(tw.content)) return tw.content;
+                    for (const a of document.querySelectorAll('a[href*="t.co/"]')) {
+                        if (a.href.startsWith('http')) return a.href;
+                    }
+                    for (const a of document.querySelectorAll('a[href]')) {
+                        const h = a.href;
+                        if (h.startsWith('http') && !isSocial(h) && !h.includes('/intent/')) return h;
+                    }
+                    return document.URL;
+                }""")
+
+                final_url = page.url
+                browser.close()
+
+                if resolved == '__LOGIN_REQUIRED__':
+                    msg = "Login required."
+                    if not cookies_file:
+                        msg += " Set MEMEX_COOKIES_FILE to a cookies.json file with your session."
+                    else:
+                        msg += f" Cookies from {cookies_file} expired or invalid."
+                    raise ResolverError(msg)
+
+                result = resolved or final_url
+                if result.startswith(("http://", "https://")):
+                    return result
+                raise ResolverError(f"No valid URL extracted from {url}")
+        except ResolverError:
+            raise
+        except Exception as e:
+            raise ResolverError(str(e))
+
 class PiResolver(Resolver):
     """Resolver that uses the Pi agent CLI (non-interactive mode)."""
 
@@ -60,7 +141,6 @@ class PiResolver(Resolver):
         except FileNotFoundError:
             raise ResolverError("Pi CLI not found")
 
-
 class _CustomResolver(Resolver):
     """Resolver from MEMEX_RESOLVER_CMD env var."""
 
@@ -87,8 +167,7 @@ class _CustomResolver(Resolver):
             raise ResolverError("Custom resolver not found")
 
 
-# Registry: first available wins
-_RESOLVERS: list[type[Resolver]] = [PiResolver]
+_RESOLVERS: list[type[Resolver]] = [PlaywrightResolver, PiResolver]
 
 
 def detect_resolver() -> Resolver | None:
