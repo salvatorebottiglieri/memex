@@ -169,6 +169,28 @@ class DemoAgent:
             ],
         )
 
+    def generate_title(self, content: str, url: str) -> str | None:
+        """Infer a human-readable title from content and URL."""
+        return None
+
+    def review(
+        self, target_content: str, asserting_content: str, edge_payload: dict
+    ) -> ReviewProposal:
+        """Demo review — returns a no-damage proposal."""
+        return ReviewProposal(
+            affected_node_ids=[],
+            damage_boundary_node_id=None,
+            rationale="Demo agent: no review logic available.",
+        )
+
+    def extract_ideas(self, content: str) -> list[str]:
+        """Extract 3-5 key ideas from content. Demo returns a default set."""
+        return [
+            "The article discusses its topic.",
+            "Key patterns are identified.",
+            "Implications are explored.",
+        ]
+
 class AnthropicAgent(Agent):
     """Real Anthropic-backed agent using structured JSON output."""
 
