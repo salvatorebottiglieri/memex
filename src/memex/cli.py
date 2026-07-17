@@ -278,7 +278,7 @@ def resolve(url: str | None) -> None:
 
     Returns the type, ingestability, and direct_url (if applicable).
     """
-    if url is None:
+    if not url:
         _fail("Missing required argument 'URL'.")
     from memex.fetcher import resolve_url
     result = resolve_url(url)

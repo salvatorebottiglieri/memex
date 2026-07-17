@@ -372,6 +372,65 @@ class TestArxivRule:
         assert result is None
 
 
+class TestMediaRule:
+    def test_matches_jpg_url(self):
+        from memex.fetcher import MediaRule
+        rule = MediaRule()
+        result = rule.match("https://example.com/photo.jpg")
+        assert result is not None
+        assert result.ingestable is False
+        assert result.type == "unknown"
+
+    def test_matches_png_url(self):
+        from memex.fetcher import MediaRule
+        rule = MediaRule()
+        result = rule.match("https://example.com/image.png")
+        assert result is not None
+        assert result.ingestable is False
+
+    def test_matches_mp4_url(self):
+        from memex.fetcher import MediaRule
+        rule = MediaRule()
+        result = rule.match("https://example.com/video.mp4")
+        assert result is not None
+        assert result.ingestable is False
+
+    def test_matches_mp3_url(self):
+        from memex.fetcher import MediaRule
+        rule = MediaRule()
+        result = rule.match("https://example.com/audio.mp3")
+        assert result is not None
+        assert result.ingestable is False
+
+    def test_does_not_match_article_url(self):
+        from memex.fetcher import MediaRule
+        rule = MediaRule()
+        result = rule.match("https://example.com/article")
+        assert result is None
+
+    def test_does_not_match_url_with_extension_in_query(self):
+        from memex.fetcher import MediaRule
+        rule = MediaRule()
+        result = rule.match("https://example.com/page?file=photo.jpg")
+        assert result is None
+
+
+class TestXTwitterRule:
+    def test_matches_x_com(self):
+        from memex.fetcher import MediaRule
+        rule = MediaRule()
+        result = rule.match("https://x.com/user/status/123")
+        assert result is not None
+        assert result.ingestable is False
+        assert result.note is not None
+
+    def test_matches_twitter_com(self):
+        from memex.fetcher import MediaRule
+        rule = MediaRule()
+        result = rule.match("https://twitter.com/user/status/123")
+        assert result is not None
+        assert result.ingestable is False
+
 class TestDefaultRule:
     def test_matches_any_http_url(self):
         from memex.fetcher import DefaultRule
@@ -499,3 +558,21 @@ class TestResolveUrl:
         result = resolve_url("ftp://example.com/file")
         assert result.type == "error"
         assert result.ingestable is False
+
+class TestResolveUrlTracking:
+    def test_resolve_strips_utm_params(self):
+        from memex.fetcher import resolve_url
+        result = resolve_url("https://example.com/article?utm_source=twitter&utm_campaign=test")
+        assert result.type == "web"
+        assert result.ingestable is True
+
+    def test_resolve_strips_fbclid(self):
+        from memex.fetcher import resolve_url
+        result = resolve_url("https://example.com/article?fbclid=abc123")
+        assert result.type == "web"
+
+    def test_resolve_keeps_non_tracking_params(self):
+        from memex.fetcher import resolve_url
+        result = resolve_url("https://arxiv.org/abs/2304.12345?foo=bar")
+        assert result.type == "arxiv"
+        assert result.direct_url == "https://arxiv.org/pdf/2304.12345"

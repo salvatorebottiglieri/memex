@@ -215,6 +215,41 @@ class WikipediaRule(ResolutionRule):
         return None
 
 
+class MediaRule(ResolutionRule):
+    """Rule that matches URLs ending in media extensions or pointing to X/Twitter — not ingestable as text."""
+
+    _MEDIA_EXTENSIONS = (
+        ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".ico", ".bmp",
+        ".mp4", ".webm", ".avi", ".mov", ".mkv",
+        ".mp3", ".wav", ".ogg", ".flac",
+    )
+
+    def match(self, url: str) -> Resolution | None:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        path = parsed.path.lower()
+        host = parsed.hostname or ""
+
+        # Check for X/Twitter URLs
+        if host in ("x.com", "twitter.com"):
+            return Resolution(
+                url=url,
+                type="unknown",
+                ingestable=False,
+                note="URL da social media: richiede browser per estrarre il link target",
+            )
+
+        # Check for media file extensions
+        if any(path.endswith(ext) for ext in self._MEDIA_EXTENSIONS):
+            return Resolution(
+                url=url,
+                type="unknown",
+                ingestable=False,
+                note="URL punta a un file multimediale (immagine/video/audio). memex supporta solo fonti testuali.",
+            )
+
+        return None
+
 class DefaultRule(ResolutionRule):
     """Fallback rule: matches any http/https URL as a generic web page."""
 
@@ -229,15 +264,39 @@ class DefaultRule(ResolutionRule):
         return None
 
 
-# Rule registry: first match wins
-_rules: list[ResolutionRule] = [ArxivRule(), GitHubBlobRule(), WikipediaRule(), DefaultRule()]
+_rules: list[ResolutionRule] = [ArxivRule(), GitHubBlobRule(), WikipediaRule(), MediaRule(), DefaultRule()]
+
+
+def _strip_tracking_params(url: str) -> str:
+    """Remove common tracking query parameters from a URL."""
+    from urllib.parse import urlencode, urlparse, urlunparse
+
+    parsed = urlparse(url)
+    if not parsed.query:
+        return url
+    params = dict(p.split("=", 1) for p in parsed.query.split("&") if p)
+    _TRACKING_EXACT = frozenset({"fbclid", "gclid", "ref", "source", "mc_cid", "mc_eid"})
+    clean = {k: v for k, v in params.items() if not k.startswith("utm_") and k not in _TRACKING_EXACT}
+    if len(clean) == len(params):
+        return url
+    return urlunparse(parsed._replace(query=urlencode(clean)))
 
 
 def resolve_url(url: str) -> Resolution:
-    """Apply resolution rules and return the first match."""
+    """Apply resolution rules and return the first match.
+
+    Tracking parameters are stripped before classification.
+    """
+    clean_url = _strip_tracking_params(url)
     for rule in _rules:
-        result = rule.match(url)
+        result = rule.match(clean_url)
         if result is not None:
+            if result.direct_url:
+                result = Resolution(
+                    url=url, type=result.type, ingestable=result.ingestable,
+                    fetcher=result.fetcher, direct_url=result.direct_url,
+                    note=result.note,
+                )
             return result
     return Resolution(
         url=url,
