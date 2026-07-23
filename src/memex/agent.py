@@ -76,6 +76,30 @@ _DERIVE_SYSTEM_PROMPT = (
 _DERIVE_USER_TEMPLATE = "# Source material\n\n{content}\n"
 
 
+_VERIFY_QUALITY_PROMPT = """\
+You are an adversarial validator for a personal knowledge graph (memex).
+Your job is to be CRITICAL: a derivation must genuinely re-elaborate its source.
+If the derivation is generic boilerplate, you must reject it.
+
+SOURCE (the original material):
+{parent_content}
+
+DERIVATION (the proposed summary):
+{derivation_prose}
+
+SYNTHESIS STATEMENTS (inferences beyond the source):
+{statements}
+
+Does this derivation meaningfully re-elaborate the source? Be strict.
+A PASSING derivation references specific concepts, claims, or data from the source.
+A FAILING derivation uses generic phrases like "the article discusses", "the author covers",
+"the topic at hand" — boilerplate that could apply to ANY source.
+
+Answer with exactly the JSON object (no other text):
+{{"passes": true}} or {{"passes": false}}
+"""
+
+
 def _parse_derive_response(raw: str) -> tuple[str, list[str]]:
     """Parse an LLM response into (prose, synthesis_statements).
 
@@ -110,6 +134,62 @@ def _parse_derive_response(raw: str) -> tuple[str, list[str]]:
         return text, [s.strip() for s in statements]
 
     return text, []
+
+
+def validate_derivation(
+    agent: object,
+    parent_content: str,
+    derivation: DerivationResult,
+) -> tuple[bool, str | None]:
+    """Adversarial validation: check if derivation genuinely re-elaborates parent.
+
+    Returns (bool, str | None):
+      (True, None) — clean pass
+      (False, None) — clean fail (validator rejected)
+      (True, "warning message") — pass but validator had issues
+
+    The validation agent is a *separate* agent from the one that produced the
+    derivation (impartial judge). The prompt asks it to be critical.
+
+    DemoAgent: always returns (True, None) (passes everything, for tests).
+    PiAgent/OMPAgent: calls the LLM with an adversarial prompt.
+    Unknown agents: pass (no validation).
+    """
+    # DemoAgent / mock: no real validation, always pass
+    if isinstance(agent, DemoAgent):
+        return True, None
+
+    # Agents with call_llm: adversarial LLM call
+    call = getattr(agent, "call_llm", None)
+    if call is None:
+        return True, None  # Unknown agent type, skip validation
+
+    statements = "\n".join(f"- {s}" for s in derivation.synthesis_statements)
+    try:
+        prompt = _VERIFY_QUALITY_PROMPT.format(
+            parent_content=parent_content,
+            derivation_prose=derivation.prose,
+            statements=statements,
+        )
+    except (KeyError, ValueError, AttributeError):
+        return True, "Validator prompt formatting failed, validation skipped"
+    try:
+        raw = call(prompt)
+    except Exception:
+        return True, "Validator LLM call failed, validation skipped"
+
+    import json as _json
+
+    try:
+        data = _json.loads(raw)
+    except (ValueError, TypeError, _json.JSONDecodeError):
+        return True, "Validator response parse failed, validation skipped"
+
+    if not isinstance(data, dict) or "passes" not in data:
+        return True, "Validator response missing 'passes' field, validation skipped"
+
+    return bool(data["passes"]), None
+
 
 @dataclass
 class ReviewProposal:
@@ -168,6 +248,23 @@ class DemoAgent:
                 "The author implies a broader pattern beyond what is stated directly."
             ],
         )
+
+    def review(self, target_content: str, asserting_content: str, edge_payload: dict) -> ReviewProposal:
+        """Demo review: always returns high confidence, marks unaffected."""
+        return ReviewProposal(
+            affected_node_ids=[],
+            damage_boundary_node_id=None,
+            rationale_md="Demo review: no contestation analysis performed.",
+            confidence="high",
+        )
+
+    def generate_title(self, content: str, url: str) -> str | None:
+        """Demo: no title generation."""
+        return None
+
+    def extract_ideas(self, content: str) -> list[str]:
+        """Demo: returns canned ideas."""
+        return ["Key idea 1", "Key idea 2", "Key idea 3"]
 
 class AnthropicAgent(Agent):
     """Real Anthropic-backed agent using structured JSON output."""
@@ -300,7 +397,7 @@ class PiAgent(Agent):
 
     _cli_cmd = "pi"
 
-    def _call_pi(self, prompt: str) -> str:
+    def call_llm(self, prompt: str) -> str:
         import json as _json
         import subprocess as _sp
 
@@ -344,7 +441,7 @@ class PiAgent(Agent):
 
     def derive(self, content: str) -> DerivationResult:
         prompt = _DERIVE_SYSTEM_PROMPT + "\n\n" + _DERIVE_USER_TEMPLATE.format(content=content)
-        raw = self._call_pi(prompt)
+        raw = self.call_llm(prompt)
         prose, statements = _parse_derive_response(raw)
         return DerivationResult(prose=prose, synthesis_statements=statements)
 
@@ -355,7 +452,7 @@ class PiAgent(Agent):
             "key ideas or concepts. Return ONLY a JSON array of strings, each 5-15 words.\n\n"
             f"Source material:\n\n{content}"
         )
-        raw = self._call_pi(prompt)
+        raw = self.call_llm(prompt)
         import json as _json
         import re as _re
         # Strip markdown code fences (```json ... ```) that omp/Pi may wrap around JSON
@@ -383,7 +480,7 @@ class PiAgent(Agent):
             f"Asserting content:\n{asserting_content}\n\n"
             f"Edge payload: {edge_payload}"
         )
-        raw = self._call_pi(prompt)
+        raw = self.call_llm(prompt)
         import json as _json
         try:
             data = _json.loads(raw)
@@ -419,7 +516,7 @@ class OMPAgent(PiAgent):
 
     _cli_cmd = "omp"
 
-    def _call_pi(self, prompt: str) -> str:
+    def call_llm(self, prompt: str) -> str:
         import json as _json
         import subprocess as _sp
 

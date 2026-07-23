@@ -13,7 +13,7 @@ from pathlib import Path
 import click
 
 from memex.canonical_key import canonical_key
-from memex.ingester import ingest_single_url
+from memex.ingester import extract_single_url
 import functools
 
 
@@ -154,7 +154,6 @@ def status(db_path: Path, vault_path: Path) -> None:
 
 @cli.command()
 @_db_options
-@click.argument("url", required=False, default=None)
 @click.option(
     "--inbox",
     "inbox_path",
@@ -169,35 +168,30 @@ def status(db_path: Path, vault_path: Path) -> None:
     default=False,
     help="Ingest all pending inbox items (captured but not yet in the ledger).",
 )
-def ingest(db_path: Path, vault_path: Path, url: str | None, inbox_path: Path | None,
+def ingest(db_path: Path, vault_path: Path, inbox_path: Path | None,
            from_inbox: bool) -> None:
-    """Ingest a URL, a WhatsApp inbox export, or pending inbox items.
+    """Ingest from an inbox source (WhatsApp export or pending items).
 
-    Single URL:   memex ingest --db DB --vault V <url>
     WhatsApp file: memex ingest --db DB --vault V --inbox <file>
     Inbox flush:  memex ingest --db DB --vault V --from-inbox
 
-    Idempotent — running twice with the same (canonical) URL yields one node.
-    A fetch failure is recorded and does not crash the run.
+    For direct URL ingestion use ``memex extract <url>``.
     """
     from memex.agent import load_agent
     from memex.fetcher import load_fetcher
     from memex.store import Store
     from memex.whatsapp_source import parse_whatsapp_export
 
-    if not from_inbox and url is None and inbox_path is None:
+    if not from_inbox and inbox_path is None:
         raise click.UsageError(
-            "Provide a URL argument, --inbox <file>, or --from-inbox."
+            "Provide --inbox <file> or --from-inbox."
         )
 
-    
     fetcher = load_fetcher(os.environ.get("MEMEX_FETCHER_MODULE"), vault_path=str(vault_path))
-
     title_agent = load_agent(os.environ.get("MEMEX_AGENT"))
- 
+
     with Store.open(db_path) as store:
         if from_inbox:
-            # ── From-inbox: ingest all pending inbox items ───────
             ingested_keys = store.list_ingested_canonical_keys()
             inbox_items = list(store.list_inbox())
             total = len(inbox_items)
@@ -205,13 +199,13 @@ def ingest(db_path: Path, vault_path: Path, url: str | None, inbox_path: Path | 
             for i, item in enumerate(inbox_items, start=1):
                 ckey = canonical_key(item["url"])
                 if ckey not in ingested_keys:
-                    result = ingest_single_url(store, vault_path, item["url"], fetcher)
-                    if not result.get("title") and title_agent and result.get("status") == "ingested" and result.get("content_path"):
+                    result = extract_single_url(store, vault_path, item["url"], fetcher)
+                    if not result.get("title") and title_agent and result.get("status") == "extracted" and result.get("content_path"):
                         cp = Path(result["content_path"])
                         if cp.exists():
                             t = title_agent.generate_title(cp.read_text(encoding="utf-8"), item["url"])
                             if t:
-                                store.update_source_title(result["id"], t)
+                                store.update_source_title(result.get("url_node_id"), t)
                                 result["title"] = t
                     results.append(result)
                     if result.get("canonical_key"):
@@ -226,12 +220,11 @@ def ingest(db_path: Path, vault_path: Path, url: str | None, inbox_path: Path | 
                     results.append(result)
                 click.echo(f"[{i}/{total}] {result.get('status','?')}  {item['url']}", err=True)
             click.echo(json.dumps(results))
-        elif inbox_path is not None:
+        else:
             source_name = f"whatsapp:{inbox_path}"
             export_text = inbox_path.read_text(encoding="utf-8")
             all_items = list(parse_whatsapp_export(export_text))
 
-            # Read cursor — last processed message index (0-based)
             cursor_str = store.get_cursor(source_name)
             cursor_index = int(cursor_str) if cursor_str is not None else 0
             new_items = all_items[cursor_index:]
@@ -239,37 +232,49 @@ def ingest(db_path: Path, vault_path: Path, url: str | None, inbox_path: Path | 
             total = len(new_items)
             results = []
             for i, item in enumerate(new_items, start=1):
-                result = ingest_single_url(
+                result = extract_single_url(
                     store, vault_path, item["url"], fetcher,
                     source_name=source_name,
                     item_timestamp=item["timestamp"],
                     item_note=item.get("note"),
                 )
-                if not result.get("title") and title_agent and result.get("status") == "ingested" and result.get("content_path"):
+                if not result.get("title") and title_agent and result.get("status") == "extracted" and result.get("content_path"):
                     cp = Path(result["content_path"])
                     if cp.exists():
                         t = title_agent.generate_title(cp.read_text(encoding="utf-8"), item["url"])
                         if t:
-                            store.update_source_title(result["id"], t)
+                            store.update_source_title(result.get("url_node_id"), t)
                             result["title"] = t
                 results.append(result)
                 click.echo(f"[{i}/{total}] {result.get('status','?')}  {item['url']}", err=True)
 
-            # Advance cursor to end of all items seen (idempotent re-runs)
             store.set_cursor(source_name, str(len(all_items)))
 
             click.echo(json.dumps(results))
-        else:
-            result = ingest_single_url(store, vault_path, url, fetcher)
-            if not result.get("title") and title_agent and result.get("status") == "ingested" and result.get("content_path"):
-                cp = Path(result["content_path"])
-                if cp.exists():
-                    t = title_agent.generate_title(cp.read_text(encoding="utf-8"), url)
-                    if t:
-                        store.update_source_title(result["id"], t)
-                        result["title"] = t
-            click.echo(json.dumps(result))
 
+
+
+@cli.command()
+@_db_options
+@click.argument("url")
+def extract(db_path: Path, vault_path: Path, url: str) -> None:
+    """Fetch a URL and store it as URL-node + extracted-node.
+
+    Replaces the old ``memex ingest <url>``. Creates a URL-node
+    (identity anchor, no content) and an extracted-node (content-bearing,
+    tier='extracted') with a provenance edge.
+
+    Idempotent — running twice with the same URL yields one result.
+    """
+    from memex.fetcher import load_fetcher
+    from memex.store import Store
+
+    fetcher = load_fetcher(os.environ.get("MEMEX_FETCHER_MODULE"), vault_path=str(vault_path))
+
+    with Store.open(db_path) as store:
+        result = extract_single_url(store, vault_path, url, fetcher)
+
+    click.echo(json.dumps(result))
 
 @cli.command("list")
 @_db_options
@@ -355,7 +360,7 @@ def show(db_path: Path, vault_path: Path, node_id: str) -> None:
 @cli.command()
 @_db_options
 @click.argument("node_id", required=False)
-@click.option("--all", "derive_all", is_flag=True, default=False, help="Derive all un-derived L0 nodes.")
+@click.option("--all", "derive_all", is_flag=True, default=False, help="Derive all un-derived extracted/L0 nodes.")
 @click.option("--limit", "limit", default=10, type=int, help="Max derivations per run (default 10).")
 def derive(db_path: Path, vault_path: Path, node_id: str | None = None,
            derive_all: bool = False, limit: int = 10) -> None:
@@ -482,22 +487,41 @@ def _do_derive(store, vault_path, l0_id, l0_content, agent, use_retry=False):
 
     deriv_fn = lambda: agent.derive(l0_content)
     deriv = call_with_retry(deriv_fn) if use_retry else agent.derive(l0_content)
-
     deriv_id = str(uuid.uuid4())
+
+    # ── Adversarial validation gate ──────────────────────────────────
+    import os as _os
+    from memex.agent import validate_derivation, load_agent as _load_agent
+    validator_path = _os.environ.get("MEMEX_VALIDATOR")
+    if validator_path:
+        validator = _load_agent(validator_path)
+        passes, warning = validate_derivation(validator, l0_content, deriv)
+        if warning:
+            click.echo(json.dumps({"validator_warning": warning}), err=True)
+        if not passes:
+            return {
+                "status": "quality_failed",
+                "reason": "Derivation does not meaningfully re-elaborate the source material.",
+                "l0_node_id": l0_id,
+            }
+    # ──────────────────────────────────────────────────────────────────
+
     vault_path.mkdir(parents=True, exist_ok=True)
     # Extract heading from prose for human-readable filename
     first_line = deriv.prose.split('\n')[0].strip()
     head_name = first_line.lstrip('# ').strip().strip('"').strip("'") or deriv_id
     md_path = _human_path(vault_path, head_name)
     md_path.write_text(deriv.prose, encoding="utf-8")
-
     now = datetime.now(timezone.utc).isoformat()
+    # Compute depth from parent node
+    parent = store.get_node(l0_id)
+    parent_depth = parent["depth"] if parent else 0
     store.create_node(
         node_id=deriv_id,
         kind="summary",
         tier="notes",
         trust_state="draft",
-        depth=1,
+        depth=parent_depth + 1,
         content_path=str(md_path),
         created_at=now,
         synthesis_statements=deriv.synthesis_statements,
@@ -558,8 +582,25 @@ def _do_synthesize(store, vault_path, parent_ids, agent):
     combined_content = "\n\n---\n\n".join(contents)
     deriv_fn = lambda: agent.derive(combined_content)
     deriv = call_with_retry(deriv_fn)
-
     deriv_id = str(uuid.uuid4())
+
+    # ── Adversarial validation gate ──────────────────────────────────
+    import os as _os
+    from memex.agent import validate_derivation, load_agent as _load_agent
+    validator_path = _os.environ.get("MEMEX_VALIDATOR")
+    if validator_path:
+        validator = _load_agent(validator_path)
+        passes, warning = validate_derivation(validator, combined_content, deriv)
+        if warning:
+            click.echo(json.dumps({"validator_warning": warning}), err=True)
+        if not passes:
+            return {
+                "status": "quality_failed",
+                "reason": "Synthesis does not meaningfully re-elaborate the source material.",
+                "parent_ids": list(parent_ids),
+            }
+    # ──────────────────────────────────────────────────────────────────
+
     vault_path.mkdir(parents=True, exist_ok=True)
     # Extract heading from prose for human-readable filename
     first_line = deriv.prose.split('\n')[0].strip()
@@ -638,7 +679,7 @@ def _derive_all(db_path: Path, vault_path: Path, limit: int) -> None:
         all_nodes = store.list_nodes()
         un_derived = []
         for node in all_nodes:
-            if node.get("kind") != "raw_source":
+            if node.get("kind") != "extracted":
                 continue
             if store.find_derived_from(node["id"]) is not None:
                 continue
@@ -651,7 +692,7 @@ def _derive_all(db_path: Path, vault_path: Path, limit: int) -> None:
         # Report already-derived L0s
         seen_derived = set()
         for node in all_nodes:
-            if node.get("kind") != "raw_source":
+            if node.get("kind") != "extracted":
                 continue
             existing = store.find_derived_from(node["id"])
             if existing is not None:
@@ -664,7 +705,7 @@ def _derive_all(db_path: Path, vault_path: Path, limit: int) -> None:
         # Derive un-derived L0s
         count = 0
         for node in all_nodes:
-            if node.get("kind") != "raw_source":
+            if node.get("kind") != "extracted":
                 continue
             if node["id"] in seen_derived:
                 continue
@@ -779,10 +820,10 @@ def search(db_path: Path, vault_path: Path, query: str) -> None:
     click.echo(json.dumps(list(by_l0.values())))
 
 
-@cli.command()
+@cli.command("extract-ideas")
 @_db_options
 @click.argument("node_id")
-def extract(db_path: Path, vault_path: Path, node_id: str) -> None:
+def extract_ideas(db_path: Path, vault_path: Path, node_id: str) -> None:
     """Extract key ideas from a node. Uses LLM agent. Idempotent — re-run replaces ideas."""
     from memex.agent import load_agent
     from memex.store import Store

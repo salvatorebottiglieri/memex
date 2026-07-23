@@ -20,7 +20,7 @@ FAKE_THROWS_AGENT = "tests.fake_llm_client_throws:FakeLLMClientThrows"
 
 def _ingest(store, url: str) -> dict:
     result = _run_memex(
-        ["ingest", "--db", str(store["db"]), "--vault", str(store["vault"]), url],
+        ["extract", "--db", str(store["db"]), "--vault", str(store["vault"]), url],
         env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
     )
     assert result.returncode == 0, result.stderr
@@ -53,7 +53,6 @@ class TestDerive:
         result = _derive(store, ingested["id"])
         deriv_id = json.loads(result.stdout)["id"]
 
-        import sqlite3
         con = sqlite3.connect(store["db"])
         row = con.execute(
             "SELECT kind, tier, trust_state, depth FROM node WHERE id = ?", (deriv_id,)
@@ -65,7 +64,7 @@ class TestDerive:
         assert kind == "summary"
         assert tier == "notes"
         assert trust_state == "auto-verified"
-        assert depth == 1
+        assert depth == 2
 
     def test_derive_inserts_provenance_edge(self, store):
         ingested = _ingest(store, "https://example.com/article")
@@ -73,7 +72,6 @@ class TestDerive:
         result = _derive(store, l0_id)
         deriv_id = json.loads(result.stdout)["id"]
 
-        import sqlite3
         con = sqlite3.connect(store["db"])
         row = con.execute(
             "SELECT type, relation, from_node, to_node FROM edge "
@@ -115,7 +113,6 @@ class TestDerive:
         second_data = json.loads(second.stdout)
         assert second_data["status"] == "already_derived"
 
-        import sqlite3
         con = sqlite3.connect(store["db"])
         node_count = con.execute(
             "SELECT COUNT(*) FROM node WHERE kind = 'summary' AND tier = 'notes'"
@@ -153,7 +150,7 @@ class TestDeriveAll:
         results = []
         for i in range(n):
             result = _run_memex(
-                ["ingest", "--db", str(store["db"]), "--vault", str(store["vault"]),
+                ["extract", "--db", str(store["db"]), "--vault", str(store["vault"]),
                  f"https://example.com/{prefix}-{i}"],
                 env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
             )
@@ -351,7 +348,6 @@ class TestSearch:
         assert json.loads(result.stdout) == []
 
     def test_search_is_readonly(self, store):
-        import sqlite3
         ingested = _ingest(store, "https://example.com/article")
         _derive(store, ingested["id"])
 
@@ -376,3 +372,69 @@ class TestSearch:
         result = self._search(store, "broader pattern")
         data = json.loads(result.stdout)
         assert data[0]["l0_node_id"] == l0_id
+
+
+class TestDeriveQualityGate:
+    """Integration tests for the adversarial validation gate in _do_derive.
+
+    Validator is injected via MEMEX_VALIDATOR env var.
+    """
+
+    FAKE_VALIDATOR_FAILS = "tests.fake_validator_fails:FakeValidatorFails"
+    FAKE_VALIDATOR_WARNS = "tests.fake_validator_warns:FakeValidatorWarns"
+
+    def test_no_validator_proceeds(self, store):
+        """No MEMEX_VALIDATOR set -> derive proceeds normally (no regression)."""
+        ingested = _ingest(store, "https://example.com/article")
+        result = _derive(store, ingested["id"])
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        assert data["status"] == "derived"
+
+    def test_fake_agent_validator_skips(self, store):
+        """MEMEX_VALIDATOR=FakeAgent (no call_llm) -> validation skipped, derive proceeds."""
+        ingested = _ingest(store, "https://example.com/article")
+        result = _run_memex(
+            ["derive", "--db", str(store["db"]), "--vault", str(store["vault"]), ingested["id"]],
+            env={"MEMEX_AGENT": FAKE_AGENT, "MEMEX_VALIDATOR": FAKE_AGENT},
+        )
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        assert data["status"] == "derived"
+
+    def test_failing_validator_rejects(self, store):
+        """Validator rejects -> quality_failed, no node or edge created."""
+        ingested = _ingest(store, "https://example.com/article")
+        result = _run_memex(
+            ["derive", "--db", str(store["db"]), "--vault", str(store["vault"]), ingested["id"]],
+            env={"MEMEX_AGENT": FAKE_AGENT, "MEMEX_VALIDATOR": self.FAKE_VALIDATOR_FAILS},
+        )
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        assert data["status"] == "quality_failed"
+        assert "Derivation does not meaningfully re-elaborate" in data["reason"]
+        assert data["l0_node_id"] == ingested["id"]
+        # Verify no notes-tier summary node was created
+        conn = sqlite3.connect(store["db"])
+        try:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM node WHERE kind = 'summary' AND tier = 'notes'"
+            ).fetchone()[0]
+            assert count == 0, f"Expected 0 summary nodes, got {count}"
+        finally:
+            conn.close()
+
+    def test_warning_validator_proceeds_with_warning(self, store):
+        """Validator warns -> derive proceeds but warning on stderr."""
+        ingested = _ingest(store, "https://example.com/article")
+        result = _run_memex(
+            ["derive", "--db", str(store["db"]), "--vault", str(store["vault"]), ingested["id"]],
+            env={"MEMEX_AGENT": FAKE_AGENT, "MEMEX_VALIDATOR": self.FAKE_VALIDATOR_WARNS},
+        )
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        assert data["status"] == "derived"
+        # Warning should be on stderr
+        warning = json.loads(result.stderr.strip())
+        assert "validator_warning" in warning
+        assert "Validator LLM call failed" in warning["validator_warning"]
