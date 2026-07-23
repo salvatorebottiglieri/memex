@@ -6,7 +6,7 @@ A personal wiki / second brain.
 
 Inspired by Andrej Karpathy's personal-wiki approach and by `iusztinpaul/ai-research-os-workshop`. Obsidian is a view-only window onto the knowledge, not the engine.
 
-> Status: **ingestion + derivation + rendering + staleness propagation + review layers implemented.** Core CLI operational.
+> Status: **ingestion + derivation + adversarial validation + rendering + staleness propagation + review + resolution implemented.** Core CLI operational.
 
 ## CLI
 
@@ -16,17 +16,20 @@ memex exposes a JSON-only CLI (one command per operation, all output is structur
 |---------|-------------|
 | `memex init` | Create SQLite DB and vault directory (idempotent) |
 | `memex status` | Check if paths exist |
-| `memex ingest <url>` | Fetch URL, store L0 markdown, insert node+source rows (idempotent) |
-| `memex ingest --inbox <file>` | Ingest a WhatsApp `.txt` export, advancing a per-file cursor |
-| `memex ingest --from-inbox` | Flush all pending inbox items into the ledger |
+| `memex extract <url>` | Fetch a URL and store it as URL-node + extracted-node (idempotent, replaces ingest) |
+| `memex extract --inbox <file>` | Extract a WhatsApp `.txt` export, advancing a per-file cursor |
+| `memex extract --from-inbox` | Flush all pending inbox items into the ledger |
 | `memex list [--kind --tier --trust-state --confidence --limit --offset]` | List all nodes with optional filters |
 | `memex list --pending` | List canonical keys captured in inbox but not yet ingested |
 | `memex show <node-id>` | Show node details including L0 content, trust state, check failures |
-| `memex extract <node-id>` | Extract 3-5 key ideas from a node (lightweight, no full derive) |
+| `memex extract-ideas <node-id>` | Extract 3-5 key ideas from a node (lightweight, no full derive) |
 | `memex ideas [query]` | Search across extracted ideas (empty query = all ideas) |
 | `memex derive <node-id>` | Generate a notes-tier derivation from an L0 (agent via `MEMEX_AGENT`) |
 | `memex derive --all [--limit N]` | Batch-derive all un-derived L0 nodes (default limit: 10) |
 | `memex search <query>` | Keyword search over derivations AND L0 metadata (title/URL/key) |
+| `memex resolve [url]` | Resolve a URL through resolution rules (arXiv, GitHub, Wikipedia) |
+| `memex resolve-agent <url>` | Resolve a URL using an external agent (Pi/Claude) with a browser |
+| `memex cookies-export <domain>` | Export cookies for a domain (e.g. x.com) to use with resolve-agent |
 | `memex synthesize <node-id> [<node-id> ...]` | Generate a synthesis-tier derivation from one or more nodes |
 | `memex delete <node-id> [--cascade]` | Remove a node (logical delete, no file removal). Cascade removes descendants |
 | `memex retry <node-id>` | Re-fetch a failed source URL |
@@ -65,10 +68,11 @@ Tests inject fake collaborators without touching network or paying for LLM calls
 
 | Env var | Where | Effect |
 |---|---|---|
-| `MEMEX_FETCHER_MODULE` | `memex ingest` | Replaces the default `RoutingFetcher` with a module:Class string (e.g. `tests.conftest:FakeFetcher`) |
-| `MEMEX_AGENT` | `memex derive`, `extract`, `synthesize`, `review` | Replaces the default `DemoAgent` with a module:Class string (e.g. `tests.fake_llm_client:FakeAgent`, or `memex.agent:OMPAgent`). Omit to use `DemoAgent` (no API key needed, hardcoded output). |
+| `MEMEX_FETCHER_MODULE` | `memex extract` | Replaces the default `RoutingFetcher` with a module:Class string (e.g. `tests.conftest:FakeFetcher`) |
+| `MEMEX_AGENT` | `memex derive`, `extract-ideas`, `synthesize`, `review` | Replaces the default `DemoAgent` with a module:Class string (e.g. `tests.fake_llm_client:FakeAgent`, or `memex.agent:OMPAgent`). Omit to use `DemoAgent` (no API key needed, hardcoded output). |
+| `MEMEX_VALIDATOR` | `memex derive`, `synthesize` | Loads a separate agent for adversarial quality validation. If unset, validation skipped (backwards compatible). Same module:Class convention. |
 
-Both follow the `module:Class` import-string convention so the seam is a one-line change with no monkeypatching.
+All three follow the `module:Class` import-string convention so the seam is a one-line change with no monkeypatching.
 
 ## Sharing between devices
 
