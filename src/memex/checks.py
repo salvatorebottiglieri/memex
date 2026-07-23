@@ -66,17 +66,16 @@ def run_checks(con: sqlite3.Connection, node_id: str, content_path: Path | str) 
             provenance_target = None
 
     # ------------------------------------------------------------------
-    # Check 2: No dangling references — provenance target must be L0 (raw_source)
+    # Check 2: No dangling references — provenance target must exist
     # ------------------------------------------------------------------
     if provenance_target is not None:
-        kind_row = con.execute(
-            "SELECT kind FROM node WHERE id = ?", (provenance_target,)
+        target_row = con.execute(
+            "SELECT id FROM node WHERE id = ?", (provenance_target,)
         ).fetchone()
-        if kind_row is None or kind_row[0] != "raw_source":
-            actual_kind = kind_row[0] if kind_row else "unknown"
+        if target_row is None:
             failures.append(
                 f"Dangling reference check failed: provenance target {provenance_target!r} "
-                f"is kind={actual_kind!r}, expected kind=raw_source (L0 node)"
+                f"does not exist in the node table"
             )
 
     # ------------------------------------------------------------------

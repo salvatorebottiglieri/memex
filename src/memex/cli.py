@@ -81,6 +81,10 @@ def _fail(error: str, **kwargs: Any) -> None:
     raise SystemExit(1)
 
 
+def _require_db(db_path: Path) -> None:
+    """Exit with clean JSON error if the database file doesn't exist."""
+    if not db_path.exists():
+        _fail("db_not_found", path=str(db_path))
 
 @click.group()
 def cli() -> None:
