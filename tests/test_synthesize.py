@@ -5,6 +5,7 @@ The fake agent module lives at tests/fake_llm_client.py.
 """
 from __future__ import annotations
 
+from pathlib import Path
 import json
 import sqlite3
 
@@ -17,7 +18,7 @@ FAKE_THROWS_AGENT = "tests.fake_llm_client_throws:FakeLLMClientThrows"
 
 def _ingest(store, url: str) -> dict:
     result = _run_memex(
-        ["ingest", "--db", str(store["db"]), "--vault", str(store["vault"]), url],
+        ["extract", "--db", str(store["db"]), "--vault", str(store["vault"]), url],
         env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
     )
     assert result.returncode == 0, result.stderr
@@ -62,7 +63,7 @@ class TestSynthesize:
         kind, tier, depth = row
         assert kind == "summary"
         assert tier == "synthesis"
-        # Both L0 nodes have depth=0, so max + 1 = 1
+        # Both extracted nodes have depth=0, so max + 1 = 1
         assert depth == 1
 
     def test_synthesize_provenance_edges(self, store):
@@ -99,7 +100,7 @@ class TestSynthesize:
         assert result.returncode == 0, result.stderr
         data = json.loads(result.stdout)
 
-        md_path = store["vault"] / f"{data['id']}.md"
+        md_path = Path(data.get("content_path", str(store["vault"] / f"{data['id']}.md")))
         assert md_path.exists()
         content = md_path.read_text(encoding="utf-8")
         assert "> Synthesis:" in content
@@ -196,7 +197,7 @@ class TestSynthesize:
         assert r1.returncode == 0, r1.stderr
         d1 = json.loads(r1.stdout)
 
-        # Now synthesize the first synthesis + one L0 → depth=max(1,0)+1 = 2
+        # Now synthesize the first synthesis + one extracted → depth=max(1,2)+1 = 3
         r2 = _synthesize(store, d1["id"], a["id"])
         assert r2.returncode == 0, r2.stderr
         d2 = json.loads(r2.stdout)
@@ -211,3 +212,74 @@ class TestSynthesize:
             conn.close()
         assert row is not None
         assert row[0] == 2, f"Expected depth 2, got {row[0]}"
+
+
+class TestSynthesizeQualityGate:
+    """Integration tests for the adversarial validation gate in _do_synthesize.
+
+    Validator is injected via MEMEX_VALIDATOR env var.
+    """
+
+    FAKE_VALIDATOR_FAILS = "tests.fake_validator_fails:FakeValidatorFails"
+    FAKE_VALIDATOR_WARNS = "tests.fake_validator_warns:FakeValidatorWarns"
+
+    def test_no_validator_proceeds(self, store):
+        """No MEMEX_VALIDATOR set -> synthesize proceeds normally (no regression)."""
+        a = _ingest(store, "https://example.com/article-a")
+        b = _ingest(store, "https://example.com/article-b")
+        result = _synthesize(store, a["id"], b["id"])
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        assert data["status"] == "synthesized"
+
+    def test_fake_agent_validator_skips(self, store):
+        """MEMEX_VALIDATOR=FakeAgent (no call_llm) -> validation skipped, synthesize proceeds."""
+        a = _ingest(store, "https://example.com/article-a")
+        b = _ingest(store, "https://example.com/article-b")
+        result = _run_memex(
+            ["synthesize", "--db", str(store["db"]), "--vault", str(store["vault"]), a["id"], b["id"]],
+            env={"MEMEX_AGENT": FAKE_AGENT, "MEMEX_VALIDATOR": FAKE_AGENT},
+        )
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        assert data["status"] == "synthesized"
+
+    def test_failing_validator_rejects(self, store):
+        """Validator rejects -> quality_failed, no node or edge created."""
+        a = _ingest(store, "https://example.com/article-a")
+        b = _ingest(store, "https://example.com/article-b")
+        result = _run_memex(
+            ["synthesize", "--db", str(store["db"]), "--vault", str(store["vault"]), a["id"], b["id"]],
+            env={"MEMEX_AGENT": FAKE_AGENT, "MEMEX_VALIDATOR": self.FAKE_VALIDATOR_FAILS},
+        )
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        assert data["status"] == "quality_failed"
+        assert "Synthesis does not meaningfully re-elaborate" in data["reason"]
+        assert a["id"] in data["parent_ids"]
+        assert b["id"] in data["parent_ids"]
+        # Verify no synthesis node was created
+        conn = sqlite3.connect(store["db"])
+        try:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM node WHERE kind = 'summary' AND tier = 'synthesis'"
+            ).fetchone()[0]
+            assert count == 0, f"Expected 0 synthesis nodes, got {count}"
+        finally:
+            conn.close()
+
+    def test_warning_validator_proceeds_with_warning(self, store):
+        """Validator warns -> synthesize proceeds but warning on stderr."""
+        a = _ingest(store, "https://example.com/article-a")
+        b = _ingest(store, "https://example.com/article-b")
+        result = _run_memex(
+            ["synthesize", "--db", str(store["db"]), "--vault", str(store["vault"]), a["id"], b["id"]],
+            env={"MEMEX_AGENT": FAKE_AGENT, "MEMEX_VALIDATOR": self.FAKE_VALIDATOR_WARNS},
+        )
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        assert data["status"] == "synthesized"
+        # Warning should be on stderr
+        warning = json.loads(result.stderr.strip())
+        assert "validator_warning" in warning
+        assert "Validator LLM call failed" in warning["validator_warning"]

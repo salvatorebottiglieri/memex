@@ -25,108 +25,37 @@ VALID_CONTENT = (
 )
 
 
+
+def _utcnow() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
+
 def _setup_db(tmp_path: Path) -> tuple[sqlite3.Connection, str, Path]:
     """Create a minimal db with one L0 node and one derivation node + edge."""
+    from memex.store import Store
+
     db_path = tmp_path / "memex.db"
+    with Store.open(db_path) as store:
+        store.init_schema()
+        l0_id = str(uuid.uuid4())
+        store.create_node(node_id=l0_id, kind="raw_source", trust_state="draft", depth=0,
+                          content_path="", created_at=_utcnow())
+        store.attach_source(node_id=l0_id, canonical_key="test://l0",
+                            source_url="https://test.example/l0", fetched_at=_utcnow())
+
+        deriv_id = str(uuid.uuid4())
+        store.create_node(node_id=deriv_id, kind="summary", tier="notes",
+                          trust_state="draft", depth=1, content_path="", created_at=_utcnow())
+        store.create_edge(edge_id=str(uuid.uuid4()), type="provenance", relation="derived_from",
+                          from_node=deriv_id, to_node=l0_id)
+
+        content_path = tmp_path / f"{deriv_id}.md"
+        content_path.write_text(VALID_CONTENT, encoding="utf-8")
+        store._con.execute("UPDATE node SET content_path = ? WHERE id = ?",
+                           (str(content_path), deriv_id))
+
     con = sqlite3.connect(db_path)
     con.execute("PRAGMA foreign_keys = ON")
-    con.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS node (
-            id           TEXT PRIMARY KEY,
-            kind         TEXT NOT NULL,
-            tier         TEXT,
-            trust_state  TEXT NOT NULL CHECK (trust_state IN ('draft','auto-verified','human-approved','stale')),
-            depth        INTEGER NOT NULL,
-            content_path TEXT NOT NULL,
-            created_at   TEXT NOT NULL,
-            check_failures TEXT,
-            is_contested INTEGER NOT NULL DEFAULT 0,
-            contested_at TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS source (
-            node_id       TEXT PRIMARY KEY REFERENCES node(id),
-            canonical_key TEXT NOT NULL UNIQUE,
-            source_url    TEXT NOT NULL,
-            title         TEXT,
-            fetched_at    TEXT,
-            failed        INTEGER NOT NULL DEFAULT 0
-        );
-
-        CREATE TABLE IF NOT EXISTS edge (
-            id        TEXT PRIMARY KEY,
-            type      TEXT NOT NULL CHECK (type IN ('provenance','association')),
-            relation  TEXT NOT NULL CHECK (relation IN ('derived_from','related','contradicts','refines')),
-            from_node TEXT NOT NULL REFERENCES node(id),
-            to_node   TEXT NOT NULL REFERENCES node(id),
-            written_by TEXT NOT NULL DEFAULT 'human'
-        );
-
-        CREATE TABLE IF NOT EXISTS event_queue (
-            id             INTEGER PRIMARY KEY AUTOINCREMENT,
-            event_type     TEXT NOT NULL CHECK (event_type IN ('contradicts_edge_needs_review')),
-            edge_id        TEXT NOT NULL REFERENCES edge(id),
-            target_node_id TEXT NOT NULL REFERENCES node(id),
-            created_at     TEXT NOT NULL,
-            status         TEXT NOT NULL CHECK (status IN ('pending','closed')) DEFAULT 'pending',
-            closed_at      TEXT
-        );
-        CREATE INDEX IF NOT EXISTS idx_event_queue_status ON event_queue(status);
-        CREATE INDEX IF NOT EXISTS idx_event_queue_target ON event_queue(target_node_id);
-
-        CREATE TABLE IF NOT EXISTS event_node_link (
-            event_id     INTEGER NOT NULL REFERENCES event_queue(id),
-            node_id      TEXT NOT NULL REFERENCES node(id),
-            contested_at TEXT NOT NULL,
-            PRIMARY KEY (event_id, node_id)
-        );
-        CREATE INDEX IF NOT EXISTS idx_event_node_link_node ON event_node_link(node_id);
-        CREATE INDEX IF NOT EXISTS idx_event_node_link_event ON event_node_link(event_id);
-
-        CREATE TABLE IF NOT EXISTS review_proposal (
-            id                    INTEGER PRIMARY KEY AUTOINCREMENT,
-            event_id              INTEGER NOT NULL UNIQUE REFERENCES event_queue(id),
-            affected_node_ids     TEXT NOT NULL,
-            damage_boundary_node_id TEXT REFERENCES node(id),
-            rationale_md          TEXT NOT NULL,
-            confidence            TEXT NOT NULL CHECK (confidence IN ('high','medium','low')),
-            status                TEXT NOT NULL CHECK (status IN ('pending','accepted','rejected','dismissed')) DEFAULT 'pending',
-            human_note            TEXT,
-            created_at            TEXT NOT NULL,
-            resolved_at           TEXT
-        );
-        CREATE INDEX IF NOT EXISTS idx_review_proposal_status ON review_proposal(status);
-        """
-    )
-
-    l0_id = str(uuid.uuid4())
-    deriv_id = str(uuid.uuid4())
-    edge_id = str(uuid.uuid4())
-
-    # Insert L0 node (raw_source)
-    con.execute(
-        "INSERT INTO node (id, kind, tier, trust_state, depth, content_path, created_at) VALUES (?, 'raw_source', NULL, 'draft', 0, '', '2024-01-01')",
-        (l0_id,),
-    )
-
-    # Write content file
-    content_path = tmp_path / f"{deriv_id}.md"
-    content_path.write_text(VALID_CONTENT, encoding="utf-8")
-
-    # Insert derivation node
-    con.execute(
-        "INSERT INTO node (id, kind, tier, trust_state, depth, content_path, created_at) VALUES (?, 'summary', 'notes', 'draft', 1, ?, '2024-01-01')",
-        (deriv_id, str(content_path)),
-    )
-
-    # Insert provenance edge: deriv_id --derived_from--> l0_id
-    con.execute(
-        "INSERT INTO edge (id, type, relation, from_node, to_node) VALUES (?, 'provenance', 'derived_from', ?, ?)",
-        (edge_id, deriv_id, l0_id),
-    )
-    con.commit()
-
     return con, deriv_id, content_path
 
 
@@ -238,6 +167,26 @@ class TestSynthesisMarkerCheck:
 
         assert result.passed is True
 
+    def test_synthesis_statements_column_passes_even_without_marker(self, tmp_path):
+        """A derivation whose synthesis_statements column is populated passes the
+        synthesis check even when the markdown has no '> Synthesis:' marker."""
+        import json as _json
+        con, deriv_id, content_path = _setup_db(tmp_path)
+        # Overwrite content: drop the marker
+        content_without_marker = "This derivation is long enough but has no synthesis marker. " * 5
+        content_path.write_text(content_without_marker, encoding="utf-8")
+        # Persist the structured statements
+        con.execute(
+            "UPDATE node SET synthesis_statements = ? WHERE id = ?",
+            (_json.dumps(["Inference A.", "Inference B."]), deriv_id),
+        )
+        con.commit()
+
+        result = run_checks(con, deriv_id, content_path)
+        con.close()
+
+        assert result.passed is True
+
 
 # ---------------------------------------------------------------------------
 # Check 4: Size / scope bounds
@@ -291,6 +240,67 @@ class TestSizeBoundsCheck:
 
 
 # ---------------------------------------------------------------------------
+# Check 5: Tier / depth consistency
+# ---------------------------------------------------------------------------
+
+class TestTierDepthConsistency:
+    def test_notes_tier_with_wrong_depth_fails(self, tmp_path):
+        """A node with tier=notes but depth=0 fails tier/depth check."""
+        con, deriv_id, content_path = _setup_db(tmp_path)
+        con.execute("UPDATE node SET depth = 0 WHERE id = ?", (deriv_id,))
+        con.commit()
+        result = run_checks(con, deriv_id, content_path)
+        con.close()
+        assert not result.passed
+        assert any("Tier/depth" in f for f in result.failures)
+
+    def test_notes_tier_depth_1_passes(self, tmp_path):
+        """A node with tier=notes and depth=1 passes tier/depth check."""
+        con, deriv_id, content_path = _setup_db(tmp_path)
+        # deriv already has tier='notes', depth=1
+        result = run_checks(con, deriv_id, content_path)
+        con.close()
+        assert result.passed is True
+
+    def test_synthesis_tier_depth_2_passes(self, tmp_path):
+        """A node with tier=synthesis and depth=2 passes tier/depth check."""
+        con, deriv_id, content_path = _setup_db(tmp_path)
+        con.execute("UPDATE node SET tier = 'synthesis', depth = 2 WHERE id = ?", (deriv_id,))
+        con.commit()
+        result = run_checks(con, deriv_id, content_path)
+        con.close()
+        assert result.passed is True
+
+    def test_synthesis_tier_depth_1_fails(self, tmp_path):
+        """A node with tier=synthesis but depth=1 fails tier/depth check."""
+        con, deriv_id, content_path = _setup_db(tmp_path)
+        con.execute("UPDATE node SET tier = 'synthesis' WHERE id = ?", (deriv_id,))
+        con.commit()
+        result = run_checks(con, deriv_id, content_path)
+        con.close()
+        assert not result.passed
+        assert any("Tier/depth" in f for f in result.failures)
+
+    def test_null_tier_depth_0_passes(self, tmp_path):
+        """A raw_source (NULL tier) with depth=0 passes tier/depth check."""
+        con, deriv_id, content_path = _setup_db(tmp_path)
+        l0_id = con.execute("SELECT id FROM node WHERE kind = 'raw_source'").fetchone()[0]
+        # L0 has tier=NULL, depth=0 — run check on it
+        result = run_checks(con, l0_id, content_path)
+        con.close()
+        # Tier check should not produce any failure even if other checks fail
+        assert not any("Tier/depth" in f for f in result.failures)
+
+    def test_null_tier_depth_1_fails(self, tmp_path):
+        """A node with NULL tier but depth=1 fails tier/depth check."""
+        con, deriv_id, content_path = _setup_db(tmp_path)
+        con.execute("UPDATE node SET tier = NULL, depth = 1 WHERE id = ?", (deriv_id,))
+        con.commit()
+        result = run_checks(con, deriv_id, content_path)
+        con.close()
+        assert not result.passed
+        assert any("Tier/depth" in f for f in result.failures)
+
 # Multiple failures accumulate
 # ---------------------------------------------------------------------------
 

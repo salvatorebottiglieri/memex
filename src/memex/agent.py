@@ -2,12 +2,193 @@
 
 The default agent (no env var) is DemoAgent — no API key needed.
 Set MEMEX_AGENT to a ``module:Class`` string to load a custom agent.
+
+The shape of a derivation note is a contract between this module, the LLM, the
+Store, and the renderer. To prevent drift, all agents share the same prompt
+(``_DERIVE_PROMPT_TEMPLATE``) and the same JSON contract
+(``synthesis_statements: list[str]``). CLI agents (OMPAgent, PiAgent) ask for
+that JSON envelope directly; if the model replies in prose instead, the
+fallback extractor recovers the list via the exact ``> Synthesis:`` marker.
 """
 from __future__ import annotations
 
 import random
 import time
 from dataclasses import dataclass, field
+
+
+# ---------------------------------------------------------------------------
+# Shared contract: the shape of a derivation note
+# ---------------------------------------------------------------------------
+#
+# A derivation note MUST contain, in this order:
+#   1. A single top-level heading (one ``#``) carrying the note's title.
+#   2. Body prose that summarises the source. The prose MUST be distinguishable
+#      from inference — facts restated from the source are unadorned, and any
+#      statement that goes beyond what the source says is a *synthesis
+#      statement*.
+#   3. A ``## Synthesis`` section whose body is one or more bullet points, each
+#      of the form ``> Synthesis: <inference>``. There MUST be at least one
+#      such statement. The literal prefix ``> Synthesis:`` (single space after
+#      the colon) is non-negotiable — the deterministic check, the list
+#      filter, the backfill, and the renderer all match on it.
+#
+# The structured field ``synthesis_statements`` carries the same statements
+# without the ``> Synthesis:`` prefix, so the DB can be queried without
+# parsing prose.
+
+_DERIVE_SYSTEM_PROMPT = (
+    "You are a knowledge synthesis assistant for a personal knowledge graph "
+    "(memex). Given source material, produce a concise notes-tier derivation "
+    "in the exact shape described below. The shape is a contract — deviations "
+    "will fail the deterministic checks.\n\n"
+    "# Required shape\n\n"
+    "1. Begin with a single top-level markdown heading, ``# <Title>``, where "
+    "<Title> is a short, specific title (not \"Summary\", not \"Untitled\").\n"
+    "2. Write the body prose that summarises the source. Sourced facts are "
+    "unadorned. Anything you infer beyond what the source directly says MUST "
+    "go into the ``## Synthesis`` section below — never mixed into the body.\n"
+    "3. End with a single ``## Synthesis`` section. Its body MUST be one or "
+    "more bullet points, each starting with the exact literal prefix "
+    "``> Synthesis:`` (greater-than, space, the word Synthesis, colon, space, "
+    "then the inference). There is no minimum count beyond ``>= 1``, but a "
+    "strong derivation has 3-6 distinct inferences.\n"
+    "4. Do NOT bold, italicise, or otherwise wrap the ``Synthesis:`` word. "
+    "Do NOT add extra section headings between the body and ``## Synthesis``. "
+    "Do NOT prefix the marker with anything (no bullets, no numbering, no "
+    "bold/italic markup).\n\n"
+    "# Output format\n\n"
+    "Return ONLY a JSON object with exactly two fields and no other text:\n"
+    "{\n"
+    '  "prose": "<the full markdown note following the shape above, as a '
+    'single string>",\n'
+    '  "synthesis_statements": ["<inference 1, without the \\"> Synthesis: \\" '
+    'prefix>", "<inference 2>", ...]\n'
+    "}\n\n"
+    "The two fields MUST be consistent: every string in "
+    "``synthesis_statements`` appears verbatim in the prose (after the "
+    "``> Synthesis: `` prefix), and every ``> Synthesis:`` line in the prose "
+    "has a matching entry in ``synthesis_statements``. Do not invent entries "
+    "in either direction."
+)
+
+
+_DERIVE_USER_TEMPLATE = "# Source material\n\n{content}\n"
+
+
+_VERIFY_QUALITY_PROMPT = """\
+You are an adversarial validator for a personal knowledge graph (memex).
+Your job is to be CRITICAL: a derivation must genuinely re-elaborate its source.
+If the derivation is generic boilerplate, you must reject it.
+
+SOURCE (the original material):
+{parent_content}
+
+DERIVATION (the proposed summary):
+{derivation_prose}
+
+SYNTHESIS STATEMENTS (inferences beyond the source):
+{statements}
+
+Does this derivation meaningfully re-elaborate the source? Be strict.
+A PASSING derivation references specific concepts, claims, or data from the source.
+A FAILING derivation uses generic phrases like "the article discusses", "the author covers",
+"the topic at hand" — boilerplate that could apply to ANY source.
+
+Answer with exactly the JSON object (no other text):
+{{"passes": true}} or {{"passes": false}}
+"""
+
+
+def _parse_derive_response(raw: str) -> tuple[str, list[str]]:
+    """Parse an LLM response into (prose, synthesis_statements).
+
+    Tries the JSON envelope first; on failure, falls back to treating the
+    whole response as prose and recovering the ``> Synthesis:`` statements via
+    a strict marker regex (no bold/italic variants — the prompt forbids them).
+    Returns ``("", [])`` if neither path yields a usable result.
+    """
+    import json as _json
+    import re as _re
+
+    # 1. JSON envelope.
+    text = raw.strip()
+    if text.startswith("```"):
+        # Strip markdown code fence
+        text = _re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=_re.S).strip()
+    try:
+        data = _json.loads(text)
+        if isinstance(data, dict):
+            prose = str(data.get("prose", ""))
+            stmts_raw = data.get("synthesis_statements", [])
+            if isinstance(stmts_raw, list):
+                stmts = [str(s).strip() for s in stmts_raw if str(s).strip()]
+                if prose:
+                    return prose, stmts
+    except (_json.JSONDecodeError, ValueError):
+        pass
+
+    # 2. Prose fallback: strict marker, no bold/italic variants.
+    statements = _re.findall(r"(?m)^>\s*Synthesis:\s+(.+)$", text)
+    if statements:
+        return text, [s.strip() for s in statements]
+
+    return text, []
+
+
+def validate_derivation(
+    agent: object,
+    parent_content: str,
+    derivation: DerivationResult,
+) -> tuple[bool, str | None]:
+    """Adversarial validation: check if derivation genuinely re-elaborates parent.
+
+    Returns (bool, str | None):
+      (True, None) — clean pass
+      (False, None) — clean fail (validator rejected)
+      (True, "warning message") — pass but validator had issues
+
+    The validation agent is a *separate* agent from the one that produced the
+    derivation (impartial judge). The prompt asks it to be critical.
+
+    DemoAgent: always returns (True, None) (passes everything, for tests).
+    PiAgent/OMPAgent: calls the LLM with an adversarial prompt.
+    Unknown agents: pass (no validation).
+    """
+    # DemoAgent / mock: no real validation, always pass
+    if isinstance(agent, DemoAgent):
+        return True, None
+
+    # Agents with call_llm: adversarial LLM call
+    call = getattr(agent, "call_llm", None)
+    if call is None:
+        return True, None  # Unknown agent type, skip validation
+
+    statements = "\n".join(f"- {s}" for s in derivation.synthesis_statements)
+    try:
+        prompt = _VERIFY_QUALITY_PROMPT.format(
+            parent_content=parent_content,
+            derivation_prose=derivation.prose,
+            statements=statements,
+        )
+    except (KeyError, ValueError, AttributeError):
+        return True, "Validator prompt formatting failed, validation skipped"
+    try:
+        raw = call(prompt)
+    except Exception:
+        return True, "Validator LLM call failed, validation skipped"
+
+    import json as _json
+
+    try:
+        data = _json.loads(raw)
+    except (ValueError, TypeError, _json.JSONDecodeError):
+        return True, "Validator response parse failed, validation skipped"
+
+    if not isinstance(data, dict) or "passes" not in data:
+        return True, "Validator response missing 'passes' field, validation skipped"
+
+    return bool(data["passes"]), None
 
 
 @dataclass
@@ -47,6 +228,10 @@ class Agent:
         """Infer a human-readable title from content and URL. Return None to skip."""
         return None
 
+    def extract_ideas(self, content: str) -> list[str]:
+        """Extract 3-5 key ideas from content. Return empty list by default."""
+        return []
+
 
 class DemoAgent:
     """Built-in demo agent — returns hardcoded content. No API key needed."""
@@ -64,26 +249,26 @@ class DemoAgent:
             ],
         )
 
-    def review(
-        self,
-        target_content: str,
-        asserting_content: str,
-        edge_payload: dict,
-    ) -> ReviewProposal:
+    def review(self, target_content: str, asserting_content: str, edge_payload: dict) -> ReviewProposal:
+        """Demo review: always returns high confidence, marks unaffected."""
         return ReviewProposal(
-            affected_node_ids=["demo-affected-id"],
+            affected_node_ids=[],
             damage_boundary_node_id=None,
-            rationale_md="Demo review: no real analysis.",
-            confidence="low",
+            rationale_md="Demo review: no contestation analysis performed.",
+            confidence="high",
         )
 
     def generate_title(self, content: str, url: str) -> str | None:
-        # Take the first line of content as title
-        first_line = content.split('\n')[0].strip()
-        if first_line and len(first_line) < 200:
-            return first_line.removeprefix('# ').strip()
+        """Demo: no title generation."""
         return None
 
+    def extract_ideas(self, content: str) -> list[str]:
+        """Extract 3-5 key ideas from content. Demo returns a default set."""
+        return [
+            "The article discusses its topic.",
+            "Key patterns are identified.",
+            "Implications are explored.",
+        ]
 
 class AnthropicAgent(Agent):
     """Real Anthropic-backed agent using structured JSON output."""
@@ -93,38 +278,48 @@ class AnthropicAgent(Agent):
 
         client = anthropic.Anthropic()
 
-        system_prompt = (
-            "You are a knowledge synthesis assistant. Given source material, produce a concise "
-            "summary in markdown. For any statement you infer beyond what the source directly says, "
-            "prefix it with '> Synthesis:'. Keep sourced facts distinguishable from interpretation.\n\n"
-            "Return a JSON object with two fields:\n"
-            '  "prose": string — the full markdown summary with > Synthesis: markers\n'
-            '  "synthesis_statements": array of strings — each synthesised statement (without the prefix)\n'
-        )
-
         message = client.messages.create(
             model="claude-opus-4-5",
             max_tokens=1024,
-            system=system_prompt,
+            system=_DERIVE_SYSTEM_PROMPT,
             messages=[
                 {
                     "role": "user",
-                    "content": f"Summarise the following source material:\n\n{content}",
+                    "content": _DERIVE_USER_TEMPLATE.format(content=content),
                 }
             ],
         )
 
-        import json as _json
-
         raw = message.content[0].text
+        prose, statements = _parse_derive_response(raw)
+        return DerivationResult(prose=prose, synthesis_statements=statements)
+
+    def extract_ideas(self, content: str) -> list[str]:
+        """Extract 3-5 key ideas via Anthropic LLM."""
+        import anthropic
+
+        client = anthropic.Anthropic()
+        system_prompt = (
+            "You are an idea extraction assistant. Given source material, identify 3-5 "
+            "key ideas or concepts. Return ONLY a JSON array of strings, each 5-15 words."
+        )
+        message = client.messages.create(
+            model="claude-opus-4-5",
+            max_tokens=512,
+            system=system_prompt,
+            messages=[
+                {
+                    "role": "user",
+                    "content": f"Extract the key ideas from this content:\n\n{content}",
+                }
+            ],
+        )
+        raw = message.content[0].text
+        import json as _json
         try:
-            data = _json.loads(raw)
-            prose = data.get("prose", raw)
-            synthesis_statements = data.get("synthesis_statements", [])
-        except (_json.JSONDecodeError, AttributeError, KeyError):
-            prose = raw
-            synthesis_statements = []
-        return DerivationResult(prose=prose, synthesis_statements=synthesis_statements)
+            return _json.loads(raw)
+        except (_json.JSONDecodeError, AttributeError, TypeError):
+            return []
 
     def review(
         self,
@@ -206,7 +401,7 @@ class PiAgent(Agent):
 
     _cli_cmd = "pi"
 
-    def _call_pi(self, prompt: str) -> str:
+    def call_llm(self, prompt: str) -> str:
         import json as _json
         import subprocess as _sp
 
@@ -249,17 +444,28 @@ class PiAgent(Agent):
 
 
     def derive(self, content: str) -> DerivationResult:
+        prompt = _DERIVE_SYSTEM_PROMPT + "\n\n" + _DERIVE_USER_TEMPLATE.format(content=content)
+        raw = self.call_llm(prompt)
+        prose, statements = _parse_derive_response(raw)
+        return DerivationResult(prose=prose, synthesis_statements=statements)
+
+    def extract_ideas(self, content: str) -> list[str]:
+        """Extract 3-5 key ideas via Pi CLI."""
         prompt = (
-            "You are a knowledge synthesis assistant. Given source material, produce a concise "
-            "summary in markdown. For any statement you infer beyond what the source directly says, "
-            "prefix it with '> Synthesis:'. Keep sourced facts distinguishable from interpretation.\n\n"
+            "You are an idea extraction assistant. Given source material, identify 3-5 "
+            "key ideas or concepts. Return ONLY a JSON array of strings, each 5-15 words.\n\n"
             f"Source material:\n\n{content}"
         )
-        prose = self._call_pi(prompt)
-        # Extract > Synthesis: statements
+        raw = self.call_llm(prompt)
+        import json as _json
         import re as _re
-        statements = _re.findall(r"> Synthesis:\s*(.+)", prose)
-        return DerivationResult(prose=prose, synthesis_statements=statements)
+        # Strip markdown code fences (```json ... ```) that omp/Pi may wrap around JSON
+        raw = _re.sub(r'^```\w*\n?', '', raw.strip())
+        raw = _re.sub(r'\n?```$', '', raw)
+        try:
+            return _json.loads(raw)
+        except (_json.JSONDecodeError, AttributeError, TypeError):
+            return []
 
     def review(self, target_content: str, asserting_content: str, edge_payload: dict) -> ReviewProposal:
         prompt = (
@@ -278,7 +484,7 @@ class PiAgent(Agent):
             f"Asserting content:\n{asserting_content}\n\n"
             f"Edge payload: {edge_payload}"
         )
-        raw = self._call_pi(prompt)
+        raw = self.call_llm(prompt)
         import json as _json
         try:
             data = _json.loads(raw)
@@ -314,7 +520,7 @@ class OMPAgent(PiAgent):
 
     _cli_cmd = "omp"
 
-    def _call_pi(self, prompt: str) -> str:
+    def call_llm(self, prompt: str) -> str:
         import json as _json
         import subprocess as _sp
 
@@ -357,15 +563,15 @@ class OMPAgent(PiAgent):
         return last_text
 
 def _verify_agent_methods(client: object, module_path: str) -> None:
-    """Verify the loaded agent instance has both derive and review callables.
+    """Verify the loaded agent instance has derive, review, and extract_ideas callables.
 
-    Raises ImportError if either method is missing or not callable.
+    Raises ImportError if any method is missing or not callable.
     """
-    for method_name in ("derive", "review"):
+    for method_name in ("derive", "review", "extract_ideas"):
         if not hasattr(client, method_name) or not callable(getattr(client, method_name)):
             raise ImportError(
                 f"Agent '{module_path}' is missing required method '{method_name}'. "
-                f"Loaded agent class must implement both derive() and review()."
+                f"Loaded agent class must implement derive(), review(), and extract_ideas()."
             )
 
 

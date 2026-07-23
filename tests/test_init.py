@@ -35,7 +35,7 @@ def test_init_creates_sqlite_db_with_all_tables(tmp_path, run_memex):
     tables = {row[0] for row in cur.fetchall() if not row[0].startswith("sqlite_")}
     con.close()
 
-    assert tables == {"node", "source", "edge", "cursor", "inbox", "event_queue", "event_node_link", "review_proposal"}
+    assert tables == {"node", "source", "edge", "cursor", "inbox", "event_queue", "event_node_link", "review_proposal", "node_idea"}
 
 
 def test_init_creates_vault_directory(tmp_path, run_memex):
@@ -68,7 +68,7 @@ def test_init_is_idempotent(tmp_path, run_memex):
     tables = {row[0] for row in cur.fetchall() if not row[0].startswith("sqlite_")}
     con.close()
 
-    assert tables == {"node", "source", "edge", "cursor", "inbox", "event_queue", "event_node_link", "review_proposal"}
+    assert tables == {"node", "source", "edge", "cursor", "inbox", "event_queue", "event_node_link", "review_proposal", "node_idea"}
     assert vault_path.is_dir()
 
 
@@ -124,7 +124,7 @@ def test_init_migrates_missing_failed_column_in_source(tmp_path, run_memex):
 
     # ingest must not crash (OperationalError: no column named failed)
     result2 = run_memex(
-        ["ingest", "--db", str(db_path), "--vault", str(vault_path), "https://example.com/article"],
+        ["extract", "--db", str(db_path), "--vault", str(vault_path), "https://example.com/article"],
         env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
     )
     assert result2.returncode == 0, result2.stderr
@@ -157,3 +157,19 @@ def test_init_created_flags_reflect_actual_creation(tmp_path, run_memex):
     assert first_data["vault_created"] is True
     assert second_data["db_created"] is False
     assert second_data["vault_created"] is False
+
+
+def test_resolve_paths_uses_env_vars(tmp_path, run_memex):
+    """MEMEX_VAULT and MEMEX_DB env vars are picked up by _resolve_paths."""
+    vault = tmp_path / "my-vault"
+    vault.mkdir()
+    db = tmp_path / "custom.db"
+    db.write_text("")  # placeholder so init is safe
+
+    env = {"MEMEX_VAULT": str(vault), "MEMEX_DB": str(db)}
+    result = run_memex(["status"], env=env)
+
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["vault_path"] == str(vault)
+    assert data["db_path"] == str(db)

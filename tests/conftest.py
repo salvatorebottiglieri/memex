@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import shutil
 import sqlite3
+from datetime import datetime, timezone
 import subprocess
 import sys
 from pathlib import Path
@@ -51,6 +52,17 @@ def _run_memex(args: list[str], cwd: Path | None = None, env: dict | None = None
     )
 
 
+def _store():
+    con = sqlite3.connect(":memory:")
+    s = Store(con)
+    s.init_schema()
+    return s
+
+
+def _utcnow() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 @pytest.fixture
 def run_memex():
     """Fixture that provides the run_memex helper."""
@@ -76,10 +88,10 @@ def store(tmp_path):
 
 
 def ingest(store, url: str, extra_env: dict | None = None) -> subprocess.CompletedProcess:
-    """Run memex ingest with the fake fetcher."""
+    """Run memex extract with the fake fetcher."""
     env = {"MEMEX_FETCHER_MODULE": FAKE_FETCHER, **(extra_env or {})}
     return _run_memex(
-        ["ingest", "--db", str(store["db"]), "--vault", str(store["vault"]), url],
+        ["extract", "--db", str(store["db"]), "--vault", str(store["vault"]), url],
         cwd=WORKTREE,
         env=env,
     )

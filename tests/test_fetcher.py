@@ -6,6 +6,7 @@ handling, and the content_path field.
 from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+import os
 
 import pytest
 
@@ -346,3 +347,368 @@ class TestYouTubeTranscriptFetcher:
                 f = YouTubeTranscriptFetcher(vault_path=str(tmp_path))
                 with pytest.raises(FetchError, match="youtube-transcript-api"):
                     f.fetch("https://www.youtube.com/watch?v=abc123")
+# ── Resolution rules ──────────────────────────────────────────────
+
+
+class TestArxivRule:
+    def test_matches_arxiv_abs_url(self):
+        from memex.fetcher import ArxivRule
+        rule = ArxivRule()
+        result = rule.match("https://arxiv.org/abs/2304.12345")
+        assert result is not None
+        assert result.type == "arxiv"
+        assert result.ingestable is True
+        assert result.direct_url == "https://arxiv.org/pdf/2304.12345"
+
+    def test_does_not_match_arxiv_pdf_url(self):
+        from memex.fetcher import ArxivRule
+        rule = ArxivRule()
+        result = rule.match("https://arxiv.org/pdf/2304.12345")
+        assert result is None
+
+    def test_does_not_match_plain_http(self):
+        from memex.fetcher import ArxivRule
+        rule = ArxivRule()
+        result = rule.match("https://example.com/article")
+        assert result is None
+
+
+class TestMediaRule:
+    def test_matches_jpg_url(self):
+        from memex.fetcher import MediaRule
+        rule = MediaRule()
+        result = rule.match("https://example.com/photo.jpg")
+        assert result is not None
+        assert result.ingestable is False
+        assert result.type == "unknown"
+
+    def test_matches_png_url(self):
+        from memex.fetcher import MediaRule
+        rule = MediaRule()
+        result = rule.match("https://example.com/image.png")
+        assert result is not None
+        assert result.ingestable is False
+
+    def test_matches_mp4_url(self):
+        from memex.fetcher import MediaRule
+        rule = MediaRule()
+        result = rule.match("https://example.com/video.mp4")
+        assert result is not None
+        assert result.ingestable is False
+
+    def test_matches_mp3_url(self):
+        from memex.fetcher import MediaRule
+        rule = MediaRule()
+        result = rule.match("https://example.com/audio.mp3")
+        assert result is not None
+        assert result.ingestable is False
+
+    def test_does_not_match_article_url(self):
+        from memex.fetcher import MediaRule
+        rule = MediaRule()
+        result = rule.match("https://example.com/article")
+        assert result is None
+
+    def test_does_not_match_url_with_extension_in_query(self):
+        from memex.fetcher import MediaRule
+        rule = MediaRule()
+        result = rule.match("https://example.com/page?file=photo.jpg")
+        assert result is None
+
+
+class TestXTwitterRule:
+    def test_matches_x_com(self):
+        from memex.fetcher import MediaRule
+        rule = MediaRule()
+        result = rule.match("https://x.com/user/status/123")
+        assert result is not None
+        assert result.ingestable is False
+        assert result.note is not None
+
+    def test_matches_twitter_com(self):
+        from memex.fetcher import MediaRule
+        rule = MediaRule()
+        result = rule.match("https://twitter.com/user/status/123")
+        assert result is not None
+        assert result.ingestable is False
+
+class TestDefaultRule:
+    def test_matches_any_http_url(self):
+        from memex.fetcher import DefaultRule
+        rule = DefaultRule()
+        result = rule.match("https://example.com/article")
+        assert result is not None
+        assert result.type == "web"
+        assert result.ingestable is True
+        assert result.fetcher == "HttpFetcher"
+
+    def test_matches_any_https_url(self):
+        from memex.fetcher import DefaultRule
+        rule = DefaultRule()
+        result = rule.match("https://arxiv.org/pdf/2304.12345")
+        assert result is not None
+        assert result.type == "web"
+
+    def test_does_not_match_ftp(self):
+        from memex.fetcher import DefaultRule
+        rule = DefaultRule()
+        result = rule.match("ftp://example.com/file")
+        assert result is None
+
+
+class TestGitHubBlobRule:
+    def test_matches_github_blob_url(self):
+        from memex.fetcher import GitHubBlobRule
+
+        rule = GitHubBlobRule()
+        result = rule.match("https://github.com/user/repo/blob/main/file.py")
+        assert result is not None
+        assert result.type == "github_file"
+        assert result.ingestable is True
+        assert result.direct_url == "https://raw.githubusercontent.com/user/repo/main/file.py"
+
+    def test_does_not_match_non_blob_github_url(self):
+        from memex.fetcher import GitHubBlobRule
+
+        rule = GitHubBlobRule()
+        result = rule.match("https://github.com/user/repo")
+        assert result is None
+
+    def test_does_not_match_non_github_url(self):
+        from memex.fetcher import GitHubBlobRule
+
+        rule = GitHubBlobRule()
+        result = rule.match("https://example.com")
+        assert result is None
+
+    def test_matches_github_blob_with_query_params(self):
+        from memex.fetcher import GitHubBlobRule
+
+        rule = GitHubBlobRule()
+        result = rule.match("https://github.com/user/repo/blob/main/file.py?token=abc&ref=1")
+        assert result is not None
+        assert result.direct_url == "https://raw.githubusercontent.com/user/repo/main/file.py"
+
+    def test_matches_github_blob_with_fragment(self):
+        from memex.fetcher import GitHubBlobRule
+
+        rule = GitHubBlobRule()
+        result = rule.match("https://github.com/user/repo/blob/main/file.py#L42")
+        assert result is not None
+        assert result.direct_url == "https://raw.githubusercontent.com/user/repo/main/file.py"
+
+
+class TestWikipediaRule:
+    def test_matches_wikipedia_url(self):
+        from memex.fetcher import WikipediaRule
+
+        rule = WikipediaRule()
+        result = rule.match("https://en.wikipedia.org/wiki/Python_(programming_language)")
+        assert result is not None
+        assert result.type == "wikipedia"
+        assert result.ingestable is True
+        assert result.direct_url == "https://en.wikipedia.org/api/rest_v1/page/summary/Python_(programming_language)"
+
+    def test_matches_other_language(self):
+        from memex.fetcher import WikipediaRule
+
+        rule = WikipediaRule()
+        result = rule.match("https://de.wikipedia.org/wiki/Python_(Programmiersprache)")
+        assert result is not None
+        assert result.direct_url == "https://de.wikipedia.org/api/rest_v1/page/summary/Python_(Programmiersprache)"
+
+    def test_does_not_match_non_wikipedia_url(self):
+        from memex.fetcher import WikipediaRule
+
+        rule = WikipediaRule()
+        result = rule.match("https://example.com")
+        assert result is None
+
+    def test_matches_hyphenated_language_code(self):
+        from memex.fetcher import WikipediaRule
+
+        rule = WikipediaRule()
+        result = rule.match("https://zh-yue.wikipedia.org/wiki/%E7%B2%B5%E8%AA%9E")
+        assert result is not None
+        assert result.direct_url == "https://zh-yue.wikipedia.org/api/rest_v1/page/summary/%E7%B2%B5%E8%AA%9E"
+
+    def test_matches_wikipedia_with_query_params(self):
+        from memex.fetcher import WikipediaRule
+
+        rule = WikipediaRule()
+        result = rule.match("https://en.wikipedia.org/wiki/Python_(programming_language)?oldid=123")
+        assert result is not None
+        assert result.direct_url == "https://en.wikipedia.org/api/rest_v1/page/summary/Python_(programming_language)"
+
+
+class TestResolveUrl:
+    def test_resolve_arxiv_url(self):
+        from memex.fetcher import resolve_url
+        result = resolve_url("https://arxiv.org/abs/2304.12345")
+        assert result.type == "arxiv"
+        assert result.direct_url == "https://arxiv.org/pdf/2304.12345"
+
+    def test_resolve_web_url(self):
+        from memex.fetcher import resolve_url
+        result = resolve_url("https://example.com/article")
+        assert result.type == "web"
+        assert result.ingestable is True
+
+    def test_resolve_non_http_url_returns_error_type(self):
+        from memex.fetcher import resolve_url
+        result = resolve_url("ftp://example.com/file")
+        assert result.type == "error"
+        assert result.ingestable is False
+
+class TestResolveUrlTracking:
+    def test_resolve_strips_utm_params(self):
+        from memex.fetcher import resolve_url
+        result = resolve_url("https://example.com/article?utm_source=twitter&utm_campaign=test")
+        assert result.type == "web"
+        assert result.ingestable is True
+
+    def test_resolve_strips_fbclid(self):
+        from memex.fetcher import resolve_url
+        result = resolve_url("https://example.com/article?fbclid=abc123")
+        assert result.type == "web"
+
+    def test_resolve_keeps_non_tracking_params(self):
+        from memex.fetcher import resolve_url
+        result = resolve_url("https://arxiv.org/abs/2304.12345?foo=bar")
+        assert result.type == "arxiv"
+        assert result.direct_url == "https://arxiv.org/pdf/2304.12345"
+class TestIngestBlocking:
+    """Ingest blocks/resolves non-ingestable URLs (X/Twitter, media).
+
+    Uses run_memex directly with explicit env to control resolver behavior.
+    """
+
+    # Build a PATH that includes uv/.local/bin but excludes pi's nvm directory
+    _RESOLVER_FREE_PATH = ":".join(
+        p for p in os.environ.get("PATH", "").split(":")
+        if "nvm" not in p
+    )
+
+    def test_ingest_x_com_succeeds_without_resolver(self, store, run_memex):
+        """Without a resolver, extract still works (the resolution gate was removed from extract)."""
+        from tests.conftest import WORKTREE, FAKE_FETCHER
+        env = {
+            "MEMEX_FETCHER_MODULE": FAKE_FETCHER,
+            "PATH": self._RESOLVER_FREE_PATH,
+        }
+        proc = run_memex(
+            [
+                "extract",
+                "--db", str(store["db"]),
+                "--vault", str(store["vault"]),
+                "https://x.com/user/status/123",
+            ],
+            cwd=WORKTREE,
+            env=env,
+        )
+        assert proc.returncode == 0, proc.stderr
+        import json
+        data = json.loads(proc.stdout)
+        assert data.get("status") in ("ingested", "already_exists")
+
+    def test_ingest_media_url_succeeds_without_resolver(self, store, run_memex):
+        """Ingest of media URLs succeeds (resolution gate was removed from extract)."""
+        from tests.conftest import WORKTREE, FAKE_FETCHER
+        env = {
+            "MEMEX_FETCHER_MODULE": FAKE_FETCHER,
+            "PATH": self._RESOLVER_FREE_PATH,
+        }
+        proc = run_memex(
+            [
+                "extract",
+                "--db", str(store["db"]),
+                "--vault", str(store["vault"]),
+                "https://example.com/photo.jpg",
+            ],
+            cwd=WORKTREE,
+            env=env,
+        )
+        assert proc.returncode == 0, proc.stderr
+        import json
+        data = json.loads(proc.stdout)
+        assert data.get("status") in ("ingested", "already_exists")
+
+    def test_ingest_normal_url_succeeds(self, store, run_memex):
+        """Normal ingestable URLs still work fine."""
+        from tests.conftest import WORKTREE, FAKE_FETCHER
+        env = {
+            "MEMEX_FETCHER_MODULE": FAKE_FETCHER,
+            "PATH": self._RESOLVER_FREE_PATH,
+        }
+        proc = run_memex(
+            [
+                "extract",
+                "--db", str(store["db"]),
+                "--vault", str(store["vault"]),
+                "https://example.com/article",
+            ],
+            cwd=WORKTREE,
+            env=env,
+        )
+        assert proc.returncode == 0, proc.stderr
+        import json
+        data = json.loads(proc.stdout)
+        assert data["status"] in ("ingested", "already_exists")
+
+    def test_ingest_x_com_ignores_resolver_custom_cmd(self, store, run_memex):
+        """extract doesn't use resolution gate — resolver env is ignored."""
+        import os
+        from tests.conftest import WORKTREE, FAKE_FETCHER
+        env = {
+            "MEMEX_FETCHER_MODULE": FAKE_FETCHER,
+            "MEMEX_RESOLVER_CMD": "echo fail_placeholder",
+            "PATH": os.environ.get("PATH", ""),
+        }
+        proc = run_memex(
+            [
+                "extract",
+                "--db", str(store["db"]),
+                "--vault", str(store["vault"]),
+                "https://x.com/user/status/123",
+            ],
+            cwd=WORKTREE,
+            env=env,
+        )
+        assert proc.returncode == 0, proc.stderr
+
+    def test_ingest_x_com_ignores_resolver_failure(self, store, run_memex):
+        """extract doesn't use resolution — resolver env is ignored and fetch succeeds."""
+        from tests.conftest import WORKTREE, FAKE_FETCHER
+        import os
+        env = {
+            "MEMEX_FETCHER_MODULE": FAKE_FETCHER,
+            "MEMEX_RESOLVER_CMD": "echo fail_placeholder",
+            "PATH": os.environ.get("PATH", ""),
+        }
+        proc = run_memex(
+            [
+                "extract",
+                "--db", str(store["db"]),
+                "--vault", str(store["vault"]),
+                "https://x.com/user/status/123",
+            ],
+            cwd=WORKTREE,
+            env=env,
+        )
+        assert proc.returncode == 0, proc.stderr
+
+    def test_resolve_media_url_returns_ingestable_false(self):
+        """Verify resolve_url marks media URLs as non-ingestable."""
+        from memex.fetcher import resolve_url
+        result = resolve_url("https://example.com/image.png")
+        assert result.ingestable is False
+        assert result.type == "unknown"
+
+    def test_resolve_x_com_url_returns_ingestable_false_with_note(self):
+        """Verify resolve_url marks X/Twitter URLs as non-ingestable with a note."""
+        from memex.fetcher import resolve_url
+        result = resolve_url("https://x.com/user/status/123")
+        assert result.ingestable is False
+        assert result.note is not None
+        assert result.type == "unknown"
+

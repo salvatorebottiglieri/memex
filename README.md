@@ -14,26 +14,34 @@ memex exposes a JSON-only CLI (one command per operation, all output is structur
 
 | Command | Description |
 |---------|-------------|
-| `memex init --db <path> --vault <path>` | Create SQLite DB and vault directory (idempotent) |
-| `memex status --db <path> --vault <path>` | Check if paths exist |
-| `memex ingest --db <path> --vault <path> <url>` | Fetch URL, store L0 markdown, insert node+source rows (idempotent) |
-| `memex ingest --db <path> --vault <path> --inbox <file>` | Ingest a WhatsApp `.txt` export, advancing a per-file cursor |
-| `memex list --db <path> --vault <path>` | List all nodes |
-| `memex list --db <path> --vault <path> --pending` | List canonical keys captured in the inbox but not yet ingested |
-| `memex ingest --db <path> --vault <path> --from-inbox` | Flush all pending inbox items into the ledger (idempotent) |
-| `memex show --db <path> --vault <path> <node-id>` | Show node details including L0 content, trust state, check failures |
-| `memex derive --db <path> --vault <path> <node-id>` | Generate a notes-tier derivation from an L0 (agent via `MEMEX_AGENT`) |
-| `memex derive --db <path> --vault <path> --all [--limit N]` | Batch-derive all un-derived L0 nodes (default limit: 10) |
-| `memex search --db <path> --vault <path> <query>` | Keyword search over derivation content (read-only) |
-| `memex synthesize --db <path> --vault <path> <node-id> [<node-id> ...]` | Generate a synthesis-tier derivation from one or more nodes (agent via `MEMEX_AGENT`) |
-| `memex render --db <path> --vault <path>` | Project SQLite graph -> YAML frontmatter + wikilinks on markdown files (slice 1: metadata + tags + aliases) |
-| `memex capture --db <path> --vault <path>` | Poll Telegram Saved Messages and persist new captures to the inbox (env: `MEMEX_TELEGRAM_SOURCE`) |
-| `memex review --db <path> --vault <path>` | Batch-generate review proposals for all pending contestation events |
-| `memex review list --db <path> --vault <path>` | Show the review queue (pending events + proposals) |
-| `memex review accept --db <path> --vault <path> <proposal-id>` | Accept a review proposal: affected nodes -> stale |
-| `memex review reject --db <path> --vault <path> <proposal-id>` | Reject a review proposal: close event, no trust_state change |
-| `memex review dismiss --db <path> --vault <path> <proposal-id>` | Dismiss a review proposal: valid but harmless, no trust_state change |
-| `memex contradict --db <path> --vault <path> <target-id> --asserted-by <node-id>` | Write a contradicts edge targeting a node, triggering contested propagation |
+| `memex init` | Create SQLite DB and vault directory (idempotent) |
+| `memex status` | Check if paths exist |
+| `memex ingest <url>` | Fetch URL, store L0 markdown, insert node+source rows (idempotent) |
+| `memex ingest --inbox <file>` | Ingest a WhatsApp `.txt` export, advancing a per-file cursor |
+| `memex ingest --from-inbox` | Flush all pending inbox items into the ledger |
+| `memex list [--kind --tier --trust-state --confidence --limit --offset]` | List all nodes with optional filters |
+| `memex list --pending` | List canonical keys captured in inbox but not yet ingested |
+| `memex show <node-id>` | Show node details including L0 content, trust state, check failures |
+| `memex extract <node-id>` | Extract 3-5 key ideas from a node (lightweight, no full derive) |
+| `memex ideas [query]` | Search across extracted ideas (empty query = all ideas) |
+| `memex derive <node-id>` | Generate a notes-tier derivation from an L0 (agent via `MEMEX_AGENT`) |
+| `memex derive --all [--limit N]` | Batch-derive all un-derived L0 nodes (default limit: 10) |
+| `memex search <query>` | Keyword search over derivations AND L0 metadata (title/URL/key) |
+| `memex synthesize <node-id> [<node-id> ...]` | Generate a synthesis-tier derivation from one or more nodes |
+| `memex delete <node-id> [--cascade]` | Remove a node (logical delete, no file removal). Cascade removes descendants |
+| `memex retry <node-id>` | Re-fetch a failed source URL |
+| `memex stats` | Vault statistics dashboard (counts by kind/tier/trust/confidence, coverage) |
+| `memex render` | Project SQLite graph -> YAML frontmatter + wikilinks on markdown files |
+| `memex list --synthesis-statement "<substring>"` | Substring match against derivation synthesis statements |
+| `memex backfill-synthesis [--dry-run]` | One-shot migration: parse `> Synthesis:` markers from existing derivation files into the structured column |
+| `memex capture` | Poll Telegram Saved Messages, persist to inbox |
+| `memex review` | Batch-generate review proposals for all pending contestation events |
+| `memex review list` | Show the review queue (pending events + proposals) |
+| `memex review accept/reject/dismiss <proposal-id>` | Adjudicate a review proposal |
+| `memex contradict <target-id> --asserted-by <node-id>` | Write a contradicts edge, triggering contested propagation |
+| `memex sync [--no-push] [--install-hooks]` | Commit vault state: render → git add → commit → push in one shot. `--install-hooks` writes a git post-merge hook that auto-renders after pull |
+
+All commands accept `--db <path>` and `--vault <path>` (or set `MEMEX_DB` / `MEMEX_VAULT` env vars; CLI flags take precedence). Auto-detected defaults: Obsidian vault via `~/.obsidian`, DB at `<vault>/.memex/memex.db`.
 
 ## Design
 
@@ -58,6 +66,79 @@ Tests inject fake collaborators without touching network or paying for LLM calls
 | Env var | Where | Effect |
 |---|---|---|
 | `MEMEX_FETCHER_MODULE` | `memex ingest` | Replaces the default `RoutingFetcher` with a module:Class string (e.g. `tests.conftest:FakeFetcher`) |
-| `MEMEX_AGENT` | `memex derive` | Replaces `AnthropicAgent` with a module:Class string (e.g. `tests.fake_llm_client:FakeAgent`). Omit to use the built-in `DemoAgent` (no API key needed). |
+| `MEMEX_AGENT` | `memex derive`, `extract`, `synthesize`, `review` | Replaces the default `DemoAgent` with a module:Class string (e.g. `tests.fake_llm_client:FakeAgent`, or `memex.agent:OMPAgent`). Omit to use `DemoAgent` (no API key needed, hardcoded output). |
 
 Both follow the `module:Class` import-string convention so the seam is a one-line change with no monkeypatching.
+
+## Sharing between devices
+
+The vault folder (markdown files + SQLite DB) can be shared between machines via git.
+
+### Bootstrap
+
+```bash
+# Device A — pick a path, init, then git init
+mkdir -p ~/vault
+cd ~/vault
+memex init
+# export MEMEX_VAULT=~/vault in your shell rc so every command finds it
+git init
+echo -e ".obsidian/\n.cache/\n__pycache__/\n*.pyc\n*.pyo" > .gitignore
+git add -A && git commit -m "init"
+```
+
+### Clone on device B
+
+```bash
+git clone <remote> ~/vault
+# export MEMEX_VAULT=~/vault in your shell rc
+memex init                    # idempotent — safe on existing DB
+memex sync --install-hooks    # install auto-render on git pull (optional)
+```
+
+### Daily sync
+
+```bash
+# On either device — all three steps in one command:
+memex sync
+
+# On the other device — pull + auto-render (if hooks installed):
+git pull                       # post-merge hook auto-runs memex render
+
+# Without hooks:
+git pull && memex render
+```
+
+`memex sync` does render → `git add -A` → `git commit -m "sync"` → `git push`.
+Use `--no-push` to skip the push step (e.g. batch multiple changes before pushing).
+
+### Git hooks (optional)
+
+```bash
+# Install a post-merge hook so every `git pull` auto-runs memex render:
+memex sync --install-hooks
+```
+
+
+### Remote and credentials
+
+`memex sync` calls `git push` without specifying a remote — it uses the default
+remote configured in the vault repo. Set it up once:
+
+```bash
+git remote add origin <url>   # GitHub, GitLab, your own server, etc.
+```
+
+Credentials are handled entirely by git: SSH keys, `git-credential-libsecret`,
+`git-credential-oauth`, tokens in `~/.netrc` — anything git supports.
+`memex sync` never touches credentials, never asks for a password, never
+manages tokens. If `git push` fails for auth, git's error is reported verbatim.
+
+### `memex` must be on PATH
+
+The git hook (`memex sync --install-hooks`) writes `exec memex render --vault …`.
+It only works if `memex` is installed and reachable on PATH (e.g. via
+`pip install memex` or `uv tool install memex`). During development, edit the
+hook manually to point at `uv run python -m memex.cli render` instead.
+
+See [ADR-0015](docs/adr/0015-shared-vault-git-sync.md) for rationale and tradeoffs.

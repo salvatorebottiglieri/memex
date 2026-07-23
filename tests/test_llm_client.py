@@ -300,3 +300,85 @@ class TestLoadAgentValidation:
         assert hasattr(client, "review")
         assert callable(client.derive)
         assert callable(client.review)
+
+class TestExtractIdeas:
+    """extract_ideas — base, FakeAgent, and AnthropicAgent."""
+
+    @staticmethod
+    def _make_mock_anthropic(message_text: str):
+        """Build a fake anthropic module returning the given message text."""
+        import sys  # noqa: PLC0415
+        from unittest.mock import MagicMock  # noqa: PLC0415
+
+        fake_message = MagicMock()
+        fake_message.content = [MagicMock(text=message_text)]
+
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = fake_message
+
+        fake_module = MagicMock()
+        fake_module.Anthropic.return_value = mock_client
+
+        return fake_module
+
+    def test_base_agent_extract_ideas_returns_empty(self):
+        """Agent().extract_ideas('any') returns []."""
+        client = Agent()
+        result = client.extract_ideas("any")
+        assert result == []
+
+    def test_fake_agent_extract_ideas(self):
+        """FakeAgent.extract_ideas returns a list of strings."""
+        client = load_agent(FAKE_AGENT)
+        result = client.extract_ideas("any")
+        assert isinstance(result, list)
+        assert len(result) > 0
+        assert all(isinstance(item, str) for item in result)
+        assert "Key idea 1" in result
+
+    def test_anthropic_agent_extract_ideas_parses_json(self):
+        """AnthropicAgent.extract_ideas parses a valid JSON array from the LLM."""
+        import json  # noqa: PLC0415
+        import sys  # noqa: PLC0415
+
+        from memex.agent import AnthropicAgent  # noqa: PLC0415
+
+        ideas = ["Idea one", "Idea two", "Idea three"]
+        fake_json = json.dumps(ideas)
+        fake_module = self._make_mock_anthropic(fake_json)
+
+        saved = sys.modules.get("anthropic")
+        sys.modules["anthropic"] = fake_module
+        try:
+            client = AnthropicAgent()
+            result = client.extract_ideas("some content")
+        finally:
+            if saved is None:
+                del sys.modules["anthropic"]
+            else:
+                sys.modules["anthropic"] = saved
+
+        assert isinstance(result, list)
+        assert result == ["Idea one", "Idea two", "Idea three"]
+        assert all(isinstance(item, str) for item in result)
+
+    def test_anthropic_agent_extract_ideas_fallback_empty(self):
+        """AnthropicAgent.extract_ideas returns [] when LLM returns bad JSON."""
+        import sys  # noqa: PLC0415
+
+        from memex.agent import AnthropicAgent  # noqa: PLC0415
+
+        fake_module = self._make_mock_anthropic("{Not valid JSON]")
+
+        saved = sys.modules.get("anthropic")
+        sys.modules["anthropic"] = fake_module
+        try:
+            client = AnthropicAgent()
+            result = client.extract_ideas("some content")
+        finally:
+            if saved is None:
+                del sys.modules["anthropic"]
+            else:
+                sys.modules["anthropic"] = saved
+
+        assert result == []

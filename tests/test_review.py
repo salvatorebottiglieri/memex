@@ -12,43 +12,11 @@ from memex.store import Store as _Store
 from tests.conftest import _run_memex, FAKE_FETCHER
 
 FAKE_AGENT = "tests.fake_llm_client:FakeAgent"
-FAKE_AGENT_VALID_REFS = "tests.test_review:FakeAgentValidRefs"
-class FakeAgentValidRefs:
-    """Fake agent returning realistic referencable values.
-
-    Unlike FakeAgent (which returns fake node IDs like 'n1','n2'),
-    this agent returns damage_boundary_node_id=None to satisfy the FK constraint.
-    """
-
-    def derive(self, content: str) -> dict:
-        return {"prose": "fake", "synthesis_statements": []}
-
-    def review(self, target_content: str, asserting_content: str, edge_payload: dict) -> dict:
-        from memex.agent import ReviewProposal
-        return ReviewProposal(
-            affected_node_ids=[],
-            damage_boundary_node_id=None,
-            rationale_md="Fake review: all good.",
-            confidence="high",
-        )
-
-class FakeAgentThrowsOnReview:
-    """Fake agent that raises on every review() call.
-
-    Used to test per-event error recovery in the review batch command.
-    """
-
-    def derive(self, content: str) -> dict:
-        return {"prose": "fake", "synthesis_statements": []}
-
-    def review(self, target_content: str, asserting_content: str, edge_payload: dict) -> None:
-        raise RuntimeError("Simulated LLM review failure")
-
-
+FAKE_AGENT_VALID_REFS = "tests.fake_llm_client:FakeAgentValidRefs"
 
 def _ingest(store, url: str) -> dict:
     result = _run_memex(
-        ["ingest", "--db", str(store["db"]), "--vault", str(store["vault"]), url],
+        ["extract", "--db", str(store["db"]), "--vault", str(store["vault"]), url],
         env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
     )
     assert result.returncode == 0, result.stderr
@@ -177,7 +145,7 @@ class TestReviewCLI:
             derived = json.loads(derive_result.stdout)
             self._add_contradicts_edge(store, derived["id"], ingested["id"])
 
-        THROWING_AGENT = "tests.test_review:FakeAgentThrowsOnReview"
+        THROWING_AGENT = "tests.fake_llm_client:FakeAgentThrowsOnReview"
         result = _run_memex(
             ["review", "--db", str(store["db"]), "--vault", str(store["vault"])],
             env={"MEMEX_AGENT": THROWING_AGENT},

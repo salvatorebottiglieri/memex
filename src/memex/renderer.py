@@ -91,24 +91,46 @@ def _build_frontmatter(node: dict[str, Any], body: str, store: Store) -> dict[st
     cf = node.get("check_failures")
     if cf is not None:
         fm["check_failures"] = cf
-
+    ss = node.get("synthesis_statements")
+    if ss:
+        fm["synthesis_statements"] = ss
     # ── Edge wikilinks ────────────────────────────────────────────
+    # Emit `[[<target-filename>|<human-alias>]]`. Obsidian resolves wikilinks
+    # by filename, so the link always points to the right file. The alias
+    # (the part after `|`) is what Obsidian *displays* — the human title.
+    # This form is robust to file renames inside the vault (we read the
+    # current filename from the target's content_path) and renders as the
+    # readable title in the source note.
     node_id = node["id"]
     edges = [
         e for e in store.list_edges(node_id=node_id)
         if e["from_node"] == node_id
     ]
-    rel_groups: dict[str, list[str]] = {}
+    rel_groups: dict[str, list[str]] = []
     for e in edges:
         rel = e["relation"]
-        wikilink = f"[[{e['to_node']}]]"
-        rel_groups.setdefault(rel, []).append(wikilink)
-
-    for rel, targets in rel_groups.items():
-        if len(targets) == 1:
-            fm[rel] = targets[0]
+        target = store.get_node(e["to_node"])
+        # Filename: stem of the target's content_path. Falls back to the
+        # UUID as a last resort (Obsidian will then create an empty file
+        # with that name — the user will notice and we can fix it).
+        content_path = (target or {}).get("content_path") or ""
+        if content_path:
+            filename = Path(content_path).stem
         else:
-            fm[rel] = targets
+            filename = e["to_node"]
+        # Display alias: title (L0) or first H1 (derivation) or UUID.
+        alias = _resolve_alias(target or {}, "") or e["to_node"]
+        wikilink = f"[[{filename}|{alias}]]"
+        rel_groups.append((rel, wikilink))
+
+    for rel, wikilink in rel_groups:
+        existing = fm.get(rel)
+        if existing is None:
+            fm[rel] = wikilink
+        elif isinstance(existing, list):
+            existing.append(wikilink)
+        else:
+            fm[rel] = [existing, wikilink]
 
     return fm
 
@@ -147,6 +169,6 @@ def _extract_body(path: Path) -> str:
 
 def _write_file(path: Path, fm: dict[str, Any], body: str) -> None:
     """Write YAML frontmatter + body to a markdown file."""
-    fm_text = yaml.dump(fm, default_flow_style=False, sort_keys=False, allow_unicode=True)
+    fm_text = yaml.dump(fm, default_flow_style=False, sort_keys=False, allow_unicode=True, width=999)
     content = f"---\n{fm_text}---\n\n{body}"
     path.write_text(content, encoding="utf-8")
