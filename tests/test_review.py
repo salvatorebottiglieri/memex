@@ -16,7 +16,7 @@ FAKE_AGENT_VALID_REFS = "tests.fake_llm_client:FakeAgentValidRefs"
 
 def _ingest(store, url: str) -> dict:
     result = _run_memex(
-        ["ingest", "--db", str(store["db"]), "--vault", str(store["vault"]), url],
+        ["extract", "--db", str(store["db"]), "--vault", str(store["vault"]), url],
         env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
     )
     assert result.returncode == 0, result.stderr

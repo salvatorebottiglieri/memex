@@ -589,8 +589,8 @@ class TestIngestBlocking:
         if "nvm" not in p
     )
 
-    def test_ingest_x_com_fails_without_resolver(self, store, run_memex):
-        """Without a resolver, ingest should fail for non-ingestable URLs."""
+    def test_ingest_x_com_succeeds_without_resolver(self, store, run_memex):
+        """Without a resolver, extract still works (the resolution gate was removed from extract)."""
         from tests.conftest import WORKTREE, FAKE_FETCHER
         env = {
             "MEMEX_FETCHER_MODULE": FAKE_FETCHER,
@@ -598,7 +598,7 @@ class TestIngestBlocking:
         }
         proc = run_memex(
             [
-                "ingest",
+                "extract",
                 "--db", str(store["db"]),
                 "--vault", str(store["vault"]),
                 "https://x.com/user/status/123",
@@ -606,15 +606,13 @@ class TestIngestBlocking:
             cwd=WORKTREE,
             env=env,
         )
-        assert proc.returncode != 0
+        assert proc.returncode == 0, proc.stderr
         import json
-        data = json.loads(proc.stderr)
-        assert "error" in data
-        assert "url" in data
-        assert data["url"] == "https://x.com/user/status/123"
+        data = json.loads(proc.stdout)
+        assert data.get("status") in ("ingested", "already_exists")
 
-    def test_ingest_media_url_fails_without_resolver(self, store, run_memex):
-        """Ingest of direct media URLs fails without a resolver."""
+    def test_ingest_media_url_succeeds_without_resolver(self, store, run_memex):
+        """Ingest of media URLs succeeds (resolution gate was removed from extract)."""
         from tests.conftest import WORKTREE, FAKE_FETCHER
         env = {
             "MEMEX_FETCHER_MODULE": FAKE_FETCHER,
@@ -622,7 +620,7 @@ class TestIngestBlocking:
         }
         proc = run_memex(
             [
-                "ingest",
+                "extract",
                 "--db", str(store["db"]),
                 "--vault", str(store["vault"]),
                 "https://example.com/photo.jpg",
@@ -630,10 +628,10 @@ class TestIngestBlocking:
             cwd=WORKTREE,
             env=env,
         )
-        assert proc.returncode != 0
+        assert proc.returncode == 0, proc.stderr
         import json
-        data = json.loads(proc.stderr)
-        assert "error" in data
+        data = json.loads(proc.stdout)
+        assert data.get("status") in ("ingested", "already_exists")
 
     def test_ingest_normal_url_succeeds(self, store, run_memex):
         """Normal ingestable URLs still work fine."""
@@ -644,7 +642,7 @@ class TestIngestBlocking:
         }
         proc = run_memex(
             [
-                "ingest",
+                "extract",
                 "--db", str(store["db"]),
                 "--vault", str(store["vault"]),
                 "https://example.com/article",
@@ -657,8 +655,8 @@ class TestIngestBlocking:
         data = json.loads(proc.stdout)
         assert data["status"] in ("ingested", "already_exists")
 
-    def test_ingest_x_com_with_resolver_custom_cmd(self, store, run_memex):
-        """When MEMEX_RESOLVER_CMD is set, the custom resolver is used first."""
+    def test_ingest_x_com_ignores_resolver_custom_cmd(self, store, run_memex):
+        """extract doesn't use resolution gate — resolver env is ignored."""
         import os
         from tests.conftest import WORKTREE, FAKE_FETCHER
         env = {
@@ -668,7 +666,7 @@ class TestIngestBlocking:
         }
         proc = run_memex(
             [
-                "ingest",
+                "extract",
                 "--db", str(store["db"]),
                 "--vault", str(store["vault"]),
                 "https://x.com/user/status/123",
@@ -676,15 +674,10 @@ class TestIngestBlocking:
             cwd=WORKTREE,
             env=env,
         )
-        # echo outputs the placeholder + URL — not a valid URL, resolver fails
-        assert proc.returncode != 0
-        import json
-        lines = proc.stderr.strip().splitlines()
-        data = json.loads(lines[-1])  # last line is the error JSON
-        assert "error" in data
+        assert proc.returncode == 0, proc.stderr
 
-    def test_ingest_x_com_with_resolver_fails_gracefully(self, store, run_memex):
-        """When auto-resolution fails, we get a ResolverError."""
+    def test_ingest_x_com_ignores_resolver_failure(self, store, run_memex):
+        """extract doesn't use resolution — resolver env is ignored and fetch succeeds."""
         from tests.conftest import WORKTREE, FAKE_FETCHER
         import os
         env = {
@@ -694,7 +687,7 @@ class TestIngestBlocking:
         }
         proc = run_memex(
             [
-                "ingest",
+                "extract",
                 "--db", str(store["db"]),
                 "--vault", str(store["vault"]),
                 "https://x.com/user/status/123",
@@ -702,12 +695,7 @@ class TestIngestBlocking:
             cwd=WORKTREE,
             env=env,
         )
-        assert proc.returncode != 0
-        import json
-        lines = proc.stderr.strip().splitlines()
-        data = json.loads(lines[-1])
-        assert "error" in data
-        assert "return a valid URL" in data["error"] or "timed out" in data["error"]
+        assert proc.returncode == 0, proc.stderr
 
     def test_resolve_media_url_returns_ingestable_false(self):
         """Verify resolve_url marks media URLs as non-ingestable."""

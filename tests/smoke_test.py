@@ -106,7 +106,7 @@ def smoke_lifecycle(tmp: Path) -> None:
     _check("status reports exists=true after init", d["db_exists"] and d["vault_exists"])
 
     proc = _run(
-        ["ingest", "--db", str(db), "--vault", str(vault), "https://example.com/article"],
+        ["extract", "--db", str(db), "--vault", str(vault), "https://example.com/article"],
         env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
     )
     d = _expect_json("ingest URL", proc)
@@ -144,9 +144,9 @@ def smoke_idempotency(tmp: Path) -> None:
     db, vault = _fresh_store(tmp, "idem")
     url = "https://example.com/article?utm_source=twitter"
     env = {"MEMEX_FETCHER_MODULE": FAKE_FETCHER}
-    p1 = _run(["ingest", "--db", str(db), "--vault", str(vault), url], env=env)
+    p1 = _run(["extract", "--db", str(db), "--vault", str(vault), url], env=env)
     d1 = _expect_json("ingest #1", p1)
-    p2 = _run(["ingest", "--db", str(db), "--vault", str(vault), url], env=env)
+    p2 = _run(["extract", "--db", str(db), "--vault", str(vault), url], env=env)
     d2 = _expect_json("ingest #2", p2)
     _check("same id returned", d1["id"] == d2["id"])
     _check("second status=already_exists", d2.get("status") == "already_exists")
@@ -163,7 +163,7 @@ def smoke_fetch_failure(tmp: Path) -> None:
     print("\n[FETCH FAILURE] ingest URL that fails to fetch")
     db, vault = _fresh_store(tmp, "fetchfail")
     proc = _run(
-        ["ingest", "--db", str(db), "--vault", str(vault), "https://fail.example.com/bad"],
+        ["extract", "--db", str(db), "--vault", str(vault), "https://fail.example.com/bad"],
         env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
     )
     # exit 0 (failure recorded, not crashed)
@@ -197,7 +197,7 @@ def smoke_inbox(tmp: Path) -> None:
     inbox_path.write_text(export, encoding="utf-8")
 
     proc = _run(
-        ["ingest", "--db", str(db), "--vault", str(vault), "--inbox", str(inbox_path)],
+        ["extract", "--db", str(db), "--vault", str(vault), "--inbox", str(inbox_path)],
         env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
     )
     results = _expect_json("ingest --inbox", proc)
@@ -215,7 +215,7 @@ def smoke_inbox(tmp: Path) -> None:
 
     # Re-run: cursor moved past, so nothing is processed
     proc = _run(
-        ["ingest", "--db", str(db), "--vault", str(vault), "--inbox", str(inbox_path)],
+        ["extract", "--db", str(db), "--vault", str(vault), "--inbox", str(inbox_path)],
         env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
     )
     rerun = _expect_json("re-run ingest --inbox", proc)
@@ -239,7 +239,7 @@ def smoke_inbox_with_failures(tmp: Path) -> None:
     inbox_path = tmp / "inbox.txt"
     inbox_path.write_text(export, encoding="utf-8")
     proc = _run(
-        ["ingest", "--db", str(db), "--vault", str(vault), "--inbox", str(inbox_path)],
+        ["extract", "--db", str(db), "--vault", str(vault), "--inbox", str(inbox_path)],
         env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
     )
     results = _expect_json("ingest --inbox mixed", proc)
@@ -279,7 +279,7 @@ def smoke_pending(tmp: Path) -> None:
 
     # After ingesting one, only one remains pending
     _run(
-        ["ingest", "--db", str(db), "--vault", str(vault), "https://example.com/a"],
+        ["extract", "--db", str(db), "--vault", str(vault), "https://example.com/a"],
         env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
     )
     proc = _run(["list", "--db", str(db), "--vault", str(vault), "--pending"])
@@ -291,7 +291,7 @@ def smoke_pending(tmp: Path) -> None:
 def smoke_derive_passing(tmp: Path) -> None:
     print("\n[DERIVE PASS] derive -> auto-verified")
     db, vault = _fresh_store(tmp, "deriveok")
-    p = _run(["ingest", "--db", str(db), "--vault", str(vault), "https://example.com/article"],
+    p = _run(["extract", "--db", str(db), "--vault", str(vault), "https://example.com/article"],
              env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER})
     l0_id = _expect_json("ingest for derive", p)["id"]
 
@@ -334,7 +334,7 @@ def smoke_derive_passing(tmp: Path) -> None:
 def smoke_derive_failing(tmp: Path) -> None:
     print("\n[DERIVE FAIL] failing LLM -> draft with check_failures")
     db, vault = _fresh_store(tmp, "derivefail")
-    p = _run(["ingest", "--db", str(db), "--vault", str(vault), "https://example.com/article"],
+    p = _run(["extract", "--db", str(db), "--vault", str(vault), "https://example.com/article"],
              env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER})
     l0_id = _expect_json("ingest for failing derive", p)["id"]
 
@@ -357,7 +357,7 @@ def smoke_derive_failing(tmp: Path) -> None:
 def smoke_derive_idempotent(tmp: Path) -> None:
     print("\n[DERIVE IDEMPOTENT] derive twice -> already_derived")
     db, vault = _fresh_store(tmp, "deriveidem")
-    p = _run(["ingest", "--db", str(db), "--vault", str(vault), "https://example.com/article"],
+    p = _run(["extract", "--db", str(db), "--vault", str(vault), "https://example.com/article"],
              env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER})
     l0_id = _expect_json("ingest", p)["id"]
 
@@ -388,7 +388,7 @@ def smoke_derive_all(tmp: Path) -> None:
 
     # Ingest 3 URLs
     for i in range(3):
-        p = _run(["ingest", "--db", str(db), "--vault", str(vault),
+        p = _run(["extract", "--db", str(db), "--vault", str(vault),
                   f"https://example.com/article-{i}"], env=env)
         _expect_json(f"ingest {i}", p)
 
@@ -427,7 +427,7 @@ def smoke_derive_all(tmp: Path) -> None:
 def smoke_search(tmp: Path) -> None:
     print("\n[SEARCH] keyword search over derivations")
     db, vault = _fresh_store(tmp, "search")
-    p = _run(["ingest", "--db", str(db), "--vault", str(vault), "https://example.com/article"],
+    p = _run(["extract", "--db", str(db), "--vault", str(vault), "https://example.com/article"],
              env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER})
     l0_id = _expect_json("ingest for search", p)["id"]
     _run(["derive", "--db", str(db), "--vault", str(vault), l0_id],
@@ -476,12 +476,12 @@ def smoke_errors(tmp: Path) -> None:
     _check("derive unknown id exits non-zero", p.returncode != 0)
 
     # ingest with no URL and no --inbox
-    p = _run(["ingest", "--db", str(db), "--vault", str(vault)])
+    p = _run(["extract", "--db", str(db), "--vault", str(vault)])
     _check("ingest with no url/inbox exits non-zero", p.returncode != 0)
 
     # ingest with --inbox pointing at nonexistent file
     p = _run(
-        ["ingest", "--db", str(db), "--vault", str(vault), "--inbox", str(tmp / "nope.txt")],
+        ["extract", "--db", str(db), "--vault", str(vault), "--inbox", str(tmp / "nope.txt")],
         env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
     )
     _check("ingest with missing inbox file exits non-zero", p.returncode != 0)
@@ -541,7 +541,7 @@ def smoke_migration(tmp: Path) -> None:
     _check("failed column added to source", "failed" in source_cols, f"got {source_cols}")
 
     # And ingest still works on the migrated DB
-    p = _run(["ingest", "--db", str(db), "--vault", str(vault), "https://example.com/article"],
+    p = _run(["extract", "--db", str(db), "--vault", str(vault), "https://example.com/article"],
              env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER})
     d = _expect_json("ingest after migration", p)
     _check("ingest works after migration", d.get("status") == "ingested")
@@ -551,7 +551,7 @@ def smoke_youtube(tmp: Path) -> None:
     print("\n[YOUTUBE] canonical_key maps youtube URLs to stable scheme")
     db, vault = _fresh_store(tmp, "yt")
     p = _run(
-        ["ingest", "--db", str(db), "--vault", str(vault), "https://www.youtube.com/watch?v=dQw4w9WgXcQ"],
+        ["extract", "--db", str(db), "--vault", str(vault), "https://www.youtube.com/watch?v=dQw4w9WgXcQ"],
         env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
     )
     d = _expect_json("ingest youtube", p)
@@ -560,7 +560,7 @@ def smoke_youtube(tmp: Path) -> None:
 
     # Same video via youtu.be -> same key
     p = _run(
-        ["ingest", "--db", str(db), "--vault", str(vault), "https://youtu.be/dQw4w9WgXcQ"],
+        ["extract", "--db", str(db), "--vault", str(vault), "https://youtu.be/dQw4w9WgXcQ"],
         env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
     )
     d = _expect_json("ingest youtu.be", p)
@@ -572,7 +572,7 @@ def smoke_fetcher_pdf(tmp: Path) -> None:
     print("\n[FETCHER PDF] ingest a .pdf URL through RoutingFetcher")
     db, vault = _fresh_store(tmp, "fetcherpdf")
     p = _run(
-        ["ingest", "--db", str(db), "--vault", str(vault), "https://example.com/paper.pdf"],
+        ["extract", "--db", str(db), "--vault", str(vault), "https://example.com/paper.pdf"],
         env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER_PDF},
     )
     d = _expect_json("ingest pdf", p)
@@ -595,7 +595,7 @@ def smoke_fetcher_youtube(tmp: Path) -> None:
     print("\n[FETCHER YOUTUBE] ingest a youtube URL through RoutingFetcher")
     db, vault = _fresh_store(tmp, "fetcheryt")
     p = _run(
-        ["ingest", "--db", str(db), "--vault", str(vault), "https://www.youtube.com/watch?v=test123"],
+        ["extract", "--db", str(db), "--vault", str(vault), "https://www.youtube.com/watch?v=test123"],
         env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER_YOUTUBE},
     )
     d = _expect_json("ingest youtube", p)
@@ -627,7 +627,7 @@ def smoke_l0_immutable(tmp: Path) -> None:
     db, vault = _fresh_store(tmp, "immutable")
     url = "https://example.com/article"
     env = {"MEMEX_FETCHER_MODULE": FAKE_FETCHER}
-    _run(["ingest", "--db", str(db), "--vault", str(vault), url], env=env)
+    _run(["extract", "--db", str(db), "--vault", str(vault), url], env=env)
     md_files = list(vault.glob("*.md"))
     _check("1 md file after first ingest", len(md_files) == 1)
 
@@ -635,7 +635,7 @@ def smoke_l0_immutable(tmp: Path) -> None:
     md_files[0].write_text("MUTATED CONTENT")
     original_mtime = md_files[0].stat().st_mtime
 
-    _run(["ingest", "--db", str(db), "--vault", str(vault), url], env=env)
+    _run(["extract", "--db", str(db), "--vault", str(vault), url], env=env)
     after = md_files[0].read_text()
     _check("L0 file content preserved on re-ingest", after == "MUTATED CONTENT",
            f"got {after!r}")
@@ -653,7 +653,7 @@ def smoke_render(tmp: Path) -> None:
     db, vault = _fresh_store(tmp, "render")
 
     # L0 render
-    _run(["ingest", "--db", str(db), "--vault", str(vault), "https://example.com/article"],
+    _run(["extract", "--db", str(db), "--vault", str(vault), "https://example.com/article"],
          env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER})
 
     p = _run(["render", "--db", str(db), "--vault", str(vault)])
@@ -742,7 +742,7 @@ def smoke_capture(tmp: Path) -> None:
 
     # ingest --from-inbox flushes them
     p = _run(
-        ["ingest", "--db", str(db), "--vault", str(vault), "--from-inbox"],
+        ["extract", "--db", str(db), "--vault", str(vault), "--from-inbox"],
         env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
     )
     res = _expect_json("ingest --from-inbox after capture", p)
@@ -785,7 +785,7 @@ def smoke_from_inbox(tmp: Path) -> None:
     con.close()
 
     p = _run(
-        ["ingest", "--db", str(db), "--vault", str(vault), "--from-inbox"],
+        ["extract", "--db", str(db), "--vault", str(vault), "--from-inbox"],
         env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
     )
     res = _expect_json("ingest --from-inbox", p)
@@ -794,7 +794,7 @@ def smoke_from_inbox(tmp: Path) -> None:
 
     # Re-run is idempotent
     p = _run(
-        ["ingest", "--db", str(db), "--vault", str(vault), "--from-inbox"],
+        ["extract", "--db", str(db), "--vault", str(vault), "--from-inbox"],
         env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
     )
     res = _expect_json("ingest --from-inbox #2", p)
@@ -830,7 +830,7 @@ def smoke_full_e2e(tmp: Path) -> None:
     inbox_path = tmp / "inbox.txt"
     inbox_path.write_text(export, encoding="utf-8")
 
-    _run(["ingest", "--db", str(db), "--vault", str(vault), "--inbox", str(inbox_path)],
+    _run(["extract", "--db", str(db), "--vault", str(vault), "--inbox", str(inbox_path)],
          env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER})
 
     p = _run(["list", "--db", str(db), "--vault", str(vault)])
@@ -932,7 +932,7 @@ def smoke_review(tmp: Path) -> None:
 
     # Ingest L0
     proc = _run(
-        ["ingest", "--db", str(db1), "--vault", str(vault1), "https://example.com/article"],
+        ["extract", "--db", str(db1), "--vault", str(vault1), "https://example.com/article"],
         env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
     )
     l0 = _expect_json("sc1 ingest URL", proc)
@@ -1023,7 +1023,7 @@ def smoke_review(tmp: Path) -> None:
 
     # Ingest L0
     proc = _run(
-        ["ingest", "--db", str(db2), "--vault", str(vault2), "https://example.com/article"],
+        ["extract", "--db", str(db2), "--vault", str(vault2), "https://example.com/article"],
         env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
     )
     l0_2 = _expect_json("sc2 ingest URL", proc)
@@ -1096,7 +1096,7 @@ def smoke_review(tmp: Path) -> None:
 
     # Ingest L0
     proc = _run(
-        ["ingest", "--db", str(db3), "--vault", str(vault3), "https://example.com/article"],
+        ["extract", "--db", str(db3), "--vault", str(vault3), "https://example.com/article"],
         env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
     )
     l0_3 = _expect_json("sc3 ingest URL", proc)
@@ -1184,7 +1184,7 @@ def smoke_review(tmp: Path) -> None:
 
     # Ingest L0
     proc = _run(
-        ["ingest", "--db", str(db4), "--vault", str(vault4), "https://example.com/article"],
+        ["extract", "--db", str(db4), "--vault", str(vault4), "https://example.com/article"],
         env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
     )
     l0_4 = _expect_json("sc4 ingest URL", proc)
@@ -1284,7 +1284,7 @@ def smoke_stub(tmp: Path) -> None:
     db, vault = _fresh_store(tmp / "stubdata", "stub")
 
     # Ingest stub URL
-    p = _run(["ingest", "--db", str(db), "--vault", str(vault), "https://stub.example.com"],
+    p = _run(["extract", "--db", str(db), "--vault", str(vault), "https://stub.example.com"],
              env=env)
     d = _expect_json("ingest stub", p)
     _check("ingest stub status=ingested", d.get("status") == "ingested")

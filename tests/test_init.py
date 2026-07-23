@@ -124,7 +124,7 @@ def test_init_migrates_missing_failed_column_in_source(tmp_path, run_memex):
 
     # ingest must not crash (OperationalError: no column named failed)
     result2 = run_memex(
-        ["ingest", "--db", str(db_path), "--vault", str(vault_path), "https://example.com/article"],
+        ["extract", "--db", str(db_path), "--vault", str(vault_path), "https://example.com/article"],
         env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
     )
     assert result2.returncode == 0, result2.stderr
