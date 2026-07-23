@@ -63,8 +63,8 @@ class TestSynthesize:
         kind, tier, depth = row
         assert kind == "summary"
         assert tier == "synthesis"
-        # Both extracted nodes have depth=1, so max + 1 = 2
-        assert depth == 2
+        # Both extracted nodes have depth=0, so max + 1 = 1
+        assert depth == 1
 
     def test_synthesize_provenance_edges(self, store):
         """Synthesis creates N derived_from edges, one per parent."""
@@ -173,7 +173,7 @@ class TestSynthesize:
         assert row is not None
         assert row[0] == "summary"
         assert row[1] == "synthesis"
-        assert row[2] == 2
+        assert row[2] == 1
 
     def test_synthesize_agent_failure_returns_error(self, store):
         """When the agent raises, the CLI returns agent_failed."""
@@ -211,7 +211,7 @@ class TestSynthesize:
         finally:
             conn.close()
         assert row is not None
-        assert row[0] == 3, f"Expected depth 3, got {row[0]}"
+        assert row[0] == 2, f"Expected depth 2, got {row[0]}"
 
 
 class TestSynthesizeQualityGate:

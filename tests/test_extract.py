@@ -19,7 +19,7 @@ FAKE_THROWS_AGENT = "tests.fake_llm_client_throws:FakeLLMClientThrows"
 def _ingest(store, url: str) -> dict:
     """Ingest a URL and return the parsed JSON result."""
     result = _run_memex(
-        ["ingest", "--db", str(store["db"]), "--vault", str(store["vault"]), url],
+        ["extract", "--db", str(store["db"]), "--vault", str(store["vault"]), url],
         env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
     )
     assert result.returncode == 0, result.stderr
@@ -35,9 +35,9 @@ def _derive(store, node_id: str):
 
 
 def _extract(store, node_id: str, *, agent: str = FAKE_AGENT):
-    """Run memex extract on a node."""
+    """Run memex extract-ideas on a node."""
     return _run_memex(
-        ["extract", "--db", str(store["db"]), "--vault", str(store["vault"]), node_id],
+        ["extract-ideas", "--db", str(store["db"]), "--vault", str(store["vault"]), node_id],
         env={"MEMEX_AGENT": agent},
     )
 

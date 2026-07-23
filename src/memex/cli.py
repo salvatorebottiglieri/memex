@@ -4,18 +4,19 @@ All output is JSON (AXI standard: structured, token-frugal, machine-readable).
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import click
 
 from memex.canonical_key import canonical_key
-from memex.ingester import extract_single_url
+from memex.ingester import ingest_single_url as extract_single_url
 import functools
-
 
 def _slugify(text: str, max_length: int = 80) -> str:
     """Convert text to a filesystem-safe slug (lowercase, hyphens only)."""
@@ -200,7 +201,7 @@ def ingest(db_path: Path, vault_path: Path, inbox_path: Path | None,
                 ckey = canonical_key(item["url"])
                 if ckey not in ingested_keys:
                     result = extract_single_url(store, vault_path, item["url"], fetcher)
-                    if not result.get("title") and title_agent and result.get("status") == "extracted" and result.get("content_path"):
+                    if not result.get("title") and title_agent and result.get("status") == "ingested" and result.get("content_path"):
                         cp = Path(result["content_path"])
                         if cp.exists():
                             t = title_agent.generate_title(cp.read_text(encoding="utf-8"), item["url"])
@@ -238,7 +239,7 @@ def ingest(db_path: Path, vault_path: Path, inbox_path: Path | None,
                     item_timestamp=item["timestamp"],
                     item_note=item.get("note"),
                 )
-                if not result.get("title") and title_agent and result.get("status") == "extracted" and result.get("content_path"):
+                if not result.get("title") and title_agent and result.get("status") == "ingested" and result.get("content_path"):
                     cp = Path(result["content_path"])
                     if cp.exists():
                         t = title_agent.generate_title(cp.read_text(encoding="utf-8"), item["url"])
@@ -251,8 +252,6 @@ def ingest(db_path: Path, vault_path: Path, inbox_path: Path | None,
             store.set_cursor(source_name, str(len(all_items)))
 
             click.echo(json.dumps(results))
-
-
 
 @cli.command()
 @_db_options
@@ -275,6 +274,79 @@ def extract(db_path: Path, vault_path: Path, url: str) -> None:
         result = extract_single_url(store, vault_path, url, fetcher)
 
     click.echo(json.dumps(result))
+
+
+@cli.command()
+@click.argument("url", required=False, default=None)
+def resolve(url: str | None) -> None:
+    """Resolve a URL through resolution rules and return JSON.
+
+    Returns the type, ingestability, and direct_url (if applicable).
+    """
+    if not url:
+        _fail("Missing required argument 'URL'.")
+    from memex.fetcher import resolve_url
+    result = resolve_url(url)
+    click.echo(json.dumps(dataclasses.asdict(result)))
+
+
+@cli.command()
+@click.argument("url", required=False, default=None)
+def resolve_agent(url: str | None) -> None:
+    """Resolve a URL using an external agent (Pi/Claude) with a browser.
+
+    Returns JSON with the resolved URL, or an error if no agent is available.
+    """
+    if not url:
+        _fail("Missing required argument 'URL'.")
+    from memex.resolver import detect_resolver, ResolverError
+    resolver = detect_resolver()
+    if resolver is None:
+        _fail("No resolver agent available. Install pi or set MEMEX_RESOLVER_CMD.")
+    try:
+        resolved = resolver.resolve(url)
+        click.echo(json.dumps({"resolved_url": resolved}))
+    except ResolverError as e:
+        _fail(str(e))
+
+
+@cli.command("cookies-export")
+@click.argument("domain", default="x.com")
+@click.option("--output", "-o", default=None, help="Output file (default: stdout)")
+def cookies_export(domain: str, output: str | None) -> None:
+    """Export cookies for a domain (e.g. x.com) to use with resolve-agent.
+
+    Opens a headless browser; login if needed, then cookies are saved.
+    Compatible with MEMEX_COOKIES_FILE env var.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        _fail("Playwright is required: pip install playwright && playwright install chromium")
+
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            ctx = browser.new_context()
+            page = ctx.new_page()
+            click.echo(f"Navigating to https://{domain}...", err=True)
+            page.goto(f"https://{domain}", wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_timeout(3000)
+            click.echo(f"Current URL: {page.url}", err=True)
+            click.echo("If login is required, login now, then press Enter here...", err=True)
+            input()
+            page.wait_for_timeout(2000)
+            cookies = ctx.cookies()
+            browser.close()
+            import json as _json
+            data = _json.dumps(cookies, indent=2)
+            if output:
+                Path(output).write_text(data)
+                click.echo(json.dumps({"status": "saved", "file": output, "count": len(cookies)}))
+            else:
+                click.echo(data)
+    except Exception as e:
+        _fail(str(e))
 
 @cli.command("list")
 @_db_options
@@ -679,7 +751,7 @@ def _derive_all(db_path: Path, vault_path: Path, limit: int) -> None:
         all_nodes = store.list_nodes()
         un_derived = []
         for node in all_nodes:
-            if node.get("kind") != "extracted":
+            if node.get("kind") != "raw_source":
                 continue
             if store.find_derived_from(node["id"]) is not None:
                 continue
@@ -692,7 +764,7 @@ def _derive_all(db_path: Path, vault_path: Path, limit: int) -> None:
         # Report already-derived L0s
         seen_derived = set()
         for node in all_nodes:
-            if node.get("kind") != "extracted":
+            if node.get("kind") != "raw_source":
                 continue
             existing = store.find_derived_from(node["id"])
             if existing is not None:
@@ -705,7 +777,7 @@ def _derive_all(db_path: Path, vault_path: Path, limit: int) -> None:
         # Derive un-derived L0s
         count = 0
         for node in all_nodes:
-            if node.get("kind") != "extracted":
+            if node.get("kind") != "raw_source":
                 continue
             if node["id"] in seen_derived:
                 continue

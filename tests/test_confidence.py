@@ -273,7 +273,7 @@ class TestList:
 class TestDeriveConfidence:
     def _ingest(self, store, url: str) -> dict:
         result = _run_memex(
-            ["ingest", "--db", str(store["db"]), "--vault", str(store["vault"]), url],
+            ["extract", "--db", str(store["db"]), "--vault", str(store["vault"]), url],
             env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
         )
         assert result.returncode == 0, result.stderr
@@ -308,7 +308,7 @@ class TestDeriveConfidence:
 class TestSynthesizeConfidence:
     def _ingest(self, store, url: str) -> dict:
         result = _run_memex(
-            ["ingest", "--db", str(store["db"]), "--vault", str(store["vault"]), url],
+            ["extract", "--db", str(store["db"]), "--vault", str(store["vault"]), url],
             env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
         )
         assert result.returncode == 0, result.stderr

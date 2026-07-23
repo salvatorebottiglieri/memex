@@ -64,7 +64,7 @@ class TestDerive:
         assert kind == "summary"
         assert tier == "notes"
         assert trust_state == "auto-verified"
-        assert depth == 2
+        assert depth == 1
 
     def test_derive_inserts_provenance_edge(self, store):
         ingested = _ingest(store, "https://example.com/article")

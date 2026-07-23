@@ -88,10 +88,10 @@ def store(tmp_path):
 
 
 def ingest(store, url: str, extra_env: dict | None = None) -> subprocess.CompletedProcess:
-    """Run memex ingest with the fake fetcher."""
+    """Run memex extract with the fake fetcher."""
     env = {"MEMEX_FETCHER_MODULE": FAKE_FETCHER, **(extra_env or {})}
     return _run_memex(
-        ["ingest", "--db", str(store["db"]), "--vault", str(store["vault"]), url],
+        ["extract", "--db", str(store["db"]), "--vault", str(store["vault"]), url],
         cwd=WORKTREE,
         env=env,
     )

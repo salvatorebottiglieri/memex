@@ -1,13 +1,14 @@
 """Content fetcher: HttpFetcher + load_fetcher for test injection."""
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
+import re
 
 
 class FetchError(Exception):
     """Raised when content cannot be fetched."""
-
 
 @dataclass
 class FetchResult:
@@ -16,6 +17,18 @@ class FetchResult:
     content: str  # Markdown-compatible article text
     title: str | None = None
     content_path: str | None = None
+
+
+@dataclass
+class Resolution:
+    """Result of URL resolution — describes what a URL represents."""
+
+    url: str
+    type: str
+    ingestable: bool
+    fetcher: str | None = None
+    direct_url: str | None = None
+    note: str | None = None
 
 
 class ContentFetcher:
@@ -134,6 +147,165 @@ class YouTubeTranscriptFetcher(ContentFetcher):
             raise FetchError(str(exc)) from exc
 
 
+class ResolutionRule(ABC):
+    """Abstract base for URL resolution rules."""
+
+    @abstractmethod
+    def match(self, url: str) -> Resolution | None: ...
+
+
+class ArxivRule(ResolutionRule):
+    """Rule that matches arxiv.org/abs/ URLs and resolves to PDF."""
+
+    _ARXIV_PATTERN = re.compile(r"^https?://arxiv\.org/abs/(\d+\.\d+)(v\d+)?")
+
+    def match(self, url: str) -> Resolution | None:
+        m = self._ARXIV_PATTERN.match(url)
+        if m:
+            paper_id = m.group(1)
+            version = m.group(2) or ""
+            return Resolution(
+                url=url,
+                type="arxiv",
+                ingestable=True,
+                fetcher="PDFFetcher",
+                direct_url=f"https://arxiv.org/pdf/{paper_id}{version}",
+            )
+        return None
+
+
+class GitHubBlobRule(ResolutionRule):
+    """Rule that matches github.com/{owner}/{repo}/blob/{branch}/{path} and resolves to raw content."""
+
+    _PATTERN = re.compile(r"^https?://github\.com/([^/]+)/([^/]+)/blob/([^/]+)/([^?#]+)")
+
+    def match(self, url: str) -> Resolution | None:
+        m = self._PATTERN.match(url)
+        if m:
+            owner, repo, branch, path = m.groups()
+            raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}"
+            return Resolution(
+                url=url,
+                type="github_file",
+                ingestable=True,
+                fetcher="HttpFetcher",
+                direct_url=raw_url,
+            )
+        return None
+
+
+class WikipediaRule(ResolutionRule):
+    """Rule that matches *.wikipedia.org/wiki/{title} and resolves to REST API summary."""
+
+    _PATTERN = re.compile(r"^https?://([a-z][a-z-]*)\.wikipedia\.org/wiki/([^?#]+)")
+
+    def match(self, url: str) -> Resolution | None:
+        m = self._PATTERN.match(url)
+        if m:
+            lang = m.group(1)
+            title = m.group(2)
+            api_url = f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/{title}"
+            return Resolution(
+                url=url,
+                type="wikipedia",
+                ingestable=True,
+                fetcher="HttpFetcher",
+                direct_url=api_url,
+            )
+        return None
+
+
+class MediaRule(ResolutionRule):
+    """Rule that matches URLs ending in media extensions or pointing to X/Twitter — not ingestable as text."""
+
+    _MEDIA_EXTENSIONS = (
+        ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".ico", ".bmp",
+        ".mp4", ".webm", ".avi", ".mov", ".mkv",
+        ".mp3", ".wav", ".ogg", ".flac",
+    )
+
+    def match(self, url: str) -> Resolution | None:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        path = parsed.path.lower()
+        host = parsed.hostname or ""
+
+        # Check for X/Twitter URLs
+        if host in ("x.com", "twitter.com"):
+            return Resolution(
+                url=url,
+                type="unknown",
+                ingestable=False,
+                note="URL da social media: richiede browser per estrarre il link target",
+            )
+
+        # Check for media file extensions
+        if any(path.endswith(ext) for ext in self._MEDIA_EXTENSIONS):
+            return Resolution(
+                url=url,
+                type="unknown",
+                ingestable=False,
+                note="URL punta a un file multimediale (immagine/video/audio). memex supporta solo fonti testuali.",
+            )
+
+        return None
+
+class DefaultRule(ResolutionRule):
+    """Fallback rule: matches any http/https URL as a generic web page."""
+
+    def match(self, url: str) -> Resolution | None:
+        if url.startswith(("http://", "https://")):
+            return Resolution(
+                url=url,
+                type="web",
+                ingestable=True,
+                fetcher="HttpFetcher",
+            )
+        return None
+
+
+_rules: list[ResolutionRule] = [ArxivRule(), GitHubBlobRule(), WikipediaRule(), MediaRule(), DefaultRule()]
+
+
+def _strip_tracking_params(url: str) -> str:
+    """Remove common tracking query parameters from a URL."""
+    from urllib.parse import urlencode, urlparse, urlunparse
+
+    parsed = urlparse(url)
+    if not parsed.query:
+        return url
+    params = dict(p.split("=", 1) for p in parsed.query.split("&") if p)
+    _TRACKING_EXACT = frozenset({"fbclid", "gclid", "ref", "source", "mc_cid", "mc_eid"})
+    clean = {k: v for k, v in params.items() if not k.startswith("utm_") and k not in _TRACKING_EXACT}
+    if len(clean) == len(params):
+        return url
+    return urlunparse(parsed._replace(query=urlencode(clean)))
+
+
+def resolve_url(url: str) -> Resolution:
+    """Apply resolution rules and return the first match.
+
+    Tracking parameters are stripped before classification.
+    """
+    clean_url = _strip_tracking_params(url)
+    for rule in _rules:
+        result = rule.match(clean_url)
+        if result is not None:
+            if result.direct_url:
+                result = Resolution(
+                    url=url, type=result.type, ingestable=result.ingestable,
+                    fetcher=result.fetcher, direct_url=result.direct_url,
+                    note=result.note,
+                )
+            return result
+    return Resolution(
+        url=url,
+        type="error",
+        ingestable=False,
+        note=f"No rule matched URL: {url}",
+    )
+
+
 class RoutingFetcher(ContentFetcher):
     """Fetcher that dispatches to specific fetchers based on canonical key prefix.
 
@@ -158,7 +330,13 @@ class RoutingFetcher(ContentFetcher):
             return HttpFetcher()
         return HttpFetcher()
 
+    def _preprocess_url(self, url: str) -> str:
+        """Apply resolution rules and return the direct URL if applicable."""
+        resolution = resolve_url(url)
+        return resolution.direct_url or url
+
     def fetch(self, url: str) -> FetchResult:
+        url = self._preprocess_url(url)
         from memex.canonical_key import canonical_key
         ckey = canonical_key(url)
         fetcher = self._select(ckey)

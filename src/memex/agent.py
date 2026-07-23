@@ -263,8 +263,12 @@ class DemoAgent:
         return None
 
     def extract_ideas(self, content: str) -> list[str]:
-        """Demo: returns canned ideas."""
-        return ["Key idea 1", "Key idea 2", "Key idea 3"]
+        """Extract 3-5 key ideas from content. Demo returns a default set."""
+        return [
+            "The article discusses its topic.",
+            "Key patterns are identified.",
+            "Implications are explored.",
+        ]
 
 class AnthropicAgent(Agent):
     """Real Anthropic-backed agent using structured JSON output."""
