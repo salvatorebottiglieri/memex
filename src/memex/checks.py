@@ -123,4 +123,32 @@ def run_checks(con: sqlite3.Connection, node_id: str, content_path: Path | str) 
             f"Size check failed: derivation is too long ({length} chars, maximum is {MAX_CHARS})"
         )
 
+    # ------------------------------------------------------------------
+    # Check 5: Tier / depth consistency
+    # ------------------------------------------------------------------
+    row = con.execute(
+        "SELECT tier, depth FROM node WHERE id = ?",
+        (node_id,),
+    ).fetchone()
+
+    if row is not None:
+        tier = row[0]
+        depth = row[1]
+        if tier is None or tier == "":
+            # raw_source — must be depth 0
+            if depth != 0:
+                failures.append(
+                    f"Tier/depth inconsistency: node has no tier but depth={depth} (expected 0)"
+                )
+        elif tier == "notes":
+            if depth != 1:
+                failures.append(
+                    f"Tier/depth inconsistency: tier=notes but depth={depth} (expected 1)"
+                )
+        elif tier == "synthesis":
+            if depth < 2:
+                failures.append(
+                    f"Tier/depth inconsistency: tier=synthesis but depth={depth} (expected >= 2)"
+                )
+
     return CheckResult(passed=len(failures) == 0, failures=failures)
