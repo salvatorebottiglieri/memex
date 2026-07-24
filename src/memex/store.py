@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS event_queue (
     status         TEXT NOT NULL CHECK (status IN ('pending','closed')) DEFAULT 'pending',
     closed_at      TEXT
 );
+
 CREATE INDEX IF NOT EXISTS idx_event_queue_status ON event_queue(status);
 CREATE INDEX IF NOT EXISTS idx_event_queue_target ON event_queue(target_node_id);
 
@@ -458,6 +459,7 @@ class Store:
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (edge_id, type, relation, from_node, to_node, written_by),
+
             )
         except sqlite3.Error as e:
             raise StoreError(str(e)) from e

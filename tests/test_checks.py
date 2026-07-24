@@ -56,6 +56,7 @@ def _setup_db(tmp_path: Path) -> tuple[sqlite3.Connection, str, Path]:
 
     con = sqlite3.connect(db_path)
     con.execute("PRAGMA foreign_keys = ON")
+
     return con, deriv_id, content_path
 
 

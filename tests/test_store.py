@@ -15,6 +15,10 @@ from tests.conftest import _store, _utcnow
 
 
 
+def _utcnow() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 class TestSchema:
     def test_init_schema_creates_all_tables(self):
         store = _store()
@@ -1249,3 +1253,8 @@ class TestEdgeCursor:
                      "get_node_open_events"):
             assert callable(getattr(store, name)), f"store.{name} is not callable"
 
+
+    def test_cursor_methods_exist(self):
+        store = _store()
+        for name in ("get_cursor", "set_cursor"):
+            assert callable(getattr(store, name)), f"store.{name} is not callable"
