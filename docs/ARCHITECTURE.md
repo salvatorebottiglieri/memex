@@ -5,14 +5,13 @@ for the *why* behind each decision see the ADRs in [`adr/`](adr/).
 
 ## Vision
 
-Today I dump interesting links into my own WhatsApp chat and never read them. memex turns that
-graveyard into a compounding knowledge base. An ingestion pipeline pulls saved links, stores the
-raw source immutably (L0), and an agent builds **derivations** on top at increasing levels of
+I collect interesting links by saving them to the vault as markdown files. memex reads those files,
+registers them as raw sources (L0), and an agent builds **derivations** on top at increasing levels of
 abstraction. Everything is **auditable**: any derivation traces back through provenance links to
-the raw source. I primarily consult the high-level derivations; an agent navigates top-down and
-stops as early as it can (fewer tokens, less context pollution). A second class of links —
-associative — lets the agent connect distant concepts for serendipity, without ever polluting the
-citation chain.
+the raw source, which carries a ``source_url`` reference to the original. I primarily consult the
+high-level derivations; an agent navigates top-down and stops as early as it can (fewer tokens,
+less context pollution). A second class of links — associative — lets the agent connect distant
+concepts for serendipity, without ever polluting the citation chain.
 
 Inspired by Karpathy's personal wiki and by `iusztinpaul/ai-research-os-workshop` (see below).
 More ambitious than the reference on the knowledge model (arbitrary-depth DAG + validation states),
@@ -22,26 +21,20 @@ more conservative on scope (single user, no discovery/web-research subsystem).
 
 | Concern | State | Surface |
 |---|---|---|
-| Ingestion (URL -> L0 markdown + node) | **built** | `memex ingest <url>` |
-| WhatsApp inbox ingest (per-file cursor) | **built** | `memex ingest --inbox <file>` |
+| L0 registration (file -> node + source row) | **built** | `memex register <path>` |
 | Canonical-key dedup + ledger | **built** | Store: `lookup_by_canonical_key`, `source.failed` |
 | Derivation (LLM -> notes-tier + provenance edge) | **built** | `memex derive <l0-id>` |
 | Deterministic checks (auto-verify gate) | **built** | `memex.checks.run_checks` |
 | Keyword search over derivations | **built** | `memex search <query>` |
-| Pending set (captured-but-not-ingested) | **built** | `memex list --pending` + `memex ingest --from-inbox` |
-| Inbox flush (inbox -> ledger) | **built** | `memex ingest --from-inbox` |
 | Store deep module (CLI is thin) | **built** | `memex.store.Store` |
-| Test injection via env var | **built** | `MEMEX_FETCHER_MODULE`, `MEMEX_AGENT` |
-| Telegram Saved-Messages capture | **built** (slice 2: protocol + fake) | `memex capture` via `MEMEX_TELEGRAM_SOURCE` |
-| Ingest from inbox (separated from capture) | **built** | `memex ingest --from-inbox` |
-| Lazy derivation trigger | demand only (ADR-0003) | `memex derive`/`synthesize` on explicit action; density trigger deferred (YAGNI) |
-| Render step (DB -> frontmatter + wikilinks for Obsidian) | **built** (slice 1: metadata + tags + aliases) | `memex render` |
-| Per-type extractors (YouTube transcript, PDF) | **built** (slices 1+2) | Fetcher router dispatched via canonical key; `youtube-transcript-api` + `pypdf` |
-| L0 stored at vault root (Obsidian-indexable) for non-HTML fetchers | **built** | Ingester mirrors fetcher cache into vault root so wikilinks resolve |
-| Structured `synthesis_statements` column (vs markdown marker only) | **built** | Agent emits JSON; `run_checks` reads the column; renderer surfaces in frontmatter |
+| URL resolution (advisory for external agents) | **built** | `memex resolve <url>` |
+| Lazy derivation trigger | demand only (ADR-0003) | `memex derive`/`synthesize` on explicit action |
+| Render step (DB -> frontmatter + wikilinks for Obsidian) | **built** | `memex render` |
+| L0 markdown in vault root (Obsidian-indexable) | **built** | User places files; register points to them |
+| Structured `synthesis_statements` column | **built** | Agent emits JSON; renderer surfaces in frontmatter |
 | `memex list --synthesis-statement` filter | **built** | Substring match against the structured column |
-| `memex backfill-synthesis` migration | **built** | One-shot CLI for legacy vaults (parses `> Synthesis:` markers into the column) |
-| Cross-device vault sharing (git + env vars) | **built** | `MEMEX_VAULT` / `MEMEX_DB` env vars (ADR-0015); vault-as-git-repo workflow |
+| `memex backfill-synthesis` migration | **built** | One-shot CLI for legacy vaults |
+| Cross-device vault sharing (git + env vars) | **built** | `MEMEX_VAULT` / `MEMEX_DB` env vars (ADR-0015) |
 
 ## Map (as built)
 
@@ -51,24 +44,13 @@ Solid lines = implemented path; dashed = planned surface that doesn't yet write 
 flowchart TB
   USER((Me))
 
-  subgraph Capture
-    WA["WhatsApp export .txt<br/>(per-file cursor, not one-shot)"]
-    TG["Telegram Saved Messages<br/>(ADR-0006)"]
-  end
+  USER -->|"places .md with source_url<br/>in vault"| L0["L0 markdown<br/>(vault root, immutable)"]
 
-  WA -->|parse_whatsapp_export| INBOX["inbox table<br/>(url + ts + note)"]
-  TG -->|parse_telegram_export| INBOX
+  L0 -->|"memex register"| REG["Registration<br/>(creates node + source row)"]
 
-  INBOX -->|ingest --inbox| ING["Ingestion"]
-  URL["Direct URL"] -->|ingest &lt;url&gt;| ING
+  REG -->|canonical_key dedup| LEDGER[("source table<br/>(ledger)")]
 
-  ING -->|canonical_key dedup| LEDGER[("source table<br/>(ledger)")]
-  ING -->|HttpFetcher| EXT["HTML extractor<br/>(regex on title + strip-tags)"]
-  EXT --> L0["L0 markdown<br/>(&lt;node-id&gt;.md, immutable)"]
-
-  ING -.capture-only path.->|"ingest --inbox currently<br/>captures AND ingests atomically"| INBOX
-
-  ING -->|derive &lt;l0-id&gt;| DERIV["Deriver<br/>(Agent via MEMEX_AGENT)"]
+  REG -->|"derive &lt;l0-id&gt;"| DERIV["Deriver<br/>(Agent via MEMEX_AGENT)"]
   DERIV -->|"notes-tier summary,<br/>provenance edge"| DB[("SQLite<br/>node + edge")]
   DERIV -->|"writes derivation prose"| DMD["&lt;deriv-id&gt;.md"]
 
@@ -83,7 +65,6 @@ flowchart TB
   CLI --> L0
   CLI --> DMD
   AGENT["Agent (Pi / Claude Code)<br/>thin per-harness adapter"] --> CLI
-  USER --> AGENT
 ```
 
 ## Decisions (ADR index)
@@ -105,13 +86,9 @@ flowchart TB
 ## Open questions (deferred)
 
 - **Model choice & cost:** `AnthropicAgent` currently defaults to `claude-opus-4-5`. Switch to Sonnet for bulk derivation once cost matters; keep Opus for higher-tier synthesis. Tune when real volume arrives.
-- ~~**Tier seed:** `raw` + `notes` are built; `synthesis` not yet. Let real use reveal whether more ordinal ranks are needed (gated, ADR-0002).~~ **Resolved** (ADR-0014): synthesis tier designed. Demand-driven, explicit `memex synthesize` command.
-- ~~**Source-type extractors:** HTML article is built. YouTube transcript (the canonical-key mapping is already in `canonical_key.py`) and PDF are next. Tweets/X and others later.~~ **Resolved** (ADR-0013): fetcher router + per-type extractors designed.
 - ~~**Edit round-trip:** if I hand-edit a wikilink in Obsidian, a reconcile step is needed (edge case).~~ **By design:** Obsidian is view-only. Render is unidirectional (ADR-0008).
 - **Confidence scoring:** exact formula from source count + contradictions. (ADR-0014 covers trust state, not confidence — separate problem.)
 - ~~**Staleness propagation:** invalidate-eagerly vs mark-and-regenerate-on-demand.~~ **Resolved** (ADR-0012).
-- ~~**✅-reaction** Telegram confirmation: optional later enhancement (needs write scope).~~ **Deferred (YAGNI)** — zero utenti, zero bisogno percepito.
-- ~~**Capture/ingest separation:** `memex ingest --inbox` does capture + ingest atomically.~~ **Deferred (YAGNI)** — Telegram già separato (ADR-0006). WhatsApp path è legacy funzionante, non spec.
 
 ## Reference: `iusztinpaul/ai-research-os-workshop`
 
@@ -125,7 +102,7 @@ prompt-defined load-bearing structure (we move it to code — ADR-0008/0009), pu
 
 ## Non-goals
 
-- Web discovery / autonomous research (I ingest *already-saved* links).
+- Web discovery / autonomous research (I place *already-saved* content in the vault).
 - Multi-user, sharing, publishing.
 - Real-time WhatsApp automation.
 - MCP server, LangGraph, vector DB — unless a concrete need later proves otherwise.

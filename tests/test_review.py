@@ -1,6 +1,6 @@
 """Tests for `memex review` and `memex review list`.
 
-Relies on the full pipeline: ingest -> derive -> contradicts edge -> review.
+Relies on the full pipeline: register -> derive -> contradicts edge -> review.
 Agent is injected via MEMEX_AGENT (FakeAgent).
 """
 from __future__ import annotations
@@ -9,18 +9,11 @@ import json
 import uuid
 
 from memex.store import Store as _Store
-from tests.conftest import _run_memex, FAKE_FETCHER
+from tests.conftest import _run_memex, register_node, WORKTREE
 
 FAKE_AGENT = "tests.fake_llm_client:FakeAgent"
 FAKE_AGENT_VALID_REFS = "tests.fake_llm_client:FakeAgentValidRefs"
 
-def _ingest(store, url: str) -> dict:
-    result = _run_memex(
-        ["extract", "--db", str(store["db"]), "--vault", str(store["vault"]), url],
-        env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
-    )
-    assert result.returncode == 0, result.stderr
-    return json.loads(result.stdout)
 
 
 def _derive(store, node_id: str):
@@ -47,9 +40,10 @@ class TestReviewCLI:
             )
 
     def test_review_full_flow(self, store):
-        """Ingest, derive, add contradicts edge, review, assert proposal JSON."""
-        ingested = _ingest(store, "https://example.com/article")
-        l0_id = ingested["id"]
+        """Register, derive, add contradicts edge, review, assert proposal JSON."""
+        r = register_node(store, store["vault"], "review-flow.md",
+                          "https://example.com/article")
+        l0_id = json.loads(r.stdout)["id"]
 
         derive_result = _derive(store, l0_id)
         assert derive_result.returncode == 0, derive_result.stderr
@@ -89,8 +83,9 @@ class TestReviewCLI:
 
     def test_review_is_idempotent(self, store):
         """Re-running review after proposals exist produces no new proposals."""
-        ingested = _ingest(store, "https://example.com/article")
-        l0_id = ingested["id"]
+        r = register_node(store, store["vault"], "review-idem.md",
+                          "https://example.com/article")
+        l0_id = json.loads(r.stdout)["id"]
         derive_result = _derive(store, l0_id)
         assert derive_result.returncode == 0, derive_result.stderr
         derived = json.loads(derive_result.stdout)
@@ -139,11 +134,13 @@ class TestReviewCLI:
         """Per-event LLM errors don't crash the batch; each gets status=error."""
         # Set up 2 events so we can verify batch processing continues
         for url in ("https://example.com/a", "https://example.com/b"):
-            ingested = _ingest(store, url)
-            derive_result = _derive(store, ingested["id"])
+            filename = url.rsplit("/", 1)[-1] + ".md"
+            r = register_node(store, store["vault"], filename, url)
+            node_id = json.loads(r.stdout)["id"]
+            derive_result = _derive(store, node_id)
             assert derive_result.returncode == 0, derive_result.stderr
             derived = json.loads(derive_result.stdout)
-            self._add_contradicts_edge(store, derived["id"], ingested["id"])
+            self._add_contradicts_edge(store, derived["id"], node_id)
 
         THROWING_AGENT = "tests.fake_llm_client:FakeAgentThrowsOnReview"
         result = _run_memex(
@@ -165,11 +162,13 @@ class TestReviewCLI:
     def test_review_accept_full_flow(self, store):
         """memex review accept <id> with --note."""
         # Set up an event and proposal via the full pipeline
-        ingested = _ingest(store, "https://example.com/accept-test")
-        derive_result = _derive(store, ingested["id"])
+        r = register_node(store, store["vault"], "accept-test.md",
+                          "https://example.com/accept-test")
+        node_id = json.loads(r.stdout)["id"]
+        derive_result = _derive(store, node_id)
         assert derive_result.returncode == 0, derive_result.stderr
         derived = json.loads(derive_result.stdout)
-        self._add_contradicts_edge(store, derived["id"], ingested["id"])
+        self._add_contradicts_edge(store, derived["id"], node_id)
         # Generate proposal
         review_result = _run_memex(
             ["review", "--db", str(store["db"]), "--vault", str(store["vault"])],
@@ -199,11 +198,13 @@ class TestReviewCLI:
 
     def test_review_reject_full_flow(self, store):
         """memex review reject <id> with --note."""
-        ingested = _ingest(store, "https://example.com/reject-test")
-        derive_result = _derive(store, ingested["id"])
+        r = register_node(store, store["vault"], "reject-test.md",
+                          "https://example.com/reject-test")
+        node_id = json.loads(r.stdout)["id"]
+        derive_result = _derive(store, node_id)
         assert derive_result.returncode == 0, derive_result.stderr
         derived = json.loads(derive_result.stdout)
-        self._add_contradicts_edge(store, derived["id"], ingested["id"])
+        self._add_contradicts_edge(store, derived["id"], node_id)
         review_result = _run_memex(
             ["review", "--db", str(store["db"]), "--vault", str(store["vault"])],
             env={"MEMEX_AGENT": FAKE_AGENT_VALID_REFS},
@@ -228,11 +229,13 @@ class TestReviewCLI:
 
     def test_review_dismiss_full_flow(self, store):
         """memex review dismiss <id> with --note."""
-        ingested = _ingest(store, "https://example.com/dismiss-test")
-        derive_result = _derive(store, ingested["id"])
+        r = register_node(store, store["vault"], "dismiss-test.md",
+                          "https://example.com/dismiss-test")
+        node_id = json.loads(r.stdout)["id"]
+        derive_result = _derive(store, node_id)
         assert derive_result.returncode == 0, derive_result.stderr
         derived = json.loads(derive_result.stdout)
-        self._add_contradicts_edge(store, derived["id"], ingested["id"])
+        self._add_contradicts_edge(store, derived["id"], node_id)
         review_result = _run_memex(
             ["review", "--db", str(store["db"]), "--vault", str(store["vault"])],
             env={"MEMEX_AGENT": FAKE_AGENT_VALID_REFS},
@@ -257,11 +260,13 @@ class TestReviewCLI:
 
     def test_review_accept_idempotent(self, store):
         """Second accept returns already_resolved."""
-        ingested = _ingest(store, "https://example.com/accept-idem")
-        derive_result = _derive(store, ingested["id"])
+        r = register_node(store, store["vault"], "accept-idem.md",
+                          "https://example.com/accept-idem")
+        node_id = json.loads(r.stdout)["id"]
+        derive_result = _derive(store, node_id)
         assert derive_result.returncode == 0, derive_result.stderr
         derived = json.loads(derive_result.stdout)
-        self._add_contradicts_edge(store, derived["id"], ingested["id"])
+        self._add_contradicts_edge(store, derived["id"], node_id)
         review_result = _run_memex(
             ["review", "--db", str(store["db"]), "--vault", str(store["vault"])],
             env={"MEMEX_AGENT": FAKE_AGENT_VALID_REFS},
@@ -286,11 +291,13 @@ class TestReviewCLI:
 
     def test_review_accept_without_note(self, store):
         """Accept without --note stores NULL human_note."""
-        ingested = _ingest(store, "https://example.com/no-note")
-        derive_result = _derive(store, ingested["id"])
+        r = register_node(store, store["vault"], "no-note.md",
+                          "https://example.com/no-note")
+        node_id = json.loads(r.stdout)["id"]
+        derive_result = _derive(store, node_id)
         assert derive_result.returncode == 0, derive_result.stderr
         derived = json.loads(derive_result.stdout)
-        self._add_contradicts_edge(store, derived["id"], ingested["id"])
+        self._add_contradicts_edge(store, derived["id"], node_id)
         review_result = _run_memex(
             ["review", "--db", str(store["db"]), "--vault", str(store["vault"])],
             env={"MEMEX_AGENT": FAKE_AGENT_VALID_REFS},

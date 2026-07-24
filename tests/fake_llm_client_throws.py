@@ -12,7 +12,7 @@ class FakeLLMClientThrows:
     def derive(self, content: str) -> None:
         raise RuntimeError("Simulated LLM failure")
 
-    def extract_ideas(self, content: str) -> list[str]:
+    def extract_ideas(self, content: str, source_url: str | None = None) -> list[str]:
         raise RuntimeError("Simulated LLM failure")
 
     def review(self, target_content: str, asserting_content: str, edge_payload: dict) -> None:

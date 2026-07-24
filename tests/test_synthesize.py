@@ -9,7 +9,7 @@ from pathlib import Path
 import json
 import sqlite3
 
-from tests.conftest import _run_memex, FAKE_FETCHER
+from tests.conftest import _run_memex, register_node
 
 
 FAKE_AGENT = "tests.fake_llm_client:FakeAgent"
@@ -17,10 +17,8 @@ FAKE_THROWS_AGENT = "tests.fake_llm_client_throws:FakeLLMClientThrows"
 
 
 def _ingest(store, url: str) -> dict:
-    result = _run_memex(
-        ["extract", "--db", str(store["db"]), "--vault", str(store["vault"]), url],
-        env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
-    )
+    filename = url.rsplit("/", 1)[-1].split("?", 1)[0] + ".md"
+    result = register_node(store, store["vault"], filename, url)
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
 

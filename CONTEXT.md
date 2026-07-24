@@ -1,6 +1,6 @@
 # memex — Context
 
-memex is a personal second brain: it ingests saved links, builds cited multi-level derivations over the raw sources, and serves them to an agent.
+memex is a personal second brain: it builds cited multi-level derivations over raw sources placed in the vault, and serves them to an agent.
 
 This file is the **glossary** — the project's ubiquitous language. Architectural decisions live in [`docs/adr/`](docs/adr/); the design overview lives in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
@@ -12,8 +12,7 @@ This file is the **glossary** — the project's ubiquitous language. Architectur
 A unit of knowledge in the graph — either a raw source or a derivation.
 
 **Raw source (L0)**:
-The original ingested document, stored immutably. The bottom of every provenance chain.
-_Avoid_: original, document, file
+The original source file, placed by the user in the vault with a ``source_url`` frontmatter reference to the real source. The bottom of every provenance chain.
 
 **Derivation**:
 An LLM-produced node built from one or more lower nodes. Mutable and regenerable.
@@ -68,37 +67,6 @@ deterministic check, the ``memex list --synthesis-statement`` filter, the
 ``memex backfill-synthesis`` migration, and the renderer's frontmatter all
 marker is presentation (markdown).
 
-### Ingestion
-
-**Capture**:
-The act of saving a link by forwarding it to the inbox (Telegram Saved Messages).
-_Avoid_: save, bookmark
-
-**Inbox**:
-The source-agnostic abstraction over captured items (`url + timestamp + optional note`).
-_Avoid_: queue, feed
-
-**Ingestion**:
-Pulling captured items from the inbox, extracting their content, and storing L0.
-_Avoid_: import, sync
-
-**Backfill**:
-The one-time ingestion of historical links from a WhatsApp chat export.
-
-**Canonical key**:
-The dedup identity of a source — a normalized URL or platform id (`youtube://<id>`).
-_Avoid_: url, id, hash
-
-**Ledger**:
-The record of canonical keys already ingested. The source of truth for "what is already in / still pending."
-_Avoid_: log, history
-
-**Cursor**:
-A per-source watermark of the last processed item (e.g. Telegram message id).
-_Avoid_: offset, pointer
-
-**Render step**:
-The deterministic one-way projection of SQLite structure into markdown frontmatter and `[[wikilinks]]`.
 _Avoid_: export, sync
 
 ### Review and contestation
@@ -130,17 +98,10 @@ _Avoid_: pending list, worklist
 **Adjudication**:
 The human act of closing a contestation event with `accept`, `reject`, or `dismiss`. The only path out of the review queue.
 _Avoid_: close, resolve, settle
-
-### Fetch resolution
-
-**RoutingFetcher**:
-The deterministic dispatcher that maps a canonical key prefix to the appropriate fetcher (e.g. `youtube://` → `YouTubeTranscriptFetcher`, `arxiv.org/abs/` → `PDFFetcher`). Zero LLM, sub-millisecond. Covers all known URL types.
-_Avoid_: router, dispatcher, fetcher selector
+### URL resolution (advisory for external agents)
 
 **Resolve**:
-The `memex resolve <url>` CLI command that classifies a URL and tells the external agent whether it can be ingested directly. Returns a JSON envelope with type, suggested fetcher, and ingestability. No LLM, only canonical-key matching + resolution rules.
-_Avoid_: url classifier, pre-flight check, link analyzer
+The ``memex resolve <url>`` CLI command that classifies a URL and tells the external agent what it is and how to fetch it. Returns a JSON envelope with type, ingestability, and (when applicable) a direct URL. No LLM, only canonical-key matching + resolution rules.
 
 **Resolution rule**:
-A deterministic, code-registered pattern mapping a URL class (prefix, host pattern, or page structure) to a specific fetcher or transformation (e.g. `arxiv.org/abs/` → rewrite to PDF before fetch, `github.com` → use raw content API, `wikipedia.org` → use REST API). No LLM needed.
-_Avoid_: shortcut, site-specific path, custom fetcher
+A deterministic, code-registered pattern mapping a URL class (prefix, host pattern, or page structure) to a type and suggested fetching strategy (e.g. ``arxiv.org/abs/`` → PDF, ``github.com/blob`` → raw content). No LLM needed.

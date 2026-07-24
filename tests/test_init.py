@@ -3,7 +3,6 @@ import json
 import sqlite3
 from pathlib import Path
 
-from tests.conftest import FAKE_FETCHER
 
 
 def test_init_outputs_json(tmp_path, run_memex):
@@ -35,7 +34,7 @@ def test_init_creates_sqlite_db_with_all_tables(tmp_path, run_memex):
     tables = {row[0] for row in cur.fetchall() if not row[0].startswith("sqlite_")}
     con.close()
 
-    assert tables == {"node", "source", "edge", "cursor", "inbox", "event_queue", "event_node_link", "review_proposal", "node_idea"}
+    assert tables == {"node", "source", "edge", "event_queue", "event_node_link", "review_proposal", "node_idea"}
 
 
 def test_init_creates_vault_directory(tmp_path, run_memex):
@@ -68,7 +67,7 @@ def test_init_is_idempotent(tmp_path, run_memex):
     tables = {row[0] for row in cur.fetchall() if not row[0].startswith("sqlite_")}
     con.close()
 
-    assert tables == {"node", "source", "edge", "cursor", "inbox", "event_queue", "event_node_link", "review_proposal", "node_idea"}
+    assert tables == {"node", "source", "edge", "event_queue", "event_node_link", "review_proposal", "node_idea"}
     assert vault_path.is_dir()
 
 
@@ -76,7 +75,7 @@ def test_init_migrates_missing_failed_column_in_source(tmp_path, run_memex):
     """init adds the `failed` column to an existing source table that lacks it.
 
     Simulates an old-schema DB (from before issue-3) by creating the table
-    without `failed`, then re-running init, then running ingest — asserting
+    without `failed`, then re-running init, then running register — asserting
     no crash and the column is present.
     """
     db_path = tmp_path / "memex.db"
@@ -122,14 +121,19 @@ def test_init_migrates_missing_failed_column_in_source(tmp_path, run_memex):
     result = run_memex(["init", "--db", str(db_path), "--vault", str(vault_path)])
     assert result.returncode == 0, result.stderr
 
-    # ingest must not crash (OperationalError: no column named failed)
+    # register must not crash (OperationalError: no column named failed)
+    md_file = tmp_path / "test_article.md"
+    md_file.write_text(
+        "---\nsource_url: https://example.com/article\ntitle: Test Article\n---\n\n"
+        "# Test Article\n\nBody content here.\n",
+        encoding="utf-8",
+    )
     result2 = run_memex(
-        ["extract", "--db", str(db_path), "--vault", str(vault_path), "https://example.com/article"],
-        env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
+        ["register", "--db", str(db_path), "--vault", str(vault_path), str(md_file)],
     )
     assert result2.returncode == 0, result2.stderr
     data = json.loads(result2.stdout)
-    assert data["status"] == "ingested"
+    assert data["status"] == "registered"
 
     # Confirm the column now exists
     con = sqlite3.connect(db_path)

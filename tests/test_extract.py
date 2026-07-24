@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 
-from tests.conftest import _run_memex, FAKE_FETCHER
+from tests.conftest import _run_memex, register_node
 
 FAKE_AGENT = "tests.fake_llm_client:FakeAgent"
 FAKE_THROWS_AGENT = "tests.fake_llm_client_throws:FakeLLMClientThrows"
@@ -18,10 +18,8 @@ FAKE_THROWS_AGENT = "tests.fake_llm_client_throws:FakeLLMClientThrows"
 
 def _ingest(store, url: str) -> dict:
     """Ingest a URL and return the parsed JSON result."""
-    result = _run_memex(
-        ["extract", "--db", str(store["db"]), "--vault", str(store["vault"]), url],
-        env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
-    )
+    filename = url.rsplit("/", 1)[-1].split("?", 1)[0] + ".md"
+    result = register_node(store, store["vault"], filename, url)
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
 
@@ -195,9 +193,9 @@ class TestDeleteCommand:
             ["delete", "--db", str(store["db"]), "--vault", str(store["vault"]),
              "nonexistent-id"],
         )
-        assert result.returncode == 0, result.stderr
-        data = json.loads(result.stdout)
-        assert data["status"] == "not_found"
+        assert result.returncode != 0
+        data = json.loads(result.stderr)
+        assert data["error"] == "not_found"
 
     def test_delete_cascade(self, store):
         ingested = _ingest(store, "https://example.com/article")
@@ -219,28 +217,6 @@ class TestDeleteCommand:
         assert json.loads(list_result.stdout) == []
 
 
-# ── TestRetryCommand ────────────────────────────────────────────────
-
-
-class TestRetryCommand:
-    def test_retry_nonexistent(self, store):
-        result = _run_memex(
-            ["retry", "--db", str(store["db"]), "--vault", str(store["vault"]),
-             "nonexistent-id"],
-        )
-        assert result.returncode == 0, result.stderr
-        data = json.loads(result.stdout)
-        assert data["error"] == "not_found"
-
-    def test_retry_non_failed(self, store):
-        ingested = _ingest(store, "https://example.com/article")
-        result = _run_memex(
-            ["retry", "--db", str(store["db"]), "--vault", str(store["vault"]),
-             ingested["id"]],
-        )
-        assert result.returncode == 0, result.stderr
-        data = json.loads(result.stdout)
-        assert data["error"] == "not_failed"
 
 
 # ── TestStatsCommand ────────────────────────────────────────────────

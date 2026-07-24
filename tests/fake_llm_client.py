@@ -32,7 +32,7 @@ class FakeAgent:
     def generate_title(self, content: str, url: str) -> str | None:
         return None
 
-    def extract_ideas(self, content: str) -> list[str]:
+    def extract_ideas(self, content: str, source_url: str | None = None) -> list[str]:
         return ["Key idea 1", "Key idea 2", "Key idea 3"]
 
     def review(self, target_content: str, asserting_content: str, edge_payload: dict) -> ReviewProposal:
@@ -58,8 +58,9 @@ class FakeAgentValidRefs:
         return {"prose": "fake", "synthesis_statements": []}
 
 
-    def extract_ideas(self, content: str) -> list[str]:
+    def extract_ideas(self, content: str, source_url: str | None = None) -> list[str]:
         return ["Idea 1", "Idea 2"]
+
     def review(self, target_content: str, asserting_content: str, edge_payload: dict) -> dict:
         return ReviewProposal(
             affected_node_ids=[],
@@ -82,5 +83,5 @@ class FakeAgentThrowsOnReview:
 
 
 
-    def extract_ideas(self, content: str) -> list[str]:
-        return ["Idea 1", "Idea 2"]
+    def extract_ideas(self, content: str, source_url: str | None = None) -> list[str]:
+        pass

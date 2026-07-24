@@ -12,7 +12,7 @@ import uuid
 
 from memex.store import Store
 
-from tests.conftest import _run_memex, FAKE_FETCHER, ingest, _store, _utcnow
+from tests.conftest import _run_memex, register_node, WORKTREE, _store, _utcnow
 
 FAKE_AGENT = "tests.fake_llm_client:FakeAgent"
 
@@ -242,7 +242,8 @@ class TestListNodes:
 
 class TestShow:
     def test_show_emits_confidence(self, store):
-        result = ingest(store, "https://example.com/article")
+        result = register_node(store, store["vault"], "article.md",
+                                "https://example.com/article")
         ingested = json.loads(result.stdout)
         show_result = _run_memex(
             ["show", "--db", str(store["db"]), "--vault", str(store["vault"]),
@@ -258,7 +259,9 @@ class TestShow:
 
 class TestList:
     def test_list_emits_confidence(self, store):
-        ingest(store, "https://example.com/article")
+        result = register_node(store, store["vault"], "article.md",
+                                "https://example.com/article")
+        ingested = json.loads(result.stdout)
         list_result = _run_memex(
             ["list", "--db", str(store["db"]), "--vault", str(store["vault"])],
         )
@@ -272,10 +275,8 @@ class TestList:
 
 class TestDeriveConfidence:
     def _ingest(self, store, url: str) -> dict:
-        result = _run_memex(
-            ["extract", "--db", str(store["db"]), "--vault", str(store["vault"]), url],
-            env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
-        )
+        filename = f"{uuid.uuid4().hex}.md"
+        result = register_node(store, store["vault"], filename, url)
         assert result.returncode == 0, result.stderr
         return json.loads(result.stdout)
 
@@ -307,10 +308,8 @@ class TestDeriveConfidence:
 
 class TestSynthesizeConfidence:
     def _ingest(self, store, url: str) -> dict:
-        result = _run_memex(
-            ["extract", "--db", str(store["db"]), "--vault", str(store["vault"]), url],
-            env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
-        )
+        filename = f"{uuid.uuid4().hex}.md"
+        result = register_node(store, store["vault"], filename, url)
         assert result.returncode == 0, result.stderr
         return json.loads(result.stdout)
 
@@ -587,4 +586,3 @@ class TestContradictsCascade:
             "SELECT confidence FROM node WHERE id = ?", (syn2,)
         ).fetchone()
         assert row[0] == "low", f"expected low for syn2, got {row[0]}"
-

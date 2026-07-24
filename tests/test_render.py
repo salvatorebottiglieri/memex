@@ -13,12 +13,13 @@ import sqlite3
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pytest
 import yaml
 
 from memex.store import Store
-from tests.conftest import _run_memex, FAKE_FETCHER, ingest
+from tests.conftest import _run_memex, register_node, WORKTREE
 
 FAKE_AGENT = "tests.fake_llm_client:FakeAgent"
 
@@ -32,7 +33,11 @@ def _render(store) -> list:
 
 
 def _ingest(store, url: str) -> dict:
-    p = ingest(store, url)
+    url_path = urlparse(url).path.strip("/")
+    filename = url_path.replace("/", "-") or "article"
+    if not filename.endswith(".md"):
+        filename += ".md"
+    p = register_node(store, store["vault"], filename, url)
     assert p.returncode == 0, p.stderr
     return json.loads(p.stdout)
 
@@ -166,12 +171,12 @@ class TestRenderL0:
         assert "tags" in fm
         assert "kind/raw_source" in fm["tags"]
         assert fm["source_url"] == "https://example.com/article"
-        assert fm["title"] == "Fake Article Title"
+        assert fm["title"] == "Test Article"
         # trust_state and tier should not be present for L0 nodes
         assert fm.get("trust_state") is None
         assert fm.get("tier") is None
         # aliases should contain the title
-        assert "Fake Article Title" in fm.get("aliases", [])
+        assert "Test Article" in fm.get("aliases", [])
 
     def test_render_l0_body_preserved(self, store):
         """Body content is preserved through a render cycle."""
@@ -187,7 +192,7 @@ class TestRenderL0:
         fm, body = _read_frontmatter(md_path)
         # The body should match original content (frontmatter was added, body preserved)
         assert len(body) > 0
-        assert "Fake content" in body
+        assert "This is a longer article body" in body
 
     def test_render_l0_preserves_original_source_url(self, store):
         """Render preserves the original source_url (canonical key tracks separately)."""
@@ -337,7 +342,7 @@ class TestRenderEdgeCases:
 
         fm, body = _read_frontmatter(md_path)
         # Body should contain all original content (frontmatter was stripped)
-        assert "Fake content" in body
+        assert "This is a longer article body" in body
         # Reconstruct: the original was just body (no frontmatter), render added frontmatter
         assert len(body) > 10
 
@@ -363,7 +368,7 @@ class TestRenderEdgeWikilinks:
         assert "derived_from" in fm, f"Expected derived_from in {fm}"
         # Renderer emits `[[<target-filename>|<title>]]`. Obsidian resolves
         # wikilinks by filename; the title (after |) is the display text.
-        assert fm["derived_from"] == "[[fake-article-title|Fake Article Title]]", \
+        assert fm["derived_from"] == "[[article|Test Article]]", \
             f"got {fm['derived_from']!r}"
         # L0 node should NOT have derived_from (it's the target, not source)
         l0_fm, _ = _read_frontmatter(_md_path(store, data))

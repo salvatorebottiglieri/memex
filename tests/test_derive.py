@@ -10,21 +10,13 @@ from pathlib import Path
 
 import sqlite3
 
-from tests.conftest import _run_memex, FAKE_FETCHER
+from tests.conftest import _run_memex, register_node, WORKTREE
 
 
 FAKE_AGENT = "tests.fake_llm_client:FakeAgent"
 FAKE_FAILING_AGENT = "tests.fake_llm_client_failing:FakeLLMClientFailing"
 FAKE_THROWS_AGENT = "tests.fake_llm_client_throws:FakeLLMClientThrows"
 
-
-def _ingest(store, url: str) -> dict:
-    result = _run_memex(
-        ["extract", "--db", str(store["db"]), "--vault", str(store["vault"]), url],
-        env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
-    )
-    assert result.returncode == 0, result.stderr
-    return json.loads(result.stdout)
 
 
 def _derive(store, node_id: str) -> "subprocess.CompletedProcess":  # type: ignore[name-defined]
@@ -36,7 +28,9 @@ def _derive(store, node_id: str) -> "subprocess.CompletedProcess":  # type: igno
 
 class TestDerive:
     def test_derive_returns_json_with_derivation_id(self, store):
-        ingested = _ingest(store, "https://example.com/article")
+        vault = Path(store["vault"])
+        p = register_node(store, vault, "test.md", "https://example.com/article")
+        ingested = json.loads(p.stdout)
         result = _derive(store, ingested["id"])
         assert result.returncode == 0, result.stderr
         data = json.loads(result.stdout)
@@ -49,7 +43,9 @@ class TestDerive:
         FakeAgent produces a valid derivation (has synthesis marker, right length),
         so trust_state is auto-verified after checks run.
         """
-        ingested = _ingest(store, "https://example.com/article")
+        vault = Path(store["vault"])
+        p = register_node(store, vault, "test.md", "https://example.com/article")
+        ingested = json.loads(p.stdout)
         result = _derive(store, ingested["id"])
         deriv_id = json.loads(result.stdout)["id"]
 
@@ -67,7 +63,9 @@ class TestDerive:
         assert depth == 1
 
     def test_derive_inserts_provenance_edge(self, store):
-        ingested = _ingest(store, "https://example.com/article")
+        vault = Path(store["vault"])
+        p = register_node(store, vault, "test.md", "https://example.com/article")
+        ingested = json.loads(p.stdout)
         l0_id = ingested["id"]
         result = _derive(store, l0_id)
         deriv_id = json.loads(result.stdout)["id"]
@@ -87,20 +85,26 @@ class TestDerive:
         assert row[3] == l0_id
 
     def test_derive_writes_markdown_file_with_synthesis_markers(self, store):
-        ingested = _ingest(store, "https://example.com/article")
+        vault = Path(store["vault"])
+        p = register_node(store, vault, "test.md", "https://example.com/article")
+        ingested = json.loads(p.stdout)
         result = _derive(store, ingested["id"])
         data = json.loads(result.stdout)
         md_path = Path(data.get("content_path", str(store["vault"] / f"{data['id']}.md")))
 
     def test_derive_response_includes_l0_node_id(self, store):
-        ingested = _ingest(store, "https://example.com/article")
+        vault = Path(store["vault"])
+        p = register_node(store, vault, "test.md", "https://example.com/article")
+        ingested = json.loads(p.stdout)
         result = _derive(store, ingested["id"])
         data = json.loads(result.stdout)
         assert data["l0_node_id"] == ingested["id"]
 
     def test_derive_is_idempotent(self, store):
         """Deriving the same L0 twice produces one summary node and one edge."""
-        ingested = _ingest(store, "https://example.com/article")
+        vault = Path(store["vault"])
+        p = register_node(store, vault, "test.md", "https://example.com/article")
+        ingested = json.loads(p.stdout)
         l0_id = ingested["id"]
 
         first = _derive(store, l0_id)
@@ -146,16 +150,13 @@ class TestDeriveAll:
         return _run_memex(args, env={"MEMEX_AGENT": agent})
 
     def _ingest_n(self, store, n: int, prefix: str = "article") -> list[dict]:
-        """Ingest n unique URLs and return their result dicts."""
+        """Register n unique nodes and return their result dicts."""
         results = []
+        vault = Path(store["vault"])
         for i in range(n):
-            result = _run_memex(
-                ["extract", "--db", str(store["db"]), "--vault", str(store["vault"]),
-                 f"https://example.com/{prefix}-{i}"],
-                env={"MEMEX_FETCHER_MODULE": FAKE_FETCHER},
-            )
-            assert result.returncode == 0, result.stderr
-            results.append(json.loads(result.stdout))
+            p = register_node(store, vault, f"{prefix}-{i}.md", f"https://example.com/{prefix}-{i}")
+            assert p.returncode == 0, p.stderr
+            results.append(json.loads(p.stdout))
         return results
 
     def test_derive_all_capped_by_limit(self, store):
@@ -308,21 +309,27 @@ class TestSearch:
         )
 
     def test_search_returns_json_array(self, store):
-        ingested = _ingest(store, "https://example.com/article")
+        vault = Path(store["vault"])
+        p = register_node(store, vault, "test.md", "https://example.com/article")
+        ingested = json.loads(p.stdout)
         _derive(store, ingested["id"])
         result = self._search(store, "Synthesis")
         data = json.loads(result.stdout)
         assert isinstance(data, list)
 
     def test_search_matches_derivation_content(self, store):
-        ingested = _ingest(store, "https://example.com/article")
+        vault = Path(store["vault"])
+        p = register_node(store, vault, "test.md", "https://example.com/article")
+        ingested = json.loads(p.stdout)
         _derive(store, ingested["id"])
         result = self._search(store, "broader pattern")
         data = json.loads(result.stdout)
         assert len(data) >= 1
 
     def test_search_result_has_required_fields(self, store):
-        ingested = _ingest(store, "https://example.com/article")
+        vault = Path(store["vault"])
+        p = register_node(store, vault, "test.md", "https://example.com/article")
+        ingested = json.loads(p.stdout)
         l0_id = ingested["id"]
         _derive(store, l0_id)
         result = self._search(store, "broader pattern")
@@ -335,20 +342,27 @@ class TestSearch:
         assert "l0_node_id" in item
 
     def test_search_snippet_contains_query(self, store):
-        ingested = _ingest(store, "https://example.com/article")
+        vault = Path(store["vault"])
+        p = register_node(store, vault, "test.md", "https://example.com/article")
+        ingested = json.loads(p.stdout)
         _derive(store, ingested["id"])
         result = self._search(store, "broader pattern")
         data = json.loads(result.stdout)
         assert "broader pattern" in data[0]["snippet"].lower()
 
     def test_search_returns_empty_array_for_no_match(self, store):
-        ingested = _ingest(store, "https://example.com/article")
+        vault = Path(store["vault"])
+        p = register_node(store, vault, "test.md", "https://example.com/article")
+        ingested = json.loads(p.stdout)
         _derive(store, ingested["id"])
         result = self._search(store, "xyznonexistentterm")
         assert json.loads(result.stdout) == []
 
     def test_search_is_readonly(self, store):
-        ingested = _ingest(store, "https://example.com/article")
+        import sqlite3
+        vault = Path(store["vault"])
+        p = register_node(store, vault, "test.md", "https://example.com/article")
+        ingested = json.loads(p.stdout)
         _derive(store, ingested["id"])
 
         con = sqlite3.connect(store["db"])
@@ -366,7 +380,9 @@ class TestSearch:
         assert e_before == e_after
 
     def test_search_l0_node_id_points_to_l0(self, store):
-        ingested = _ingest(store, "https://example.com/article")
+        vault = Path(store["vault"])
+        p = register_node(store, vault, "test.md", "https://example.com/article")
+        ingested = json.loads(p.stdout)
         l0_id = ingested["id"]
         _derive(store, l0_id)
         result = self._search(store, "broader pattern")

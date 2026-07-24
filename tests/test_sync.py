@@ -4,7 +4,6 @@ import os
 import shlex
 from pathlib import Path
 
-from tests.conftest import FAKE_FETCHER
 
 
 def test_sync_commits_and_outputs_json(tmp_path, run_memex):

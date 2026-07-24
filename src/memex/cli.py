@@ -15,7 +15,7 @@ from typing import Any
 import click
 
 from memex.canonical_key import canonical_key
-from memex.ingester import ingest_single_url as extract_single_url
+
 import functools
 
 def _slugify(text: str, max_length: int = 80) -> str:
@@ -153,131 +153,89 @@ def status(db_path: Path, vault_path: Path) -> None:
     }
     click.echo(json.dumps(result))
 
-
-
-
-
 @cli.command()
 @_db_options
+@click.argument("path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option(
-    "--inbox",
-    "inbox_path",
+    "--source-url",
+    "source_url",
     default=None,
-    type=click.Path(exists=True, dir_okay=False, path_type=Path),
-    help="Path to a WhatsApp .txt export to ingest.",
+    help="Override the source_url (otherwise read from frontmatter of the .md file).",
 )
-@click.option(
-    "--from-inbox",
-    "from_inbox",
-    is_flag=True,
-    default=False,
-    help="Ingest all pending inbox items (captured but not yet in the ledger).",
-)
-def ingest(db_path: Path, vault_path: Path, inbox_path: Path | None,
-           from_inbox: bool) -> None:
-    """Ingest from an inbox source (WhatsApp export or pending items).
+def register(db_path: Path, vault_path: Path, path: Path, source_url: str | None) -> None:
+    """Register an existing markdown file in the vault as an L0 node.
 
-    WhatsApp file: memex ingest --db DB --vault V --inbox <file>
-    Inbox flush:  memex ingest --db DB --vault V --from-inbox
+    The file MUST contain a ``source_url`` key in its YAML frontmatter pointing
+    to the original source (the reference is always required for provenance).
 
-    For direct URL ingestion use ``memex extract <url>``.
+    Optional frontmatter keys: ``title``.
     """
-    from memex.agent import load_agent
-    from memex.fetcher import load_fetcher
-    from memex.store import Store
-    from memex.whatsapp_source import parse_whatsapp_export
+    import yaml
 
-    if not from_inbox and inbox_path is None:
-        raise click.UsageError(
-            "Provide --inbox <file> or --from-inbox."
+    from memex.canonical_key import canonical_key
+    from memex.store import Store
+
+    # --- Read & parse file ---
+    text = path.read_text(encoding="utf-8")
+    fm: dict[str, str] = {}
+    body_start = 0
+    if text.startswith("---"):
+        end = text.find("---", 3)
+        if end != -1:
+            try:
+                fm = yaml.safe_load(text[3:end]) or {}
+            except yaml.YAMLError:
+                _fail("invalid_frontmatter", path=str(path))
+            body_start = end + 3
+
+    src = source_url or fm.get("source_url")
+    if not src:
+        _fail(
+            "missing_source_url",
+            path=str(path),
+            detail="Every L0 node must have a source_url (set in frontmatter or via --source-url).",
         )
 
-    fetcher = load_fetcher(os.environ.get("MEMEX_FETCHER_MODULE"), vault_path=str(vault_path))
-    title_agent = load_agent(os.environ.get("MEMEX_AGENT"))
+    title = fm.get("title")
 
+    # --- Ledger check ---
+    ckey = canonical_key(src)
     with Store.open(db_path) as store:
-        if from_inbox:
-            ingested_keys = store.list_ingested_canonical_keys()
-            inbox_items = list(store.list_inbox())
-            total = len(inbox_items)
-            results = []
-            for i, item in enumerate(inbox_items, start=1):
-                ckey = canonical_key(item["url"])
-                if ckey not in ingested_keys:
-                    result = extract_single_url(store, vault_path, item["url"], fetcher)
-                    if not result.get("title") and title_agent and result.get("status") == "ingested" and result.get("content_path"):
-                        cp = Path(result["content_path"])
-                        if cp.exists():
-                            t = title_agent.generate_title(cp.read_text(encoding="utf-8"), item["url"])
-                            if t:
-                                store.update_source_title(result.get("url_node_id"), t)
-                                result["title"] = t
-                    results.append(result)
-                    if result.get("canonical_key"):
-                        ingested_keys.add(result["canonical_key"])
-                else:
-                    existing = store.lookup_by_canonical_key(ckey)
-                    result = {
-                        "id": existing["node_id"] if existing else None,
-                        "status": "already_exists",
-                        "canonical_key": ckey,
-                    }
-                    results.append(result)
-                click.echo(f"[{i}/{total}] {result.get('status','?')}  {item['url']}", err=True)
-            click.echo(json.dumps(results))
-        else:
-            source_name = f"whatsapp:{inbox_path}"
-            export_text = inbox_path.read_text(encoding="utf-8")
-            all_items = list(parse_whatsapp_export(export_text))
+        existing = store.lookup_by_canonical_key(ckey)
+        if existing is not None:
+            click.echo(json.dumps({
+                "id": existing["node_id"],
+                "status": "already_exists",
+                "canonical_key": ckey,
+            }))
+            return
 
-            cursor_str = store.get_cursor(source_name)
-            cursor_index = int(cursor_str) if cursor_str is not None else 0
-            new_items = all_items[cursor_index:]
+        # --- Create node + source ---
+        node_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+        store.create_node(
+            node_id=node_id,
+            kind="raw_source",
+            depth=0,
+            content_path=str(path),
+            created_at=now,
+        )
+        store.attach_source(
+            node_id=node_id,
+            canonical_key=ckey,
+            source_url=src,
+            title=title,
+            fetched_at=None,
+        )
 
-            total = len(new_items)
-            results = []
-            for i, item in enumerate(new_items, start=1):
-                result = extract_single_url(
-                    store, vault_path, item["url"], fetcher,
-                    source_name=source_name,
-                    item_timestamp=item["timestamp"],
-                    item_note=item.get("note"),
-                )
-                if not result.get("title") and title_agent and result.get("status") == "ingested" and result.get("content_path"):
-                    cp = Path(result["content_path"])
-                    if cp.exists():
-                        t = title_agent.generate_title(cp.read_text(encoding="utf-8"), item["url"])
-                        if t:
-                            store.update_source_title(result.get("url_node_id"), t)
-                            result["title"] = t
-                results.append(result)
-                click.echo(f"[{i}/{total}] {result.get('status','?')}  {item['url']}", err=True)
+    click.echo(json.dumps({
+        "id": node_id,
+        "status": "registered",
+        "canonical_key": ckey,
+        "title": title,
+        "content_path": str(path),
+    }))
 
-            store.set_cursor(source_name, str(len(all_items)))
-
-            click.echo(json.dumps(results))
-
-@cli.command()
-@_db_options
-@click.argument("url")
-def extract(db_path: Path, vault_path: Path, url: str) -> None:
-    """Fetch a URL and store it as URL-node + extracted-node.
-
-    Replaces the old ``memex ingest <url>``. Creates a URL-node
-    (identity anchor, no content) and an extracted-node (content-bearing,
-    tier='extracted') with a provenance edge.
-
-    Idempotent — running twice with the same URL yields one result.
-    """
-    from memex.fetcher import load_fetcher
-    from memex.store import Store
-
-    fetcher = load_fetcher(os.environ.get("MEMEX_FETCHER_MODULE"), vault_path=str(vault_path))
-
-    with Store.open(db_path) as store:
-        result = extract_single_url(store, vault_path, url, fetcher)
-
-    click.echo(json.dumps(result))
 
 
 @cli.command()
@@ -289,7 +247,7 @@ def resolve(url: str | None) -> None:
     """
     if not url:
         _fail("Missing required argument 'URL'.")
-    from memex.fetcher import resolve_url
+    from memex.resolver import resolve_url
     result = resolve_url(url)
     click.echo(json.dumps(dataclasses.asdict(result)))
 
@@ -329,19 +287,29 @@ def cookies_export(domain: str, output: str | None) -> None:
         _fail("Playwright is required: pip install playwright && playwright install chromium")
 
     try:
+        chrome_profile = os.environ.get("CHROME_USER_DATA",
+                                         os.path.expanduser("~/.config/google-chrome"))
+        chrome_exe = os.environ.get("CHROME_EXECUTABLE", shutil.which("google-chrome") or "")
+        if not chrome_exe:
+            _fail("Chrome not found. Set CHROME_EXECUTABLE or install Google Chrome.")
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=True)
-            ctx = browser.new_context()
-            page = ctx.new_page()
+            click.echo(f"Chrome: {chrome_exe} | Profile: {chrome_profile}", err=True)
+            click.echo("Close Chrome completely before running this.", err=True)
+            ctx = pw.chromium.launch_persistent_context(
+                user_data_dir=chrome_profile,
+                headless=False,
+            )
+            page = ctx.pages[0] if ctx.pages else ctx.new_page()
             click.echo(f"Navigating to https://{domain}...", err=True)
             page.goto(f"https://{domain}", wait_until="domcontentloaded", timeout=30000)
             page.wait_for_timeout(3000)
             click.echo(f"Current URL: {page.url}", err=True)
-            click.echo("If login is required, login now, then press Enter here...", err=True)
-            input()
-            page.wait_for_timeout(2000)
+            if "/login" in page.url.lower():
+                click.echo("Not logged in. Login in the browser window, then press Enter...", err=True)
+                input()
+                page.wait_for_timeout(2000)
             cookies = ctx.cookies()
-            browser.close()
+            ctx.close()
             import json as _json
             data = _json.dumps(cookies, indent=2)
             if output:
@@ -354,13 +322,6 @@ def cookies_export(domain: str, output: str | None) -> None:
 
 @cli.command("list")
 @_db_options
-@click.option(
-    "--pending",
-    "show_pending",
-    is_flag=True,
-    default=False,
-    help="Return canonical keys captured from inbox but not yet ingested.",
-)
 @click.option("--kind", default=None, help="Filter by node kind (e.g. raw_source, summary).")
 @click.option("--tier", default=None, help="Filter by node tier (e.g. notes, synthesis).")
 @click.option("--trust-state", "trust_state", default=None, help="Filter by trust state (draft, auto-verified, human-approved, stale).")
@@ -373,39 +334,29 @@ def cookies_export(domain: str, output: str | None) -> None:
 )
 @click.option("--limit", default=None, type=int, help="Max results.")
 @click.option("--offset", default=None, type=int, help="Result offset for pagination.")
-def list_nodes(db_path: Path, vault_path: Path, show_pending: bool,
+def list_nodes(db_path: Path, vault_path: Path,
                kind: str | None, tier: str | None, trust_state: str | None,
                confidence: str | None, synthesis_statement: str | None,
                limit: int | None, offset: int | None) -> None:
-    """Return JSON array of all nodes, or --pending captured-but-not-ingested keys."""
+    """Return JSON array of all nodes."""
     from memex.store import Store
 
-
+    
     with Store.open(db_path) as store:
-        if show_pending:
-            ingested = store.list_ingested_canonical_keys()
-            pending, seen = [], set()
-            for row in store.list_inbox():
-                ckey = canonical_key(row["url"])
-                if ckey not in ingested and ckey not in seen:
-                    pending.append(ckey)
-                    seen.add(ckey)
-            click.echo(json.dumps(pending))
-        else:
-            results = store.list_nodes(
-                kind=kind, tier=tier, trust_state=trust_state,
-                confidence=confidence, limit=limit, offset=offset,
-            )
-            if synthesis_statement:
-                needle = synthesis_statement.lower()
-                results = [
-                    n for n in results
-                    if n.get("synthesis_statements") and any(
-                        needle in s.lower()
-                        for s in n["synthesis_statements"]
-                    )
-                ]
-            click.echo(json.dumps(results))
+        results = store.list_nodes(
+            kind=kind, tier=tier, trust_state=trust_state,
+            confidence=confidence, limit=limit, offset=offset,
+        )
+        if synthesis_statement:
+            needle = synthesis_statement.lower()
+            results = [
+                n for n in results
+                if n.get("synthesis_statements") and any(
+                    needle in s.lower()
+                    for s in n["synthesis_statements"]
+                )
+            ]
+        click.echo(json.dumps(results))
 
 @cli.command()
 @_db_options
@@ -513,7 +464,6 @@ def synthesize(db_path: Path, vault_path: Path, node_ids: tuple[str, ...]) -> No
 
 def _derive_single(db_path: Path, vault_path: Path, node_id: str) -> None:
     """Derive a single L0 node (the original behavior)."""
-    from memex.fetcher import load_fetcher
     from memex.agent import load_agent
     from memex.store import Store
 
@@ -525,18 +475,12 @@ def _derive_single(db_path: Path, vault_path: Path, node_id: str) -> None:
         if l0 is None:
             _fail("not_found", id=node_id)
 
-        # --- Load content (from file or fetch fresh) ---
-        if l0.get("content_path") and Path(l0["content_path"]).exists():
-            l0_content = Path(l0["content_path"]).read_text(encoding="utf-8")
-        else:
-            # L0 has no file — fetch URL fresh (may yield metadata-only content)
-            try:
-                fetcher = load_fetcher(os.environ.get("MEMEX_FETCHER_MODULE"), vault_path=str(vault_path))
-                result = fetcher.fetch(l0["source_url"])
-                l0_content = result.content
-            except Exception as exc:
-                click.echo(json.dumps({"status": "error", "reason": f"No content available for derivation: {exc}"}))
-                return
+        # --- Load content from vault file ---
+        if not l0.get("content_path") or not Path(l0["content_path"]).exists():
+            _fail("no_content", id=node_id, detail="L0 content file not found in vault; place the file and re-register.")
+
+        l0_content = Path(l0["content_path"]).read_text(encoding="utf-8")
+
         # --- Idempotency check ---
         existing = store.find_derived_from(node_id)
         if existing is not None:
@@ -903,7 +847,6 @@ def extract_ideas(db_path: Path, vault_path: Path, node_id: str) -> None:
     """Extract key ideas from a node. Uses LLM agent. Idempotent — re-run replaces ideas."""
     from memex.agent import load_agent
     from memex.store import Store
-    from memex.fetcher import load_fetcher
 
     
     agent = load_agent(os.environ.get("MEMEX_AGENT"))
@@ -914,30 +857,24 @@ def extract_ideas(db_path: Path, vault_path: Path, node_id: str) -> None:
             click.echo(json.dumps({"error": "not_found"}))
             return
 
-        # Load content (from file or fetch fresh)
-        if node.get("content_path") and Path(node["content_path"]).exists():
-            content = Path(node["content_path"]).read_text(encoding="utf-8")
-        else:
-            try:
-                fetcher = load_fetcher(os.environ.get("MEMEX_FETCHER_MODULE"), vault_path=str(vault_path))
-                result = fetcher.fetch(node["source_url"])
-                content = result.content
-            except Exception as exc:
-                click.echo(json.dumps({"error": "no_content", "detail": str(exc)}))
-                return
-
-        try:
-            ideas = agent.extract_ideas(content)
-        except Exception as exc:
-            click.echo(json.dumps({"error": "agent_failed", "detail": str(exc)}))
+        # Load content from vault file
+        if not node.get("content_path") or not Path(node["content_path"]).exists():
+            click.echo(json.dumps({"error": "no_content", "detail": "Content file not found in vault; place the file and re-register."}))
             return
 
+        content = Path(node["content_path"]).read_text(encoding="utf-8")
+        try:
+            ideas = agent.extract_ideas(content, source_url=node.get("source_url"))
+        except Exception as e:
+            click.echo(json.dumps({"error": "agent_failed", "detail": str(e)}))
+            return
         store.set_node_ideas(node_id, ideas)
 
     click.echo(json.dumps({
         "node_id": node_id,
-        "ideas_count": len(ideas),
+        "status": "extracted",
         "ideas": ideas,
+        "ideas_count": len(ideas),
     }))
 
 
@@ -980,65 +917,6 @@ def render(db_path: Path, vault_path: Path) -> None:
     click.echo(json.dumps(results))
 
 
-@cli.command()
-@_db_options
-def capture(db_path: Path, vault_path: Path) -> None:
-    """Poll Telegram Saved Messages and persist new captures to the inbox.
-
-    Reads new messages from the configured Telegram source
-    (MEMEX_TELEGRAM_API_ID + MEMEX_TELEGRAM_API_HASH, or MEMEX_TELEGRAM_SOURCE),
-    writes each to the inbox table, and advances the cursor.
-    Idempotent — re-running only processes messages after the last cursor position.
-
-    First run: Telethon will prompt for phone number + 2FA code interactively.
-    Subsequent runs reuse the session file (default: ~/.memex/telegram.session,
-    override via MEMEX_TELEGRAM_SESSION).
-    """
-    from memex.telegram_source import (
-        load_telegram_source, CapturedMessage,
-        CredentialsError, AuthFailedError, NetworkError,
-    )
-    from memex.store import Store
-
-    
-    source_module = os.environ.get("MEMEX_TELEGRAM_SOURCE")
-    try:
-        source = load_telegram_source(source_module)
-    except CredentialsError as e:
-        _fail("missing_credentials", detail=str(e))
-    except ImportError as e:
-        _fail("source_not_found", detail=str(e))
-
-    source_name = "telegram:saved_messages"
-
-    with Store.open(db_path) as store:
-        cursor_str = store.get_cursor(source_name)
-        cursor = int(cursor_str) if cursor_str is not None else None
-
-        try:
-            messages = source.capture(cursor=cursor)
-        except AuthFailedError as e:
-            _fail("auth_failed", detail=str(e))
-        except NetworkError as e:
-            _fail("network_error", detail=str(e))
-
-        now = datetime.now(timezone.utc).isoformat()
-        results = []
-        for msg in messages:
-            store.add_inbox_item(
-                source_name=source_name,
-                url=msg.url,
-                timestamp=msg.timestamp,
-                note=msg.note,
-                captured_at=now,
-            )
-            results.append({"url": msg.url, "timestamp": msg.timestamp, "note": msg.note})
-
-        # Advance cursor to the highest Telegram message ID seen
-        if messages:
-            store.set_cursor(source_name, str(max(msg.id for msg in messages if msg.id)))
-
-    click.echo(json.dumps(results))
 
 
 @cli.group(invoke_without_command=True)
@@ -1249,58 +1127,11 @@ def delete(db_path: Path, vault_path: Path, node_id: str, cascade: bool) -> None
     
     with Store.open(db_path) as store:
         result = store.delete_node(node_id, cascade=cascade)
+    if result.get("status") == "not_found":
+        _fail("not_found", id=node_id)
     click.echo(json.dumps(result))
 
 
-@cli.command()
-@_db_options
-@click.argument("node_id")
-def retry(db_path: Path, vault_path: Path, node_id: str) -> None:
-    """Re-fetch a failed source URL. Updates content on success."""
-    from memex.store import Store
-    from memex.fetcher import load_fetcher, FetchError
-
-    
-
-    with Store.open(db_path) as store:
-        node = store.get_node(node_id)
-        if node is None:
-            click.echo(json.dumps({"error": "not_found"}))
-            return
-
-        source_url = node.get("source_url")
-        if not source_url or not node.get("failed"):
-            click.echo(json.dumps({"error": "not_failed"}))
-            return
-
-        fetcher = load_fetcher(os.environ.get("MEMEX_FETCHER_MODULE"), vault_path=str(vault_path))
-        try:
-            result = fetcher.fetch(source_url)
-            content = result.content
-            content_path = result.content_path
-        except FetchError as exc:
-            click.echo(json.dumps({"error": "fetch_failed", "detail": str(exc)}))
-            return
-
-        # Write content file with human-readable name
-        vault_path.mkdir(parents=True, exist_ok=True)
-        title = node.get("title")
-        name = _slugify(title) if title else node_id
-        md_path = _human_path(vault_path, name)
-        md_path.write_text(content, encoding="utf-8")
-
-        # Update node content_path and reset failed
-        store._con.execute(
-            "UPDATE node SET content_path = ? WHERE id = ?",
-            (str(md_path), node_id),
-        )
-        store.reset_source_failed(node_id)
-
-    click.echo(json.dumps({
-        "status": "retried",
-        "id": node_id,
-        "content_path": str(md_path),
-    }))
 
 @cli.command("backfill-synthesis")
 @_db_options

@@ -1,44 +1,25 @@
 """Shared fixtures and helpers for memex tests."""
 from __future__ import annotations
 
-import os
-import shutil
 import sqlite3
 from datetime import datetime, timezone
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 
-from memex.fetcher import FetchResult, FetchError
 from memex.store import Store
 
 
-class FakeFetcher:
-    """Deterministic fetcher for tests."""
-    def fetch(self, url: str):
-        if "fail.example.com" in url:
-            raise FetchError(f"Simulated fetch failure for {url}")
-        return FetchResult(
-            content=(f"# Fake Article\n\n"
-                     f"Fake content for {url}.\n\n"
-                     f"This is a longer article body that exceeds the minimum character threshold "
-                     f"of one hundred characters so that the L0 markdown file gets created during "
-                     f"ingestion in tests."),
-            title="Fake Article Title",
-        )
-
-
-FAKE_FETCHER = "tests.conftest:FakeFetcher"
 WORKTREE = Path(__file__).resolve().parent.parent
 
 
 def _run_memex(args: list[str], cwd: Path | None = None, env: dict | None = None) -> subprocess.CompletedProcess:
+    import os
+    import shutil
+    import subprocess
+    import sys
+
     full_env = {**os.environ, **(env or {})}
-    # `uv run python -m memex.cli` keeps cwd on sys.path, which makes the
-    # `MEMEX_FETCHER_MODULE=tests.conftest:FakeFetcher` test seam work
-    # without needing PYTHONPATH. Falls back to direct python if uv is absent.
     if shutil.which("uv"):
         cmd = ["uv", "run", "python", "-m", "memex.cli", *args]
     else:
@@ -61,6 +42,22 @@ def _store():
 
 def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def register_node(store: dict, vault_path: Path, filename: str, source_url: str) -> subprocess.CompletedProcess:
+    """Write a markdown file with frontmatter and register it."""
+    content = (
+        f"---\nsource_url: {source_url}\ntitle: Test Article\n---\n\n"
+        f"# Test Article\n\n"
+        f"This is a longer article body that exceeds the minimum character threshold "
+        f"of one hundred characters so that the L0 markdown file gets created in tests."
+    )
+    path = vault_path / filename
+    path.write_text(content, encoding="utf-8")
+    return _run_memex(
+        ["register", "--db", str(store["db"]), "--vault", str(store["vault"]), str(path)],
+        cwd=WORKTREE,
+    )
 
 
 @pytest.fixture
@@ -86,12 +83,3 @@ def store(tmp_path):
     _run_memex(["init", "--db", str(db_path), "--vault", str(vault_path)], cwd=tmp_path)
     return {"db": db_path, "vault": vault_path, "tmp": tmp_path}
 
-
-def ingest(store, url: str, extra_env: dict | None = None) -> subprocess.CompletedProcess:
-    """Run memex extract with the fake fetcher."""
-    env = {"MEMEX_FETCHER_MODULE": FAKE_FETCHER, **(extra_env or {})}
-    return _run_memex(
-        ["extract", "--db", str(store["db"]), "--vault", str(store["vault"]), url],
-        cwd=WORKTREE,
-        env=env,
-    )

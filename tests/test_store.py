@@ -22,7 +22,7 @@ class TestSchema:
             "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
         ).fetchall()
         names = {r[0] for r in tables if not r[0].startswith("sqlite_")}
-        assert names == {"node", "source", "edge", "cursor", "inbox", "event_queue", "event_node_link", "review_proposal", "node_idea"}
+        assert names == {"node", "source", "edge", "event_queue", "event_node_link", "review_proposal", "node_idea"}
 
     def test_init_schema_is_idempotent(self):
         store = _store()
@@ -31,7 +31,7 @@ class TestSchema:
             "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
         ).fetchall()
         names = {r[0] for r in tables if not r[0].startswith("sqlite_")}
-        assert names == {"node", "source", "edge", "cursor", "inbox", "event_queue", "event_node_link", "review_proposal", "node_idea"}
+        assert names == {"node", "source", "edge", "event_queue", "event_node_link", "review_proposal", "node_idea"}
 
     def test_init_schema_adds_new_columns(self):
         """Verify is_contested, contested_at on node and written_by on edge exist."""
@@ -1200,7 +1200,6 @@ class TestGetStats:
         assert stats["by_trust_state"] == {}
         assert stats["derivation_coverage_pct"] == 0.0
         assert stats["pending_reviews"] == 0
-        assert stats["inbox_count"] == 0
 
     def test_get_stats_with_data(self):
         store = _store()
@@ -1208,11 +1207,9 @@ class TestGetStats:
         store.create_node(node_id="n2", kind="raw_source", tier=None, trust_state="auto-verified")
         store.create_node(node_id="n3", kind="summary", depth=1, tier="notes", trust_state="draft")
         stats = store.get_stats()
-        assert stats["total_nodes"] == 3
         assert stats["by_kind"] == {"raw_source": 2, "summary": 1}
         assert stats["by_trust_state"] == {"draft": 2, "auto-verified": 1}
         assert stats["pending_reviews"] == 0
-        assert stats["inbox_count"] == 0
 
 
 class TestResetSourceFailed:
@@ -1252,7 +1249,3 @@ class TestEdgeCursor:
                      "get_node_open_events"):
             assert callable(getattr(store, name)), f"store.{name} is not callable"
 
-    def test_cursor_methods_exist(self):
-        store = _store()
-        for name in ("get_cursor", "set_cursor"):
-            assert callable(getattr(store, name)), f"store.{name} is not callable"

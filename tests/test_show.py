@@ -9,7 +9,7 @@ import os
 import time
 from pathlib import Path
 
-from tests.conftest import ingest, _run_memex
+from tests.conftest import _run_memex, register_node
 
 
 def show(store, node_id: str):
@@ -19,7 +19,7 @@ def show(store, node_id: str):
 
 
 def test_show_returns_json_for_known_id(store):
-    result = ingest(store, "https://example.com/article")
+    result = register_node(store, store["vault"], "article.md", "https://example.com/article")
     ingested = json.loads(result.stdout)
     result2 = show(store, ingested["id"])
     assert result2.returncode == 0, result2.stderr
@@ -28,16 +28,16 @@ def test_show_returns_json_for_known_id(store):
 
 
 def test_show_includes_content(store):
-    result = ingest(store, "https://example.com/article")
+    result = register_node(store, store["vault"], "article.md", "https://example.com/article")
     ingested = json.loads(result.stdout)
     result2 = show(store, ingested["id"])
     data = json.loads(result2.stdout)
     assert data["content"] is not None
-    assert "Fake content" in data["content"]
+    assert "Test Article" in data["content"]
 
 
 def test_show_includes_canonical_key(store):
-    result = ingest(store, "https://example.com/article?utm_source=test")
+    result = register_node(store, store["vault"], "article.md", "https://example.com/article?utm_source=test")
     ingested = json.loads(result.stdout)
     result2 = show(store, ingested["id"])
     data = json.loads(result2.stdout)
@@ -46,7 +46,7 @@ def test_show_includes_canonical_key(store):
 
 def test_show_includes_source_url(store):
     url = "https://example.com/article"
-    result = ingest(store, url)
+    result = register_node(store, store["vault"], "article.md", url)
     ingested = json.loads(result.stdout)
     result2 = show(store, ingested["id"])
     data = json.loads(result2.stdout)
@@ -54,7 +54,7 @@ def test_show_includes_source_url(store):
 
 
 def test_show_includes_l0_path(store):
-    result = ingest(store, "https://example.com/article")
+    result = register_node(store, store["vault"], "article.md", "https://example.com/article")
     ingested = json.loads(result.stdout)
     result2 = show(store, ingested["id"])
     data = json.loads(result2.stdout)
@@ -63,7 +63,7 @@ def test_show_includes_l0_path(store):
 
 
 def test_show_includes_trust_state(store):
-    result = ingest(store, "https://example.com/article")
+    result = register_node(store, store["vault"], "article.md", "https://example.com/article")
     ingested = json.loads(result.stdout)
     result2 = show(store, ingested["id"])
     data = json.loads(result2.stdout)
@@ -78,7 +78,7 @@ def test_show_returns_error_for_unknown_id(store):
 
 
 def test_show_does_not_write_to_db(store):
-    result = ingest(store, "https://example.com/article")
+    result = register_node(store, store["vault"], "article.md", "https://example.com/article")
     ingested = json.loads(result.stdout)
     mtime_before = os.path.getmtime(store["db"])
     time.sleep(0.05)

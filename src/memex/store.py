@@ -52,19 +52,6 @@ CREATE TABLE IF NOT EXISTS edge (
     to_node   TEXT NOT NULL REFERENCES node(id)
 );
 
-CREATE TABLE IF NOT EXISTS cursor (
-    source_name TEXT PRIMARY KEY,
-    value       TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS inbox (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    source_name TEXT NOT NULL,
-    url         TEXT NOT NULL,
-    timestamp   TEXT NOT NULL,
-    note        TEXT,
-    captured_at TEXT NOT NULL
-);
 
 CREATE TABLE IF NOT EXISTS event_queue (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -945,48 +932,6 @@ class Store:
             return None
         return self.get_node(row["from_node"])
 
-    # ── Cursors ────────────────────────────────────────────────────
-
-    def get_cursor(self, source_name: str) -> str | None:
-        row = self._con.execute(
-            "SELECT value FROM cursor WHERE source_name = ?", (source_name,)
-        ).fetchone()
-        return row["value"] if row else None
-
-    def set_cursor(self, source_name: str, value: str) -> None:
-        self._con.execute(
-            "INSERT OR REPLACE INTO cursor (source_name, value) VALUES (?, ?)",
-            (source_name, value),
-        )
-
-    # ── Inbox ──────────────────────────────────────────────────────
-
-    def add_inbox_item(self, *, source_name: str, url: str, timestamp: str,
-                       note: str | None, captured_at: str) -> None:
-        """Persist a captured item to the inbox table."""
-        try:
-            self._con.execute(
-                """
-                INSERT INTO inbox (source_name, url, timestamp, note, captured_at)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (source_name, url, timestamp, note, captured_at),
-            )
-        except sqlite3.Error as e:
-            raise StoreError(str(e)) from e
-
-    def list_inbox(self) -> list[dict]:
-        """All inbox rows."""
-        rows = self._con.execute(
-            "SELECT id, source_name, url, timestamp, note, captured_at FROM inbox ORDER BY id"
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-    def list_ingested_canonical_keys(self) -> set[str]:
-        """All canonical keys present in the ledger (source table)."""
-        rows = self._con.execute("SELECT canonical_key FROM source").fetchall()
-        return {r["canonical_key"] for r in rows}
-
     # ── Trust state + check failures ───────────────────────────────
 
     def update_trust_state(
@@ -1164,9 +1109,7 @@ class Store:
                 "SELECT COUNT(*) FROM event_queue WHERE status = 'pending'"
             ).fetchone()[0]
 
-            inbox_count = self._con.execute(
-                "SELECT COUNT(*) FROM inbox"
-            ).fetchone()[0]
+
 
             return {
                 "total_nodes": total,
@@ -1176,7 +1119,6 @@ class Store:
                 "by_confidence": by_conf,
                 "derivation_coverage_pct": coverage,
                 "pending_reviews": pending_reviews,
-                "inbox_count": inbox_count,
             }
         except sqlite3.Error as e:
             raise StoreError(str(e)) from e
