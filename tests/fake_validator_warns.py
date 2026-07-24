@@ -4,10 +4,11 @@ Has call_llm that raises, so validate_derivation returns (True, warning).
 """
 from __future__ import annotations
 
-from memex.agent import DerivationResult
+from memex.agent import Agent
+from memex.schemas import DerivationResult
 
 
-class FakeValidatorWarns:
+class FakeValidatorWarns(Agent):
     """Fake validator that warns (call_llm raises)."""
 
     def derive(self, content: str) -> DerivationResult:
@@ -19,7 +20,7 @@ class FakeValidatorWarns:
     def call_llm(self, prompt: str) -> str:
         raise RuntimeError("Simulated validator LLM failure")
 
-    def extract_ideas(self, content: str) -> list[str]:
+    def extract_ideas(self, content: str, source_url: str | None = None) -> list[str]:
         return ["stub idea"]
 
     def review(self, target_content: str, asserting_content: str, edge_payload: dict) -> None:

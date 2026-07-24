@@ -6,7 +6,9 @@ and reports them as status="error" without crashing the batch.
 from __future__ import annotations
 
 
-class FakeLLMClientThrows:
+from memex.agent import Agent
+
+class FakeLLMClientThrows(Agent):
     """Fake LLM client that raises an exception on every derive() call."""
 
     def derive(self, content: str) -> None:

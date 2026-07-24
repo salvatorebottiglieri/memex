@@ -134,7 +134,8 @@ class TestDerive:
         result = _derive(store, "does-not-exist")
         assert result.returncode != 0
         data = json.loads(result.stderr)
-        assert data["error"] == "not_found"
+        assert data["error"] == "error"
+        assert data["detail"] == "node_not_found"
 
 
 class TestDeriveAll:
@@ -399,9 +400,19 @@ class TestDeriveQualityGate:
     FAKE_VALIDATOR_FAILS = "tests.fake_validator_fails:FakeValidatorFails"
     FAKE_VALIDATOR_WARNS = "tests.fake_validator_warns:FakeValidatorWarns"
 
+    @staticmethod
+    def _ingest(store, url: str) -> dict:
+        """Register a test file and return the ingested node dict."""
+        import uuid
+        filename = f"{uuid.uuid4().hex}.md"
+        vault = Path(store["vault"])
+        p = register_node(store, vault, filename, url)
+        assert p.returncode == 0, p.stderr
+        return json.loads(p.stdout)
+
     def test_no_validator_proceeds(self, store):
         """No MEMEX_VALIDATOR set -> derive proceeds normally (no regression)."""
-        ingested = _ingest(store, "https://example.com/article")
+        ingested = self._ingest(store, "https://example.com/article")
         result = _derive(store, ingested["id"])
         assert result.returncode == 0, result.stderr
         data = json.loads(result.stdout)
@@ -409,7 +420,7 @@ class TestDeriveQualityGate:
 
     def test_fake_agent_validator_skips(self, store):
         """MEMEX_VALIDATOR=FakeAgent (no call_llm) -> validation skipped, derive proceeds."""
-        ingested = _ingest(store, "https://example.com/article")
+        ingested = self._ingest(store, "https://example.com/article")
         result = _run_memex(
             ["derive", "--db", str(store["db"]), "--vault", str(store["vault"]), ingested["id"]],
             env={"MEMEX_AGENT": FAKE_AGENT, "MEMEX_VALIDATOR": FAKE_AGENT},
@@ -420,7 +431,7 @@ class TestDeriveQualityGate:
 
     def test_failing_validator_rejects(self, store):
         """Validator rejects -> quality_failed, no node or edge created."""
-        ingested = _ingest(store, "https://example.com/article")
+        ingested = self._ingest(store, "https://example.com/article")
         result = _run_memex(
             ["derive", "--db", str(store["db"]), "--vault", str(store["vault"]), ingested["id"]],
             env={"MEMEX_AGENT": FAKE_AGENT, "MEMEX_VALIDATOR": self.FAKE_VALIDATOR_FAILS},
@@ -442,7 +453,7 @@ class TestDeriveQualityGate:
 
     def test_warning_validator_proceeds_with_warning(self, store):
         """Validator warns -> derive proceeds but warning on stderr."""
-        ingested = _ingest(store, "https://example.com/article")
+        ingested = self._ingest(store, "https://example.com/article")
         result = _run_memex(
             ["derive", "--db", str(store["db"]), "--vault", str(store["vault"]), ingested["id"]],
             env={"MEMEX_AGENT": FAKE_AGENT, "MEMEX_VALIDATOR": self.FAKE_VALIDATOR_WARNS},

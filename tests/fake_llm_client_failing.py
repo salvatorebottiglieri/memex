@@ -5,10 +5,11 @@ Used to test that the checks module correctly leaves the node in draft state.
 """
 from __future__ import annotations
 
-from memex.agent import DerivationResult
+from memex.agent import Agent
+from memex.schemas import DerivationResult
 
 
-class FakeLLMClientFailing:
+class FakeLLMClientFailing(Agent):
     """Fake LLM client that returns a derivation missing the synthesis marker."""
 
     def derive(self, content: str) -> DerivationResult:
@@ -16,7 +17,7 @@ class FakeLLMClientFailing:
         prose = "This derivation has no synthesis marker and is intentionally bad."
         return DerivationResult(prose=prose, synthesis_statements=[])
 
-    def extract_ideas(self, content: str) -> list[str]:
+    def extract_ideas(self, content: str, source_url: str | None = None) -> list[str]:
         return ["Idea about topic"]
 
     def review(self, target_content: str, asserting_content: str, edge_payload: dict) -> None:

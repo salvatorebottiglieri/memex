@@ -247,7 +247,7 @@ def resolve(url: str | None) -> None:
     """
     if not url:
         _fail("Missing required argument 'URL'.")
-    from memex.resolver import resolve_url
+    from memex.resolve.rules import resolve_url
     result = resolve_url(url)
     click.echo(json.dumps(dataclasses.asdict(result)))
 
@@ -261,7 +261,7 @@ def resolve_agent(url: str | None) -> None:
     """
     if not url:
         _fail("Missing required argument 'URL'.")
-    from memex.resolver import detect_resolver, ResolverError
+    from memex.resolve.browsers import detect_resolver, ResolverError
     resolver = detect_resolver()
     if resolver is None:
         _fail("No resolver agent available. Install pi or set MEMEX_RESOLVER_CMD.")
@@ -402,15 +402,24 @@ def derive(db_path: Path, vault_path: Path, node_id: str | None = None,
     """
     from memex.agent import load_agent
     from memex.store import Store
+    from memex.services.derive import DeriverService
 
-    
+    agent = load_agent(os.environ.get("MEMEX_AGENT"))
 
     if derive_all:
-        _derive_all(db_path, vault_path, limit)
+        with Store.open(db_path) as store:
+            svc = DeriverService(store, vault_path, agent)
+            results = svc.derive_all(limit=limit)
+        click.echo(json.dumps([dataclasses.asdict(r) for r in results]))
     else:
         if not node_id:
             _fail("missing_node_id", detail="Provide a node_id or use --all for batch mode.")
-        _derive_single(db_path, vault_path, node_id)
+        with Store.open(db_path) as store:
+            svc = DeriverService(store, vault_path, agent)
+            result = svc.derive(node_id)
+        if result.status == "error":
+            _fail("error", detail=result.detail or "")
+        click.echo(json.dumps(dataclasses.asdict(result)))
 
 
 
@@ -431,325 +440,18 @@ def synthesize(db_path: Path, vault_path: Path, node_ids: tuple[str, ...]) -> No
     """
     from memex.agent import load_agent
     from memex.store import Store
+    from memex.services.synthesize import SynthesizerService
 
-    
     agent = load_agent(os.environ.get("MEMEX_AGENT"))
 
     parent_ids = list(node_ids)
 
     with Store.open(db_path) as store:
-        # --- Validate all parent nodes exist ---
-        for pid in parent_ids:
-            parent = store.get_node(pid)
-            if parent is None:
-                _fail("not_found", node_id=pid)
+        result = SynthesizerService(store, vault_path, agent).synthesize(parent_ids)
 
-        # --- Idempotency check: unordered parent set ---
-        existing = store.find_synthesis_by_parents(parent_ids)
-        if existing is not None:
-            click.echo(json.dumps({
-                "id": existing["id"],
-                "status": "already_synthesized",
-                "parent_ids": parent_ids,
-            }))
-            return
-
-        # --- Run synthesis ---
-        try:
-            result = _do_synthesize(store, vault_path, parent_ids, agent)
-        except Exception as exc:
-            _fail("agent_failed", detail=str(exc))
-
+    if result.get("status") == "error":
+        _fail("error", detail=result.get("detail") or "")
     click.echo(json.dumps(result))
-
-def _derive_single(db_path: Path, vault_path: Path, node_id: str) -> None:
-    """Derive a single L0 node (the original behavior)."""
-    from memex.agent import load_agent
-    from memex.store import Store
-
-    agent = load_agent(os.environ.get("MEMEX_AGENT"))
-
-    with Store.open(db_path) as store:
-        # --- Load the L0 node ---
-        l0 = store.get_node(node_id)
-        if l0 is None:
-            _fail("not_found", id=node_id)
-
-        # --- Load content from vault file ---
-        if not l0.get("content_path") or not Path(l0["content_path"]).exists():
-            _fail("no_content", id=node_id, detail="L0 content file not found in vault; place the file and re-register.")
-
-        l0_content = Path(l0["content_path"]).read_text(encoding="utf-8")
-
-        # --- Idempotency check ---
-        existing = store.find_derived_from(node_id)
-        if existing is not None:
-            click.echo(json.dumps({
-                "id": existing["from_node"],
-                "status": "already_derived",
-                "l0_node_id": node_id,
-            }))
-            return
-
-        result = _do_derive(store, vault_path, node_id, l0_content, agent)
-
-    click.echo(json.dumps(result))
-
-
-def _do_derive(store, vault_path, l0_id, l0_content, agent, use_retry=False):
-    """Run agent derivation, write markdown, create node+edge, run checks.
-
-    Returns a result dict with status="derived" on success.
-    Raises on agent failure (caller catches for batch mode).
-    """
-    from memex.checks import run_checks
-    from memex.agent import call_with_retry
-
-    deriv_fn = lambda: agent.derive(l0_content)
-    deriv = call_with_retry(deriv_fn) if use_retry else agent.derive(l0_content)
-    deriv_id = str(uuid.uuid4())
-
-    # ── Adversarial validation gate ──────────────────────────────────
-    import os as _os
-    from memex.agent import validate_derivation, load_agent as _load_agent
-    validator_path = _os.environ.get("MEMEX_VALIDATOR")
-    if validator_path:
-        validator = _load_agent(validator_path)
-        passes, warning = validate_derivation(validator, l0_content, deriv)
-        if warning:
-            click.echo(json.dumps({"validator_warning": warning}), err=True)
-        if not passes:
-            return {
-                "status": "quality_failed",
-                "reason": "Derivation does not meaningfully re-elaborate the source material.",
-                "l0_node_id": l0_id,
-            }
-    # ──────────────────────────────────────────────────────────────────
-
-    vault_path.mkdir(parents=True, exist_ok=True)
-    # Extract heading from prose for human-readable filename
-    first_line = deriv.prose.split('\n')[0].strip()
-    head_name = first_line.lstrip('# ').strip().strip('"').strip("'") or deriv_id
-    md_path = _human_path(vault_path, head_name)
-    md_path.write_text(deriv.prose, encoding="utf-8")
-    now = datetime.now(timezone.utc).isoformat()
-    # Compute depth from parent node
-    parent = store.get_node(l0_id)
-    parent_depth = parent["depth"] if parent else 0
-    store.create_node(
-        node_id=deriv_id,
-        kind="summary",
-        tier="notes",
-        trust_state="draft",
-        depth=parent_depth + 1,
-        content_path=str(md_path),
-        created_at=now,
-        synthesis_statements=deriv.synthesis_statements,
-    )
-    store.create_edge(
-        edge_id=str(uuid.uuid4()),
-        type="provenance",
-        relation="derived_from",
-        from_node=deriv_id,
-        to_node=l0_id,
-    )
-
-    # Notes-tier with 1 parent → medium confidence
-    store._con.execute(
-        "UPDATE node SET confidence = 'medium' WHERE id = ?", (deriv_id,)
-    )
-
-    check_result = run_checks(store._con, deriv_id, md_path)
-    trust_state = "auto-verified" if check_result.passed else "draft"
-    store.update_trust_state(
-        node_id=deriv_id,
-        trust_state=trust_state,
-        check_failures=check_result.failures,
-    )
-
-    return {
-        "id": deriv_id,
-        "status": "derived",
-        "l0_node_id": l0_id,
-        "trust_state": trust_state,
-        "content_path": str(md_path),
-        "check_failures": check_result.failures,
-    }
-
-
-def _do_synthesize(store, vault_path, parent_ids, agent):
-    """Run agent synthesis across multiple parents, write markdown, create node+edges, run checks.
-
-    Returns a result dict on success. Raises on agent failure.
-    """
-    from memex.checks import run_checks
-    from memex.agent import call_with_retry
-
-    # Load parent nodes and compute max depth
-    max_depth = 0
-    contents = []
-    for pid in parent_ids:
-        parent = store.get_node(pid)
-        if parent is None:
-            raise ValueError(f"parent node not found: {pid}")
-        max_depth = max(max_depth, parent["depth"])
-        content_path = parent.get("content_path") or ""
-        if content_path and Path(content_path).exists():
-            contents.append(Path(content_path).read_text(encoding="utf-8"))
-        else:
-            contents.append("")
-
-    combined_content = "\n\n---\n\n".join(contents)
-    deriv_fn = lambda: agent.derive(combined_content)
-    deriv = call_with_retry(deriv_fn)
-    deriv_id = str(uuid.uuid4())
-
-    # ── Adversarial validation gate ──────────────────────────────────
-    import os as _os
-    from memex.agent import validate_derivation, load_agent as _load_agent
-    validator_path = _os.environ.get("MEMEX_VALIDATOR")
-    if validator_path:
-        validator = _load_agent(validator_path)
-        passes, warning = validate_derivation(validator, combined_content, deriv)
-        if warning:
-            click.echo(json.dumps({"validator_warning": warning}), err=True)
-        if not passes:
-            return {
-                "status": "quality_failed",
-                "reason": "Synthesis does not meaningfully re-elaborate the source material.",
-                "parent_ids": list(parent_ids),
-            }
-    # ──────────────────────────────────────────────────────────────────
-
-    vault_path.mkdir(parents=True, exist_ok=True)
-    # Extract heading from prose for human-readable filename
-    first_line = deriv.prose.split('\n')[0].strip()
-    head_name = first_line.lstrip('# ').strip().strip('"').strip("'") or deriv_id
-    md_path = _human_path(vault_path, head_name)
-    md_path.write_text(deriv.prose, encoding="utf-8")
-
-    now = datetime.now(timezone.utc).isoformat()
-    store.create_node(
-        node_id=deriv_id,
-        kind="summary",
-        tier="synthesis",
-        trust_state="draft",
-        depth=max_depth + 1,
-        content_path=str(md_path),
-        created_at=now,
-        synthesis_statements=deriv.synthesis_statements,
-    )
-
-    for pid in parent_ids:
-        store.create_edge(
-            edge_id=str(uuid.uuid4()),
-            type="provenance",
-            relation="derived_from",
-            from_node=deriv_id,
-            to_node=pid,
-        )
-
-    # Synthesis: confidence = min(parents' confidence)
-    confidences = []
-    for pid in parent_ids:
-        p = store.get_node(pid)
-        if p and p.get("confidence"):
-            confidences.append(p["confidence"])
-    if "low" in confidences:
-        synth_conf = "low"
-    elif "medium" in confidences:
-        synth_conf = "medium"
-    else:
-        synth_conf = "low"
-    store._con.execute(
-        "UPDATE node SET confidence = ? WHERE id = ?", (synth_conf, deriv_id)
-    )
-
-    check_result = run_checks(store._con, deriv_id, md_path)
-    trust_state = "auto-verified" if check_result.passed else "draft"
-    store.update_trust_state(
-        node_id=deriv_id,
-        trust_state=trust_state,
-        check_failures=check_result.failures,
-    )
-
-    return {
-        "id": deriv_id,
-        "status": "synthesized",
-        "parent_ids": list(parent_ids),
-        "trust_state": trust_state,
-        "content_path": str(md_path),
-        "check_failures": check_result.failures,
-    }
-
-
-def _derive_all(db_path: Path, vault_path: Path, limit: int) -> None:
-    """Derive all un-derived L0 nodes, up to limit."""
-    from memex.agent import load_agent
-    from memex.store import Store
-
-    if limit <= 0:
-        click.echo(json.dumps([]))
-        return
-
-    agent = load_agent(os.environ.get("MEMEX_AGENT"))
-
-    with Store.open(db_path) as store:
-        # Find un-derived L0s
-        all_nodes = store.list_nodes()
-        un_derived = []
-        for node in all_nodes:
-            if node.get("kind") != "raw_source":
-                continue
-            if store.find_derived_from(node["id"]) is not None:
-                continue
-            un_derived.append(node["id"])
-            if len(un_derived) >= limit:
-                break
-
-        results = []
-
-        # Report already-derived L0s
-        seen_derived = set()
-        for node in all_nodes:
-            if node.get("kind") != "raw_source":
-                continue
-            existing = store.find_derived_from(node["id"])
-            if existing is not None:
-                results.append({
-                    "id": node["id"],
-                    "status": "already_derived",
-                })
-                seen_derived.add(node["id"])
-
-        # Derive un-derived L0s
-        count = 0
-        for node in all_nodes:
-            if node.get("kind") != "raw_source":
-                continue
-            if node["id"] in seen_derived:
-                continue
-            if count >= limit:
-                break
-            count += 1
-
-            l0 = store.get_node(node["id"])
-            if l0 is None or not l0.get("content_path"):
-                continue
-
-            try:
-                l0_content = Path(l0["content_path"]).read_text(encoding="utf-8")
-                result = _do_derive(store, vault_path, node["id"], l0_content, agent, use_retry=True)
-                results.append(result)
-            except Exception as e:
-                results.append({
-                    "id": node["id"],
-                    "status": "error",
-                    "detail": str(e),
-                })
-
-    click.echo(json.dumps(results))
-
 
 @cli.command()
 @_db_options
@@ -935,82 +637,17 @@ def review(ctx: click.Context, db_path: Path, vault_path: Path) -> None:
     """
     if ctx.invoked_subcommand is not None:
         return
-    _cmd_review_batch(db_path, vault_path)
-
-
-def _cmd_review_batch(db_path: Path, vault_path: Path) -> None:
-    """Batch-generate proposals for all pending events without proposals."""
-    from memex.agent import load_agent, call_with_retry
+    from memex.agent import load_agent
     from memex.store import Store
+    from memex.services.review import ReviewService
 
-    
     agent = load_agent(os.environ.get("MEMEX_AGENT"))
 
     with Store.open(db_path) as store:
-        events = store.get_pending_events_without_proposal()
-        results = []
+        svc = ReviewService(store, agent)
+        proposals = svc.review_batch()
 
-        for event in events:
-            try:
-                target_node = store.get_node(event["target_node_id"])
-                if target_node is None or not target_node.get("content_path"):
-                    results.append({
-                        "event_id": event["id"],
-                        "status": "error",
-                        "detail": "target_node_not_found",
-                    })
-                    continue
-
-                # Find the asserting node (from_node of the contradicts edge)
-                edge_rows = store._con.execute(
-                    "SELECT from_node FROM edge WHERE id = ?", (event["edge_id"],)
-                ).fetchone()
-                if edge_rows is None:
-                    results.append({
-                        "event_id": event["id"],
-                        "status": "error",
-                        "detail": "edge_not_found",
-                    })
-                    continue
-
-                asserting_node_id = edge_rows["from_node"]
-                asserting_node = store.get_node(asserting_node_id)
-                if asserting_node is None or not asserting_node.get("content_path"):
-                    results.append({
-                        "event_id": event["id"],
-                        "status": "error",
-                        "detail": "asserting_node_not_found",
-                    })
-                    continue
-
-                target_content = Path(target_node["content_path"]).read_text(encoding="utf-8")
-                asserting_content = Path(asserting_node["content_path"]).read_text(encoding="utf-8")
-                edge_payload = {"edge_id": event["edge_id"]}
-
-                review_fn = lambda: agent.review(target_content, asserting_content, edge_payload)
-                proposal = call_with_retry(review_fn)
-
-                proposal_id = store.write_review_proposal(
-                    event_id=event["id"],
-                    affected_node_ids=proposal.affected_node_ids,
-                    damage_boundary_node_id=proposal.damage_boundary_node_id,
-                    rationale_md=proposal.rationale_md,
-                    confidence=proposal.confidence,
-                )
-                results.append({
-                    "event_id": event["id"],
-                    "proposal_id": proposal_id,
-                    "status": "proposed",
-                })
-            except Exception as e:
-                results.append({
-                    "event_id": event["id"],
-                    "status": "error",
-                    "detail": str(e),
-                })
-
-    click.echo(json.dumps({"processed": len(events), "proposals": results}))
-
+    click.echo(json.dumps({"processed": len(proposals), "proposals": proposals}))
 
 @review.command(name="list")
 @click.pass_context

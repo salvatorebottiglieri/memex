@@ -270,40 +270,7 @@ class Store:
                 "UPDATE node SET confidence = ? WHERE id = ?", (min_c, nid)
             )
 
-    def compute_node_confidence(self, node_id: str) -> str:
-        """Compute confidence score for a node per the formula.
 
-        | Confidence | Condition |
-        |---|---|
-        | high | 2+ direct provenance parents AND no incoming contradicts |
-        | medium | 1 direct provenance parent AND no incoming contradicts |
-        | low | Any incoming contradicts, OR 0 parents (L0 nodes) |
-
-        Raises ``ValueError`` if ``node_id`` is not found.
-        """
-        node = self.get_node(node_id)
-        if node is None:
-            raise ValueError(f"node not found: {node_id}")
-
-        # Check incoming contradicts first — overrides everything
-        contradicts = self._con.execute(
-            "SELECT COUNT(*) FROM edge WHERE to_node = ? AND type = 'association' AND relation = 'contradicts'",
-            (node_id,),
-        ).fetchone()[0]
-        if contradicts > 0:
-            return "low"
-        # Count incoming provenance (derived_from) edges — from_node=this_node means
-        # this node was derived from its parents (to_node = parent)
-        parents = self._con.execute(
-            "SELECT COUNT(*) FROM edge WHERE from_node = ? AND type = 'provenance' AND relation = 'derived_from'",
-            (node_id,),
-        ).fetchone()[0]
-        if parents >= 2:
-            return "high"
-        elif parents == 1:
-            return "medium"
-        else:
-            return "low"
 
     # ── Sources ───────────────────────────────────────────────────
 
@@ -480,14 +447,14 @@ class Store:
         """
         now = datetime.now(timezone.utc).isoformat()
         try:
-            descendants = self.find_provenance_descendants(target_node_id)
-            event_id = self.open_contestation_event(
+            descendants = self._find_provenance_descendants(target_node_id)
+            event_id = self._open_contestation_event(
                 edge_id=edge_id,
                 target_node_id=target_node_id,
             )
             all_nodes = [target_node_id] + descendants
             for node_id in all_nodes:
-                self.link_event_to_node(event_id, node_id, now)
+                self._link_event_to_node(event_id, node_id, now)
                 # Only flag nodes that are not already contested
                 self._con.execute(
                     "UPDATE node SET is_contested = 1, contested_at = ? WHERE id = ? AND is_contested = 0",
@@ -540,7 +507,7 @@ class Store:
         except sqlite3.Error as e:
             raise StoreError(str(e)) from e
 
-    def find_provenance_descendants(self, target_node_id: str) -> list[str]:
+    def _find_provenance_descendants(self, target_node_id: str) -> list[str]:
         """Walk ``derived_from`` edges transitively to find all nodes
         that depend on ``target_node_id``.
 
@@ -570,7 +537,7 @@ class Store:
         except sqlite3.Error as e:
             raise StoreError(str(e)) from e
 
-    def open_contestation_event(self, edge_id: str, target_node_id: str) -> int:
+    def _open_contestation_event(self, edge_id: str, target_node_id: str) -> int:
         """Insert a new contestation event and return its id."""
         now = datetime.now(timezone.utc).isoformat()
         try:
@@ -669,7 +636,7 @@ class Store:
         except sqlite3.Error as e:
             raise StoreError(str(e)) from e
 
-    def link_event_to_node(self, event_id: int, node_id: str, contested_at: str) -> None:
+    def _link_event_to_node(self, event_id: int, node_id: str, contested_at: str) -> None:
         """Link an event to a contested node."""
         try:
             self._con.execute(
@@ -858,7 +825,7 @@ class Store:
         except sqlite3.Error as e:
             raise StoreError(str(e)) from e
 
-    def get_node_open_events(self, node_id: str) -> list[int]:
+    def _get_node_open_events(self, node_id: str) -> list[int]:
         """Return event_ids of all pending events that cover ``node_id``."""
         try:
             rows = self._con.execute(
@@ -1032,20 +999,20 @@ class Store:
 
         # Cascade: delete descendants first (deep-first)
         if cascade:
-            descendants = self.find_provenance_descendants(node_id)
+            descendants = self._find_provenance_descendants(node_id)
             for desc_id in descendants:
                 desc_removed = self._delete_node_internal(desc_id, cascade=True)
                 removed.extend(desc_removed)
 
         try:
             # Remove contestation event links
-            open_events = self.get_node_open_events(node_id)
+            open_events = self._get_node_open_events(node_id)
             for event_id in open_events:
+                self._close_contestation_event(event_id)
                 self._con.execute(
                     "UPDATE event_queue SET status = 'closed', closed_at = ? WHERE id = ? AND status = 'pending'",
                     (datetime.now(timezone.utc).isoformat(), event_id),
                 )
-                self._con.execute("DELETE FROM event_node_link WHERE event_id = ?", (event_id,))
                 self._con.execute(
                     "UPDATE review_proposal SET status = 'dismissed', resolved_at = ? WHERE event_id = ? AND status = 'pending'",
                     (datetime.now(timezone.utc).isoformat(), event_id),

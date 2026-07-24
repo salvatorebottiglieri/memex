@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from memex.resolver import (
+from memex.resolve.browsers import (
     Resolver,
     PiResolver,
     _CustomResolver,
@@ -103,14 +103,14 @@ class TestDetectResolver:
 
     def test_detect_none_when_no_resolver(self):
         with patch("shutil.which", return_value=None), \
-             patch("memex.resolver.PlaywrightResolver.available", return_value=False), \
+             patch("memex.resolve.browsers.PlaywrightResolver.available", return_value=False), \
              patch.dict(os.environ, {}, clear=True):
             r = detect_resolver()
             assert r is None
 
     def test_detect_pi_when_available(self):
         with patch("shutil.which", return_value="/usr/local/bin/pi"), \
-             patch("memex.resolver.PlaywrightResolver.available", return_value=False), \
+             patch("memex.resolve.browsers.PlaywrightResolver.available", return_value=False), \
              patch.dict(os.environ, {}, clear=True):
             r = detect_resolver()
             assert r is not None
@@ -124,14 +124,14 @@ class TestDetectResolver:
 
     def test_custom_cmd_takes_precedence_over_pi(self):
         with patch("shutil.which", return_value="/usr/local/bin/pi"), \
-             patch("memex.resolver.PlaywrightResolver.available", return_value=False), \
+             patch("memex.resolve.browsers.PlaywrightResolver.available", return_value=False), \
              patch.dict(os.environ, {"MEMEX_RESOLVER_CMD": "claude run"}, clear=True):
             r = detect_resolver()
             assert isinstance(r, _CustomResolver)
 
     def test_register_order_first_wins(self):
         with patch("shutil.which", side_effect=[True, False]), \
-             patch("memex.resolver.PlaywrightResolver.available", return_value=False), \
+             patch("memex.resolve.browsers.PlaywrightResolver.available", return_value=False), \
              patch.dict(os.environ, {}, clear=True):
             r = detect_resolver()
             assert isinstance(r, PiResolver)

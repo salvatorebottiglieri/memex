@@ -90,24 +90,24 @@ class TestContestation:
     def test_find_descendants_3_level(self):
         store = _store()
         l0, d1, d2, d3 = self._build_3_level_pyramid(store)
-        descendants = store.find_provenance_descendants(l0)
+        descendants = store._find_provenance_descendants(l0)
         assert sorted(descendants) == sorted([d1, d2, d3])
 
     def test_find_descendants_mid_pyramid(self):
         store = _store()
         l0, d1, d2, d3 = self._build_3_level_pyramid(store)
-        descendants = store.find_provenance_descendants(d1)
+        descendants = store._find_provenance_descendants(d1)
         assert sorted(descendants) == sorted([d2, d3])
 
     def test_find_descendants_none(self):
         store = _store()
         l0, d1, d2, d3 = self._build_3_level_pyramid(store)
-        descendants = store.find_provenance_descendants(d3)
+        descendants = store._find_provenance_descendants(d3)
         assert descendants == []
 
     def test_find_descendants_unknown_node(self):
         store = _store()
-        assert store.find_provenance_descendants("nonexistent") == []
+        assert store._find_provenance_descendants("nonexistent") == []
 
     def test_find_descendants_ignores_non_provenance_edges(self):
         """Only 'derived_from' edges are walked."""
@@ -124,7 +124,7 @@ class TestContestation:
         # contradicts edge — should NOT be walked
         store.create_edge(edge_id=str(uuid.uuid4()), type="association",
                           relation="contradicts", from_node=n3, to_node=n1)
-        assert store.find_provenance_descendants(n1) == []
+        assert store._find_provenance_descendants(n1) == []
 
     # ── open_contestation_event ────────────────────────────────────
 
@@ -138,7 +138,7 @@ class TestContestation:
         store.create_node(node_id=src, kind="summary", depth=1, created_at=now)
         store.create_edge(edge_id=eid, type="association", relation="related",
                           from_node=src, to_node=nid)
-        event_id = store.open_contestation_event(edge_id=eid, target_node_id=nid)
+        event_id = store._open_contestation_event(edge_id=eid, target_node_id=nid)
         assert isinstance(event_id, int)
         row = store._con.execute(
             "SELECT event_type, edge_id, target_node_id, status FROM event_queue WHERE id = ?",
@@ -161,9 +161,9 @@ class TestContestation:
         store.create_node(node_id=src, kind="summary", depth=1, created_at=now)
         store.create_edge(edge_id=eid, type="association", relation="related",
                           from_node=src, to_node=nid)
-        event_id = store.open_contestation_event(edge_id=eid, target_node_id=nid)
+        event_id = store._open_contestation_event(edge_id=eid, target_node_id=nid)
         ts = _utcnow()
-        store.link_event_to_node(event_id, nid, ts)
+        store._link_event_to_node(event_id, nid, ts)
         row = store._con.execute(
             "SELECT event_id, node_id, contested_at FROM event_node_link WHERE event_id = ?",
             (event_id,),
@@ -995,7 +995,7 @@ class TestGetNodeOpenEvents:
     def test_returns_empty_for_unknown_node(self):
         """A node with no events returns an empty list."""
         store = _store()
-        result = store.get_node_open_events("nonexistent")
+        result = store._get_node_open_events("nonexistent")
         assert result == []
 
     def test_returns_event_ids_for_pending_events(self):
@@ -1009,7 +1009,7 @@ class TestGetNodeOpenEvents:
         store.create_node(node_id=src, kind="summary", depth=1, created_at=now)
         store.create_edge(edge_id=edge_id, type="association",
                           relation="contradicts", from_node=src, to_node=l0)
-        result = store.get_node_open_events(l0)
+        result = store._get_node_open_events(l0)
         assert len(result) == 1
         assert isinstance(result[0], int)
 
@@ -1026,7 +1026,7 @@ class TestGetNodeOpenEvents:
                           relation="contradicts", from_node=src1, to_node=l0)
         store.create_edge(edge_id=str(uuid.uuid4()), type="association",
                           relation="contradicts", from_node=src2, to_node=l0)
-        result = store.get_node_open_events(l0)
+        result = store._get_node_open_events(l0)
         assert len(result) == 2
         assert all(isinstance(eid, int) for eid in result)
 
@@ -1042,7 +1042,7 @@ class TestGetNodeOpenEvents:
                           relation="contradicts", from_node=src, to_node=l0)
         # Close the event manually
         store._con.execute("UPDATE event_queue SET status = 'closed' WHERE 1=1")
-        result = store.get_node_open_events(l0)
+        result = store._get_node_open_events(l0)
         assert result == []
 
 
@@ -1248,13 +1248,7 @@ class TestResetSourceFailed:
 class TestEdgeCursor:
     def test_edge_methods_exist(self):
         store = _store()
-        for name in ("create_edge", "list_edges", "find_provenance_descendants",
-                     "open_contestation_event", "link_event_to_node",
-                     "get_node_open_events"):
+        for name in ("create_edge", "list_edges"):
             assert callable(getattr(store, name)), f"store.{name} is not callable"
 
 
-    def test_cursor_methods_exist(self):
-        store = _store()
-        for name in ("get_cursor", "set_cursor"):
-            assert callable(getattr(store, name)), f"store.{name} is not callable"

@@ -10,9 +10,9 @@ import pytest
 
 from memex.agent import (
     Agent,
-    ReviewProposal,
     load_agent,
 )
+from memex.schemas import ReviewProposal
 
 FAKE_AGENT = "tests.fake_llm_client:FakeAgent"
 
@@ -48,18 +48,13 @@ class TestAgentBase:
     """Agent base class contract."""
 
     def test_review_raises_not_implemented(self):
-        """Agent.review raises NotImplementedError by default."""
-        client = Agent()
-        with pytest.raises(NotImplementedError):
-            client.review("target", "asserting", {})
-
+        """Agent() can no longer be instantiated directly (ABC)."""
+        with pytest.raises(TypeError, match="abstract"):
+            Agent()
     def test_derive_still_raises_not_implemented(self):
-        """Agent.derive still raises NotImplementedError (no regression)."""
-        client = Agent()
-        with pytest.raises(NotImplementedError):
-            client.derive("content")
-
-
+        """Agent() can no longer be instantiated directly (ABC)."""
+        with pytest.raises(TypeError, match="abstract"):
+            Agent()
 class TestFakeAgent:
     """FakeAgent.review returns deterministic ReviewProposal."""
 
@@ -163,7 +158,7 @@ class TestAnthropicAgent:
 
     def test_review_exists(self):
         """AnthropicAgent has a review method."""
-        from memex.agent import AnthropicAgent  # noqa: PLC0415
+        from memex.derivers.anthropic import AnthropicAgent  # noqa: PLC0415
 
         client = AnthropicAgent()
         assert hasattr(client, "review")
@@ -173,7 +168,7 @@ class TestAnthropicAgent:
         import json  # noqa: PLC0415
         import sys  # noqa: PLC0415
 
-        from memex.agent import AnthropicAgent  # noqa: PLC0415
+        from memex.derivers.anthropic import AnthropicAgent  # noqa: PLC0415
 
         fake_json = json.dumps({
             "affected_node_ids": ["n1", "n2"],
@@ -205,7 +200,7 @@ class TestAnthropicAgent:
         """Malformed JSON degrades to safe defaults (no exception)."""
         import sys  # noqa: PLC0415
 
-        from memex.agent import AnthropicAgent  # noqa: PLC0415
+        from memex.derivers.anthropic import AnthropicAgent  # noqa: PLC0415
 
         fake_module = self._make_mock_anthropic("{Not valid JSON]")
 
@@ -231,7 +226,7 @@ class TestAnthropicAgent:
         import json  # noqa: PLC0415
         import sys  # noqa: PLC0415
 
-        from memex.agent import AnthropicAgent  # noqa: PLC0415
+        from memex.derivers.anthropic import AnthropicAgent  # noqa: PLC0415
 
         # Missing damage_boundary_node_id and confidence
         partial = json.dumps({
@@ -323,9 +318,14 @@ class TestExtractIdeas:
 
     def test_base_agent_extract_ideas_returns_empty(self):
         """Agent().extract_ideas('any') returns []."""
-        client = Agent()
+        from memex.derivers.demo import DemoAgent
+        client = DemoAgent()
         result = client.extract_ideas("any")
-        assert result == []
+        assert result == [
+            "Key idea one from the source material",
+            "Key idea two from the source material",
+            "Key idea three from the source material",
+        ]
 
     def test_fake_agent_extract_ideas(self):
         """FakeAgent.extract_ideas returns a list of strings."""
@@ -341,7 +341,7 @@ class TestExtractIdeas:
         import json  # noqa: PLC0415
         import sys  # noqa: PLC0415
 
-        from memex.agent import AnthropicAgent  # noqa: PLC0415
+        from memex.derivers.anthropic import AnthropicAgent  # noqa: PLC0415
 
         ideas = ["Idea one", "Idea two", "Idea three"]
         fake_json = json.dumps(ideas)
@@ -366,7 +366,7 @@ class TestExtractIdeas:
         """AnthropicAgent.extract_ideas returns [] when LLM returns bad JSON."""
         import sys  # noqa: PLC0415
 
-        from memex.agent import AnthropicAgent  # noqa: PLC0415
+        from memex.derivers.anthropic import AnthropicAgent  # noqa: PLC0415
 
         fake_module = self._make_mock_anthropic("{Not valid JSON]")
 

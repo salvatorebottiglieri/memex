@@ -14,11 +14,9 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
-from memex.agent import (
-    DemoAgent,
-    DerivationResult,
-    validate_derivation,
-)
+from memex.derivers.demo import DemoAgent
+from memex.schemas import DerivationResult
+from memex.validators.validate import validate_derivation
 
 
 class _CallLlmAgent:

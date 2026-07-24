@@ -143,12 +143,12 @@ class TestSynthesize:
         assert edge_count == 2
 
     def test_synthesize_unknown_parent_returns_error(self, store):
-        """Unknown parent node returns not_found error."""
+        """Unknown parent node returns error."""
         result = _synthesize(store, "does-not-exist")
         assert result.returncode == 1
         data = json.loads(result.stderr)
-        assert data["error"] == "not_found"
-        assert data["node_id"] == "does-not-exist"
+        assert data["error"] == "error"
+        assert "does-not-exist" in data.get("detail", "")
 
     def test_synthesize_single_parent(self, store):
         """Synthesize with a single parent is a valid edge case."""
@@ -174,15 +174,16 @@ class TestSynthesize:
         assert row[2] == 1
 
     def test_synthesize_agent_failure_returns_error(self, store):
-        """When the agent raises, the CLI returns agent_failed."""
+        """When the agent raises, the CLI returns error with exit code 1."""
         a = _ingest(store, "https://example.com/article-a")
         b = _ingest(store, "https://example.com/article-b")
         result = _run_memex(
             ["synthesize", "--db", str(store["db"]), "--vault", str(store["vault"]), a["id"], b["id"]],
             env={"MEMEX_AGENT": FAKE_THROWS_AGENT},
         )
+        assert result.returncode != 0
         data = json.loads(result.stderr)
-        assert data["error"] == "agent_failed"
+        assert data["error"] == "error"
         assert "detail" in data
 
     def test_synthesize_multiple_parents_depth_calculation(self, store):

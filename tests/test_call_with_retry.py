@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
-from memex.agent import call_with_retry
+from memex.utils.retry import call_with_retry
 
 
 class TestCallWithRetry:

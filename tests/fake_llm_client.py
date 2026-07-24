@@ -5,9 +5,10 @@ Provides a deterministic review() returning configurable ReviewProposal.
 """
 from __future__ import annotations
 
-from memex.agent import DerivationResult, ReviewProposal
+from memex.agent import Agent
+from memex.schemas import DerivationResult, ReviewProposal
 
-class FakeAgent:
+class FakeAgent(Agent):
     """Deterministic Agent for tests."""
 
     def __init__(
@@ -47,7 +48,7 @@ class FakeAgent:
             confidence=self.review_confidence,
         )
 
-class FakeAgentValidRefs:
+class FakeAgentValidRefs(Agent):
     """Fake agent returning realistic referencable values.
 
     Unlike FakeAgent (which returns fake node IDs like 'n1','n2'),
@@ -69,7 +70,7 @@ class FakeAgentValidRefs:
             confidence="high",
         )
 
-class FakeAgentThrowsOnReview:
+class FakeAgentThrowsOnReview(Agent):
     """Fake agent that raises on every review() call.
 
     Used to test per-event error recovery in the review batch command.
