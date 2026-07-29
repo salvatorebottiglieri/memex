@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from memex.rules import CONFIDENCE_RULES
+
 
 class StoreError(Exception):
     """Wraps sqlite3 errors from Store operations."""
@@ -270,7 +272,22 @@ class Store:
                 "UPDATE node SET confidence = ? WHERE id = ?", (min_c, nid)
             )
 
+    def compute_node_confidence(self, node_id: str) -> str:
+        """Compute confidence score for a node per the inference rules.
 
+        Evaluates ``CONFIDENCE_RULES`` in priority order; first match wins.
+        See ``src/memex/rules.py`` for the rule definitions (C1–C4).
+
+        Raises ``ValueError`` if ``node_id`` is not found.
+        """
+        node = self.get_node(node_id)
+        if node is None:
+            raise ValueError(f"node not found: {node_id}")
+
+        for rule in CONFIDENCE_RULES:
+            if rule.condition(self, node_id):
+                return rule.consequence
+        return "low"  # fallback
 
     # ── Sources ───────────────────────────────────────────────────
 
