@@ -12,16 +12,16 @@ Every rule here has a concrete implementation.
 | Property | Type | Cardinality | Description |
 |---|---|---|---|
 | `id` | UUID (str) | 1 | Unique identifier |
-| `kind` | enum | 1 | `raw_source` \| `summary` \| (open vocabulary) |
-| `tier` | enum \| null | 0–1 | `raw` \| `notes` \| `synthesis` (fixed spine, ADR-0002). Null = L0 |
+| `kind` | enum | 1 | `raw_source` | `summary` | (open vocabulary) |
+| `tier` | enum | null | 0–1 | `raw` | `notes` | `synthesis` (fixed spine, ADR-0002). Null = L0 |
 | `trust_state` | enum | 1 | `draft` > `auto-verified` > `human-approved` > `stale` (strict ordinal) |
 | `depth` | int | 1 | Computed: `max(parent.depth) + 1`. L0 = 0 |
 | `confidence` | enum | 1 | `high` > `medium` > `low`. Inherited from parents |
 | `is_contested` | bool | 1 | Orthogonal to trust_state. `1` if any open `event_node_link` exists |
-| `contested_at` | ISO-8601 \| null | 0–1 | When first contested |
+| `contested_at` | ISO-8601 | null | 0–1 | When first contested |
 | `content_path` | path | 1 | Filesystem path to markdown file |
-| `synthesis_statements` | JSON array \| null | 0–1 | Structured list of inferences |
-| `check_failures` | JSON array \| null | 0–1 | Deterministic check failures (if any) |
+| `synthesis_statements` | JSON array | null | 0–1 | Structured list of inferences |
+| `check_failures` | JSON array | null | 0–1 | Deterministic check failures (if any) |
 | `created_at` | ISO-8601 | 1 | Creation timestamp |
 
 ### 1.2 Edge
@@ -29,11 +29,11 @@ Every rule here has a concrete implementation.
 | Property | Type | Cardinality | Description |
 |---|---|---|---|
 | `id` | UUID (str) | 1 | Unique identifier |
-| `type` | enum | 1 | `provenance` \| `association` |
-| `relation` | enum | 1 | `derived_from` \| `related` \| `contradicts` \| `refines` |
+| `type` | enum | 1 | `provenance` | `association` |
+| `relation` | enum | 1 | `derived_from` | `related` | `contradicts` | `refines` |
 | `from_node` | UUID | 1 | Source node |
 | `to_node` | UUID | 1 | Target node |
-| `written_by` | enum | 1 | `human` \| `llm` \| `check` \| `system` |
+| `written_by` | enum | 1 | `human` | `llm` | `check` | `system` |
 
 ### 1.3 Event queue
 
@@ -46,8 +46,8 @@ See [Contestation & review](#6-contestation--review).
 | `node_id` | UUID | FK → node.id |
 | `canonical_key` | str (UNIQUE) | Dedup identity (normalized URL or platform id) |
 | `source_url` | str | Original URL |
-| `title` | str \| null | Extracted title |
-| `fetched_at` | ISO-8601 \| null | Last fetch timestamp |
+| `title` | str | null | Extracted title |
+| `fetched_at` | ISO-8601 | null | Last fetch timestamp |
 | `failed` | int (bool) | `1` if last fetch failed |
 
 ---
@@ -98,7 +98,7 @@ Rule C6 — Confidence recomputation is lazy
   Other edge writes do NOT trigger recomputation.
 ```
 
-Implementation: `store.compute_node_confidence()` delegates to `CONFIDENCE_RULES` in `rules.py`. C5 applied in `store._backfill_confidence()` (lines 242–283) and `store._propagate_contradiction()` (lines 483–550).
+Implementation: `store.compute_node_confidence()` delegates to `CONFIDENCE_RULES` in `rules.py`. C5 applied in `store._backfill_confidence()` and `store._propagate_contradiction()`.
 
 ---
 
@@ -133,7 +133,7 @@ Rule T4 — Multiple parents cap to the lowest
 | `draft → stale` | Child capped at `stale` |
 | Any upgrade | **No cascade** |
 
-Implementation: `store.update_trust_state()` (lines 992–1040+).
+Implementation: `store.update_trust_state()`.
 
 ---
 
@@ -175,7 +175,7 @@ Rule X6 — No fast-path
   without human adjudication.
 ```
 
-Implementation: `store.create_edge()` (lines 464–479), `store._propagate_contradiction()` (lines 483–550).
+Implementation: `store.create_edge()`, `store._propagate_contradiction()`.
 
 ---
 
@@ -215,7 +215,7 @@ Rule R6 — Review proposal structure
   review_proposal.confidence ∈ {'high', 'medium', 'low'}
 ```
 
-Implementation: `store.accept_proposal()` (lines 770–795), `store.reject_proposal()` (lines 800–835), `store.dismiss_proposal()` (lines 840–872), `store._close_contestation_event()` (lines 695–736). CLI: `review accept|reject|dismiss` commands.
+Implementation: `store.accept_proposal()`, `store.reject_proposal()`, `store.dismiss_proposal()`, `store._close_contestation_event()`. CLI: `review accept|reject|dismiss` commands.
 
 ---
 
