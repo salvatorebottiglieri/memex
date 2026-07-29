@@ -17,6 +17,20 @@ Inspired by Karpathy's personal wiki and by `iusztinpaul/ai-research-os-workshop
 More ambitious than the reference on the knowledge model (arbitrary-depth DAG + validation states),
 more conservative on scope (single user, no discovery/web-research subsystem).
 
+## Conceptual model
+
+The knowledge space is a city of **buildings**. Each **building** is a line of reasoning rooted in one or more raw sources (L0).
+
+- **Ground floor (L0)**: the raw source itself — immutable, the foundation.
+- **First floor (notes)**: a single-source summary, directly resting on the ground floor.
+- **Second floor (synthesis)**: a cross-source derivation — a floor that spans multiple buildings.
+
+A new floor can rest on several lower floors from **different buildings**, just as a synthesis can combine ideas from multiple unrelated sources into a single new insight. The resulting structure is no longer a tower but a connected campus — a DAG, not a tree.
+
+This metaphor captures the two key invariants:
+1. **Vertical load-bearing**: every floor must trace its weight to at least one ground floor (provenance).
+2. **Lateral connections**: bridges between buildings (association edges) let you walk between ideas without counting as structural support.
+
 ## Status (what is built vs planned)
 
 | Concern | State | Surface |
