@@ -242,7 +242,7 @@ def smoke_idempotency(tmp: Path) -> None:
 
 
 def smoke_derive_passing(tmp: Path) -> None:
-    print("\n[DERIVE PASS] derive on extracted -> draft (legacy D5 notes=1)")
+    print("\n[DERIVE PASS] derive on extracted -> auto-verified")
     db, vault = _fresh_store(tmp, "deriveok")
     md_path = _register_file(vault, "deriveok.md", "https://example.com/article")
     p = _run(["register", "--db", str(db), "--vault", str(vault), str(md_path)])
@@ -253,16 +253,17 @@ def smoke_derive_passing(tmp: Path) -> None:
     d = _expect_json("derive", p)
     _check("derive status=derived", d.get("status") == "derived")
     # Derived from an extracted node (depth=1) the notes derivation lands at
-    # depth=2; the legacy D5 rule (notes=1) keeps it in draft.
-    _check("trust_state=draft (D5 notes=1 is legacy)", d.get("trust_state") == "draft")
-    _check("check_failures populated (D5)", len(d.get("check_failures", [])) >= 1)
+    # depth=2; D5 accepts notes at parent depth + 1, so all checks pass and
+    # the node auto-verifies.
+    _check("trust_state=auto-verified", d.get("trust_state") == "auto-verified")
+    _check("check_failures empty", d.get("check_failures") == [])
     deriv_id = d["id"]
 
     # show surfaces trust_state + check_failures
     p = _run(["show", "--db", str(db), "--vault", str(vault), deriv_id])
     sh = _expect_json("show derivation", p)
-    _check("show trust_state=draft", sh["trust_state"] == "draft")
-    _check("show check_failures non-empty", len(sh["check_failures"]) >= 1)
+    _check("show trust_state=auto-verified", sh["trust_state"] == "auto-verified")
+    _check("show check_failures empty", sh["check_failures"] == [])
 
     # Edges in DB
     con = sqlite3.connect(db)
@@ -353,10 +354,10 @@ def smoke_derive_all(tmp: Path) -> None:
     res = _expect_json("derive --all (url+extracted pairs)", p)
     _check("derive --all derives the 3 extracted roots",
            len(res) == 3 and all(r["status"] == "derived" for r in res), f"got {res}")
-    # Notes derived from extracted roots (depth 1) land at depth 2 and stay
-    # draft while D5 hardcodes tier=notes => depth 1 (ticket #103 owns D5).
-    _check("extracted-derived notes stay draft (D5 legacy)",
-           all(r["trust_state"] == "draft" for r in res), f"got {res}")
+    # Notes derived from extracted roots (depth 1) land at depth 2 and
+    # auto-verify now that D5 accepts notes at parent depth + 1 (ticket #103).
+    _check("extracted-derived notes auto-verified",
+           all(r["trust_state"] == "auto-verified" for r in res), f"got {res}")
 
     # Seed legacy raw_source L0s directly and exercise the legacy path
     l0_ids = _seed_raw_source(db, vault, 3, prefix="raw")

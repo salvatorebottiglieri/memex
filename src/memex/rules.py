@@ -246,7 +246,7 @@ def _d4_size_bounds(
 def _d5_tier_depth(
     con: sqlite3.Connection, node_id: str, content_path: Path, content: str
 ) -> list[str]:
-    """D5: Tier/depth consistency: L0=0, notes=1, synthesis>=2."""
+    """D5: Tier/depth consistency: L0=0, notes=parent depth+1, synthesis>=2."""
     row = con.execute(
         "SELECT tier, depth FROM node WHERE id = ?",
         (node_id,),
@@ -262,9 +262,30 @@ def _d5_tier_depth(
                 f"Tier/depth inconsistency: node has no tier but depth={depth} (expected 0)"
             ]
     elif tier == "notes":
-        if depth != 1:
+        # Notes nodes sit one level below their parents: expected depth is
+        # max(parent depth) + 1. Extracted roots are at depth 1 (notes land
+        # at depth 2); legacy raw_source L0s are at depth 0 (notes land at
+        # depth 1). A parentless notes node already fails D1's provenance
+        # gate, so fall back to the L0-ish expectation (0) instead of
+        # contradicting D1's verdict.
+        parent_edges = con.execute(
+            """
+            SELECT to_node FROM edge
+            WHERE from_node = ? AND type = 'provenance' AND relation = 'derived_from'
+            """,
+            (node_id,),
+        ).fetchall()
+        parent_depths: list[int] = []
+        for (parent_id,) in parent_edges:
+            p_row = con.execute(
+                "SELECT depth FROM node WHERE id = ?", (parent_id,)
+            ).fetchone()
+            if p_row is not None:
+                parent_depths.append(p_row[0])
+        expected = max(parent_depths) + 1 if parent_depths else 0
+        if depth != expected:
             return [
-                f"Tier/depth inconsistency: tier=notes but depth={depth} (expected 1)"
+                f"Tier/depth inconsistency: tier=notes but depth={depth} (expected {expected})"
             ]
     elif tier == "synthesis":
         if depth < 2:
@@ -307,7 +328,7 @@ CHECK_RULES: list[Rule] = [
     Rule(
         id="D5",
         category="check",
-        description="Tier/depth consistency: L0=0, notes=1, synthesis>=2",
+        description="Tier/depth consistency: L0=0, notes=parent depth+1, synthesis>=2",
         condition=_d5_tier_depth,
         consequence="Tier/depth check",
     ),

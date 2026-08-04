@@ -261,10 +261,146 @@ class TestTierDepthConsistency:
     def test_notes_tier_depth_1_passes(self, tmp_path):
         """A node with tier=notes and depth=1 passes tier/depth check."""
         con, deriv_id, content_path = _setup_db(tmp_path)
-        # deriv already has tier='notes', depth=1
+        # deriv already has tier='notes', depth=1, parent (L0) at depth 0
         result = run_checks(con, deriv_id, content_path)
         con.close()
         assert result.passed is True
+
+    def test_notes_depth_2_from_extracted_parent_passes(self, tmp_path):
+        """Notes derived from an extracted root (parent depth 1) at depth 2 pass."""
+        con, deriv_id, content_path = _setup_db(tmp_path)
+        # Simulate an extracted root: L0 at depth 1, derivation at depth 2
+        con.execute("UPDATE node SET depth = 1 WHERE kind = 'raw_source'")
+        con.execute("UPDATE node SET depth = 2 WHERE id = ?", (deriv_id,))
+        con.commit()
+        result = run_checks(con, deriv_id, content_path)
+        con.close()
+        assert result.passed is True
+
+    def test_notes_depth_1_from_extracted_parent_fails(self, tmp_path):
+        """Notes at depth 1 under an extracted (depth 1) parent fail."""
+        con, deriv_id, content_path = _setup_db(tmp_path)
+        con.execute("UPDATE node SET depth = 1 WHERE kind = 'raw_source'")
+        con.commit()
+        result = run_checks(con, deriv_id, content_path)
+        con.close()
+        assert not result.passed
+        assert any("Tier/depth" in f for f in result.failures)
+
+    def test_notes_depth_2_from_raw_source_parent_fails(self, tmp_path):
+        """Notes at depth 2 under a legacy raw_source (depth 0) parent fail."""
+        con, deriv_id, content_path = _setup_db(tmp_path)
+        con.execute("UPDATE node SET depth = 2 WHERE id = ?", (deriv_id,))
+        con.commit()
+        result = run_checks(con, deriv_id, content_path)
+        con.close()
+        assert not result.passed
+        assert any("Tier/depth" in f for f in result.failures)
+
+    def test_notes_depth_3_from_extracted_parent_fails(self, tmp_path):
+        """Notes at depth 3 under an extracted (depth 1) parent fail."""
+        con, deriv_id, content_path = _setup_db(tmp_path)
+        con.execute("UPDATE node SET depth = 1 WHERE kind = 'raw_source'")
+        con.execute("UPDATE node SET depth = 3 WHERE id = ?", (deriv_id,))
+        con.commit()
+        result = run_checks(con, deriv_id, content_path)
+        con.close()
+        assert not result.passed
+        assert any("Tier/depth" in f for f in result.failures)
+
+    def test_notes_multi_parent_uses_max_depth(self, tmp_path):
+        """Two parents at depths 1 and 2 => expected 3: a depth-3 node passes,
+        a depth-2 sibling under the same parents fails."""
+        con, deriv_id, content_path = _setup_db(tmp_path)
+        # Parent 1: extracted-style root at depth 1; parent 2: a second parent at depth 2
+        con.execute("UPDATE node SET depth = 1 WHERE kind = 'raw_source'")
+        parent2_id = str(uuid.uuid4())
+        con.execute(
+            "INSERT INTO node (id, kind, tier, trust_state, depth, created_at) "
+            "VALUES (?, 'summary', 'notes', 'draft', 2, ?)",
+            (parent2_id, _utcnow()),
+        )
+        con.execute(
+            "INSERT INTO edge (id, type, relation, from_node, to_node) "
+            "VALUES (?, 'provenance', 'derived_from', ?, ?)",
+            (str(uuid.uuid4()), deriv_id, parent2_id),
+        )
+
+        # Notes node at depth 3 (max parent depth 2 + 1) passes
+        con.execute("UPDATE node SET depth = 3 WHERE id = ?", (deriv_id,))
+        con.commit()
+        result = run_checks(con, deriv_id, content_path)
+        assert result.passed is True
+
+        # Sibling notes node under the same two parents at depth 2 fails
+        l0_id = con.execute("SELECT id FROM node WHERE kind = 'raw_source'").fetchone()[0]
+        sibling_id = str(uuid.uuid4())
+        con.execute(
+            "INSERT INTO node (id, kind, tier, trust_state, depth, content_path, created_at) "
+            "VALUES (?, 'summary', 'notes', 'draft', 2, ?, ?)",
+            (sibling_id, str(content_path), _utcnow()),
+        )
+        con.execute(
+            "INSERT INTO edge (id, type, relation, from_node, to_node) "
+            "VALUES (?, 'provenance', 'derived_from', ?, ?)",
+            (str(uuid.uuid4()), sibling_id, l0_id),
+        )
+        con.execute(
+            "INSERT INTO edge (id, type, relation, from_node, to_node) "
+            "VALUES (?, 'provenance', 'derived_from', ?, ?)",
+            (str(uuid.uuid4()), sibling_id, parent2_id),
+        )
+        con.commit()
+        result = run_checks(con, sibling_id, content_path)
+        con.close()
+        assert not result.passed
+        assert any("Tier/depth" in f for f in result.failures)
+
+    def test_notes_dangling_parent_is_skipped(self, tmp_path):
+        """A provenance parent whose node row is missing is skipped: with one
+        live parent at depth 1, expected stays 2 and a depth-2 node passes D5
+        (D2 flags the dangling ref, not D5)."""
+        con, deriv_id, content_path = _setup_db(tmp_path)
+        # Bypass FK (must run outside any transaction, mirroring
+        # TestProvenanceCheck.test_edge_pointing_to_nonexistent_node_fails)
+        con.execute("PRAGMA foreign_keys = OFF")
+        ghost_id = str(uuid.uuid4())
+        con.execute(
+            "INSERT INTO edge (id, type, relation, from_node, to_node) "
+            "VALUES (?, 'provenance', 'derived_from', ?, ?)",
+            (str(uuid.uuid4()), deriv_id, ghost_id),
+        )
+        con.execute("PRAGMA foreign_keys = ON")
+        con.execute("UPDATE node SET depth = 1 WHERE kind = 'raw_source'")
+        con.execute("UPDATE node SET depth = 2 WHERE id = ?", (deriv_id,))
+        con.commit()
+        result = run_checks(con, deriv_id, content_path)
+        con.close()
+        # Missing parent is skipped: no Tier/depth failure (expected stays 2).
+        assert not any("Tier/depth" in f for f in result.failures)
+        # The dangling ref is still real and caught by D2, not D5.
+        assert any("Dangling" in f for f in result.failures)
+
+    def test_notes_without_parent_depth_0_passes(self, tmp_path):
+        """A parentless notes node at depth 0 passes D5 (D1 gates it instead)."""
+        con, deriv_id, content_path = _setup_db(tmp_path)
+        con.execute("DELETE FROM edge WHERE from_node = ?", (deriv_id,))
+        con.execute("UPDATE node SET depth = 0 WHERE id = ?", (deriv_id,))
+        con.commit()
+        result = run_checks(con, deriv_id, content_path)
+        con.close()
+        # D5 must not contradict D1's provenance gate: no tier/depth failure
+        # for a parentless notes node at depth 0.
+        assert not any("Tier/depth" in f for f in result.failures)
+
+    def test_notes_without_parent_depth_1_fails(self, tmp_path):
+        """A parentless notes node at depth 1 fails D5 (expected 0 fallback)."""
+        con, deriv_id, content_path = _setup_db(tmp_path)
+        con.execute("DELETE FROM edge WHERE from_node = ?", (deriv_id,))
+        con.commit()
+        result = run_checks(con, deriv_id, content_path)
+        con.close()
+        assert any("Tier/depth" in f for f in result.failures)
 
     def test_synthesis_tier_depth_2_passes(self, tmp_path):
         """A node with tier=synthesis and depth=2 passes tier/depth check."""

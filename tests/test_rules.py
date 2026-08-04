@@ -453,6 +453,134 @@ class TestCheckRuleD5:
         con.close()
         assert failures == []
 
+    def test_notes_depth_2_from_extracted_parent_passes(self, tmp_path):
+        con, deriv_id, content_path = _setup_check_db(tmp_path)
+        con.execute("UPDATE node SET depth = 1 WHERE kind = 'raw_source'")
+        con.execute("UPDATE node SET depth = 2 WHERE id = ?", (deriv_id,))
+        con.commit()
+
+        rule = _rule(CHECK_RULES, "D5")
+        content = content_path.read_text(encoding="utf-8")
+        failures = rule.condition(con, deriv_id, content_path, content)
+        con.close()
+        assert failures == []
+
+    def test_notes_depth_1_from_extracted_parent_fails(self, tmp_path):
+        con, deriv_id, content_path = _setup_check_db(tmp_path)
+        con.execute("UPDATE node SET depth = 1 WHERE kind = 'raw_source'")
+        con.commit()
+
+        rule = _rule(CHECK_RULES, "D5")
+        content = content_path.read_text(encoding="utf-8")
+        failures = rule.condition(con, deriv_id, content_path, content)
+        con.close()
+        assert len(failures) >= 1
+        assert any("Tier/depth" in f for f in failures)
+
+    def test_notes_depth_2_from_raw_source_parent_fails(self, tmp_path):
+        con, deriv_id, content_path = _setup_check_db(tmp_path)
+        con.execute("UPDATE node SET depth = 2 WHERE id = ?", (deriv_id,))
+        con.commit()
+
+        rule = _rule(CHECK_RULES, "D5")
+        content = content_path.read_text(encoding="utf-8")
+        failures = rule.condition(con, deriv_id, content_path, content)
+        con.close()
+        assert len(failures) >= 1
+        assert any("Tier/depth" in f for f in failures)
+
+    def test_notes_multi_parent_uses_max_depth(self, tmp_path):
+        con, deriv_id, content_path = _setup_check_db(tmp_path)
+        con.execute("UPDATE node SET depth = 1 WHERE kind = 'raw_source'")
+        parent2_id = str(uuid.uuid4())
+        con.execute(
+            "INSERT INTO node (id, kind, tier, trust_state, depth, created_at) "
+            "VALUES (?, 'summary', 'notes', 'draft', 2, ?)",
+            (parent2_id, _utcnow()),
+        )
+        con.execute(
+            "INSERT INTO edge (id, type, relation, from_node, to_node) "
+            "VALUES (?, 'provenance', 'derived_from', ?, ?)",
+            (str(uuid.uuid4()), deriv_id, parent2_id),
+        )
+        con.execute("UPDATE node SET depth = 3 WHERE id = ?", (deriv_id,))
+        con.commit()
+
+        rule = _rule(CHECK_RULES, "D5")
+        content = content_path.read_text(encoding="utf-8")
+        failures = rule.condition(con, deriv_id, content_path, content)
+        assert failures == []
+
+        # Sibling notes node under the same two parents at depth 2 fails
+        l0_id = con.execute("SELECT id FROM node WHERE kind = 'raw_source'").fetchone()[0]
+        sibling_id = str(uuid.uuid4())
+        con.execute(
+            "INSERT INTO node (id, kind, tier, trust_state, depth, content_path, created_at) "
+            "VALUES (?, 'summary', 'notes', 'draft', 2, ?, ?)",
+            (sibling_id, str(content_path), _utcnow()),
+        )
+        con.execute(
+            "INSERT INTO edge (id, type, relation, from_node, to_node) "
+            "VALUES (?, 'provenance', 'derived_from', ?, ?)",
+            (str(uuid.uuid4()), sibling_id, l0_id),
+        )
+        con.execute(
+            "INSERT INTO edge (id, type, relation, from_node, to_node) "
+            "VALUES (?, 'provenance', 'derived_from', ?, ?)",
+            (str(uuid.uuid4()), sibling_id, parent2_id),
+        )
+        con.commit()
+        failures = rule.condition(con, sibling_id, content_path, content)
+        con.close()
+        assert len(failures) >= 1
+        assert any("Tier/depth" in f for f in failures)
+
+    def test_notes_dangling_parent_is_skipped(self, tmp_path):
+        con, deriv_id, content_path = _setup_check_db(tmp_path)
+        # Bypass FK (must run outside any transaction) to add a provenance edge
+        # to a missing parent node: D5 must skip it, expected stays 2.
+        con.execute("PRAGMA foreign_keys = OFF")
+        ghost_id = str(uuid.uuid4())
+        con.execute(
+            "INSERT INTO edge (id, type, relation, from_node, to_node) "
+            "VALUES (?, 'provenance', 'derived_from', ?, ?)",
+            (str(uuid.uuid4()), deriv_id, ghost_id),
+        )
+        con.execute("PRAGMA foreign_keys = ON")
+        con.execute("UPDATE node SET depth = 1 WHERE kind = 'raw_source'")
+        con.execute("UPDATE node SET depth = 2 WHERE id = ?", (deriv_id,))
+        con.commit()
+
+        rule = _rule(CHECK_RULES, "D5")
+        content = content_path.read_text(encoding="utf-8")
+        failures = rule.condition(con, deriv_id, content_path, content)
+        con.close()
+        assert failures == []
+
+    def test_notes_without_parent_depth_0_passes(self, tmp_path):
+        con, deriv_id, content_path = _setup_check_db(tmp_path)
+        con.execute("DELETE FROM edge WHERE from_node = ?", (deriv_id,))
+        con.execute("UPDATE node SET depth = 0 WHERE id = ?", (deriv_id,))
+        con.commit()
+
+        rule = _rule(CHECK_RULES, "D5")
+        content = content_path.read_text(encoding="utf-8")
+        failures = rule.condition(con, deriv_id, content_path, content)
+        con.close()
+        assert failures == []
+
+    def test_notes_without_parent_depth_1_fails(self, tmp_path):
+        con, deriv_id, content_path = _setup_check_db(tmp_path)
+        con.execute("DELETE FROM edge WHERE from_node = ?", (deriv_id,))
+        con.commit()
+
+        rule = _rule(CHECK_RULES, "D5")
+        content = content_path.read_text(encoding="utf-8")
+        failures = rule.condition(con, deriv_id, content_path, content)
+        con.close()
+        assert len(failures) >= 1
+        assert any("Tier/depth" in f for f in failures)
+
     def test_synthesis_depth_2_passes(self, tmp_path):
         con, deriv_id, content_path = _setup_check_db(tmp_path)
         con.execute("UPDATE node SET tier = 'synthesis', depth = 2 WHERE id = ?", (deriv_id,))

@@ -674,8 +674,9 @@ def derive(db_path: Path, vault_path: Path, node_id: str | None = None,
     Batch:        memex derive --db DB --vault V --all [--limit N]
 
     Writes derivation prose as <deriv_id>.md in the vault, inserts a node row
-    (kind=summary, tier=notes, trust_state=draft, depth=1), records a derived_from
-    provenance edge, and runs deterministic checks to transition draft -> auto-verified.
+    (kind=summary, tier=notes, trust_state=draft, depth=parent depth+1), records a
+    derived_from provenance edge, and runs deterministic checks to transition
+    draft -> auto-verified.
     """
     from memex.agent import load_agent
     from memex.store import Store
