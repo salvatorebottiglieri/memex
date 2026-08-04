@@ -134,15 +134,15 @@ class TestListFiltering:
         ingested = _ingest(store, "https://example.com/article")
         _derive(store, ingested["id"])
 
-        # List by kind=raw_source -> exactly 1 result
+        # List by kind=url -> exactly 1 result
         result = _run_memex(
             ["list", "--db", str(store["db"]), "--vault", str(store["vault"]),
-             "--kind", "raw_source"],
+             "--kind", "url"],
         )
         assert result.returncode == 0, result.stderr
         data = json.loads(result.stdout)
         assert len(data) == 1
-        assert data[0]["kind"] == "raw_source"
+        assert data[0]["kind"] == "url"
 
         # List by kind=summary -> exactly 1 result
         result = _run_memex(
@@ -172,17 +172,19 @@ class TestListFiltering:
 
 class TestDeleteCommand:
     def test_delete_basic(self, store):
+        """Deleting the URL-node cascades to the extracted-node pair."""
         ingested = _ingest(store, "https://example.com/article")
         result = _run_memex(
             ["delete", "--db", str(store["db"]), "--vault", str(store["vault"]),
-             ingested["id"]],
+             ingested["url_node_id"], "--cascade"],
         )
         assert result.returncode == 0, result.stderr
         data = json.loads(result.stdout)
         assert data["status"] == "deleted"
-        assert ingested["id"] in data["removed"]
+        assert ingested["url_node_id"] in data["removed"]
+        assert ingested["id"] in data["removed"]  # extracted node too
 
-        # List confirms the node is gone
+        # List confirms both nodes are gone
         list_result = _run_memex(
             ["list", "--db", str(store["db"]), "--vault", str(store["vault"])],
         )
@@ -198,19 +200,27 @@ class TestDeleteCommand:
         assert data["error"] == "not_found"
 
     def test_delete_cascade(self, store):
+        """Cascading from the URL-node removes url + extracted + derivation."""
         ingested = _ingest(store, "https://example.com/article")
-        _derive(store, ingested["id"])
+        derive_result = _derive(store, ingested["id"])
+        assert derive_result.returncode == 0, derive_result.stderr
+        deriv_id = json.loads(derive_result.stdout)["id"]
 
         result = _run_memex(
             ["delete", "--db", str(store["db"]), "--vault", str(store["vault"]),
-             ingested["id"], "--cascade"],
+             ingested["url_node_id"], "--cascade"],
         )
         assert result.returncode == 0, result.stderr
         data = json.loads(result.stdout)
         assert data["status"] == "deleted"
-        assert len(data["removed"]) == 2  # L0 + derived summary
+        # url + extracted + derived summary — the recursive cascade is deduped
+        # by a visited set, so each id is reported exactly once
+        assert len(data["removed"]) == 3
+        assert set(data["removed"]) == {
+            ingested["url_node_id"], ingested["id"], deriv_id,
+        }
 
-        # List confirms both are gone
+        # List confirms all are gone
         list_result = _run_memex(
             ["list", "--db", str(store["db"]), "--vault", str(store["vault"])],
         )

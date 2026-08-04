@@ -163,7 +163,22 @@ def status(db_path: Path, vault_path: Path) -> None:
     help="Override the source_url (otherwise read from frontmatter of the .md file).",
 )
 def register(db_path: Path, vault_path: Path, path: Path, source_url: str | None) -> None:
-    """Register an existing markdown file in the vault as an L0 node.
+    """Register an existing markdown file as a url + extracted node pair.
+
+    Creates a URL-node carrying the source row (canonical_key / source_url /
+    title) and an extracted-node pointing at the registered file, linked by a
+    provenance edge (extracted -> URL-node). The file stays where the user
+    placed it. Dedup by canonical key unchanged.
+
+    Output contract: the JSON ``id`` field (backward-compat) points at the
+    content-bearing *extracted* node, which carries no source row — the source
+    metadata (source_url / canonical_key / title) lives on the ``url_node_id``
+    node. Chaining ``register -> show <id>`` therefore yields null source
+    fields; pass ``url_node_id`` to ``show`` when the source row is needed.
+    On dedup (``already_exists``) ``extracted_node_id`` is null when the
+    existing URL predates the url+extracted model (a derived legacy raw_source
+    has a summary, not an extracted pair); ``id`` is never null — it falls
+    back to the URL-node's id.
 
     The file MUST contain a ``source_url`` key in its YAML frontmatter pointing
     to the original source (the reference is always required for provenance).
@@ -203,33 +218,56 @@ def register(db_path: Path, vault_path: Path, path: Path, source_url: str | None
     with Store.open(db_path) as store:
         existing = store.lookup_by_canonical_key(ckey)
         if existing is not None:
+            url_id = existing["node_id"]
+            # The registered pair's extracted node — only when this URL was
+            # registered under the url+extracted model. A derived legacy
+            # raw_source also has a derived_from edge (to its summary), so the
+            # edge alone is not proof of a pair: check the node kind.
+            derived = store.find_derived_from(url_id)
+            extracted_id = None
+            if derived is not None:
+                derived_node = store.get_node(derived["from_node"])
+                if derived_node is not None and derived_node["kind"] == "extracted":
+                    extracted_id = derived["from_node"]
             click.echo(json.dumps({
-                "id": existing["node_id"],
+                "id": extracted_id or url_id,
+                "url_node_id": url_id,
+                "extracted_node_id": extracted_id,
                 "status": "already_exists",
                 "canonical_key": ckey,
             }))
             return
 
-        # --- Create node + source ---
-        node_id = str(uuid.uuid4())
+        # --- Create url + extracted pair ---
+        url_id = str(uuid.uuid4())
+        extracted_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
         store.create_node(
-            node_id=node_id,
-            kind="raw_source",
-            depth=0,
-            content_path=str(path),
+            node_id=url_id,
+            kind="url",
             created_at=now,
         )
         store.attach_source(
-            node_id=node_id,
+            node_id=url_id,
             canonical_key=ckey,
             source_url=src,
             title=title,
             fetched_at=None,
         )
+        # The store auto-creates the provenance edge (extracted -> URL-node)
+        # and sets confidence for the extracted node.
+        store.create_node(
+            node_id=extracted_id,
+            kind="extracted",
+            content_path=str(path),
+            created_at=now,
+            derived_from=url_id,
+        )
 
     click.echo(json.dumps({
-        "id": node_id,
+        "id": extracted_id,
+        "url_node_id": url_id,
+        "extracted_node_id": extracted_id,
         "status": "registered",
         "canonical_key": ckey,
         "title": title,

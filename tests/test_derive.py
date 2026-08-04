@@ -6,10 +6,12 @@ The fake agent module lives at tests/fake_llm_client.py.
 from __future__ import annotations
 
 import json
+import sqlite3
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
-import sqlite3
-
+from memex.store import Store as _Store
 from tests.conftest import _run_memex, register_node, WORKTREE
 
 
@@ -24,6 +26,37 @@ def _derive(store, node_id: str) -> "subprocess.CompletedProcess":  # type: igno
         ["derive", "--db", str(store["db"]), "--vault", str(store["vault"]), node_id],
         env={"MEMEX_AGENT": FAKE_AGENT},
     )
+
+
+def _seed_raw_source(store: dict, filename: str, source_url: str) -> dict:
+    """Create a legacy raw_source L0 directly via the Store (expand phase).
+
+    ``memex register`` now produces url+extracted pairs, while the derive /
+    checks pipeline still processes raw_source nodes unchanged — seed those
+    fixtures directly so the derive tests keep exercising that path.
+    """
+    node_id = str(uuid.uuid4())
+    md_path = Path(store["vault"]) / filename
+    md_path.write_text(
+        f"---\nsource_url: {source_url}\ntitle: Test Article\n---\n\n"
+        f"# Test Article\n\n"
+        f"This is a longer article body that exceeds the minimum character threshold "
+        f"of one hundred characters so that the L0 markdown file gets created in tests.",
+        encoding="utf-8",
+    )
+    con = sqlite3.connect(store["db"])
+    st = _Store(con)
+    st.create_node(
+        node_id=node_id, kind="raw_source", depth=0,
+        content_path=str(md_path), created_at=datetime.now(timezone.utc).isoformat(),
+    )
+    st.attach_source(
+        node_id=node_id, canonical_key=source_url,
+        source_url=source_url, title="Test Article", fetched_at=None,
+    )
+    con.commit()
+    con.close()
+    return {"id": node_id}
 
 
 class TestDerive:
@@ -43,9 +76,7 @@ class TestDerive:
         FakeAgent produces a valid derivation (has synthesis marker, right length),
         so trust_state is auto-verified after checks run.
         """
-        vault = Path(store["vault"])
-        p = register_node(store, vault, "test.md", "https://example.com/article")
-        ingested = json.loads(p.stdout)
+        ingested = _seed_raw_source(store, "test.md", "https://example.com/article")
         result = _derive(store, ingested["id"])
         deriv_id = json.loads(result.stdout)["id"]
 
@@ -151,13 +182,15 @@ class TestDeriveAll:
         return _run_memex(args, env={"MEMEX_AGENT": agent})
 
     def _ingest_n(self, store, n: int, prefix: str = "article") -> list[dict]:
-        """Register n unique nodes and return their result dicts."""
+        """Create n raw_source L0 nodes directly (register now produces
+        url+extracted pairs, while derive --all still processes raw_source)
+        and return their result dicts."""
         results = []
-        vault = Path(store["vault"])
         for i in range(n):
-            p = register_node(store, vault, f"{prefix}-{i}.md", f"https://example.com/{prefix}-{i}")
-            assert p.returncode == 0, p.stderr
-            results.append(json.loads(p.stdout))
+            results.append(
+                _seed_raw_source(store, f"{prefix}-{i}.md",
+                                 f"https://example.com/{prefix}-{i}")
+            )
         return results
 
     def test_derive_all_capped_by_limit(self, store):

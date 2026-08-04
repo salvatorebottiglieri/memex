@@ -6,8 +6,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import uuid
+from datetime import datetime, timezone
 
-from tests.conftest import _run_memex, register_node
+from memex.store import Store
+from tests.conftest import _run_memex
 
 
 FAKE_AGENT = "tests.fake_llm_client:FakeAgent"
@@ -15,10 +18,35 @@ FAKE_FAILING_AGENT = "tests.fake_llm_client_failing:FakeLLMClientFailing"
 
 
 def _ingest(store, url: str) -> dict:
+    """Create a legacy raw_source L0 directly via the Store (expand phase).
+
+    ``memex register`` now produces url+extracted pairs; derive + checks
+    still process raw_source nodes unchanged, so seed those fixtures
+    directly to keep exercising the derive->checks pipeline.
+    """
     filename = url.rsplit("/", 1)[-1].split("?", 1)[0] + ".md"
-    result = register_node(store, store["vault"], filename, url)
-    assert result.returncode == 0, result.stderr
-    return json.loads(result.stdout)
+    md_path = store["vault"] / filename
+    md_path.write_text(
+        f"---\nsource_url: {url}\ntitle: Test Article\n---\n\n"
+        f"# Test Article\n\n"
+        f"This is a longer article body that exceeds the minimum character threshold "
+        f"of one hundred characters so that the L0 markdown file gets created in tests.",
+        encoding="utf-8",
+    )
+    con = sqlite3.connect(store["db"])
+    st = Store(con)
+    node_id = str(uuid.uuid4())
+    st.create_node(
+        node_id=node_id, kind="raw_source", depth=0,
+        content_path=str(md_path), created_at=datetime.now(timezone.utc).isoformat(),
+    )
+    st.attach_source(
+        node_id=node_id, canonical_key=url,
+        source_url=url, title="Test Article", fetched_at=None,
+    )
+    con.commit()
+    con.close()
+    return {"id": node_id}
 
 
 def _derive(store, node_id: str, agent_module: str = FAKE_AGENT):

@@ -61,8 +61,8 @@ class TestSynthesize:
         kind, tier, depth = row
         assert kind == "summary"
         assert tier == "synthesis"
-        # Both extracted nodes have depth=0, so max + 1 = 1
-        assert depth == 1
+        # Registered nodes are extracted (depth=1), so max + 1 = 2
+        assert depth == 2
 
     def test_synthesize_provenance_edges(self, store):
         """Synthesis creates N derived_from edges, one per parent."""
@@ -160,7 +160,7 @@ class TestSynthesize:
         assert len(data["parent_ids"]) == 1
         assert data["parent_ids"][0] == a["id"]
 
-        # Should still be tier=synthesis, depth=1
+        # Should still be tier=synthesis; depth = extracted parent depth + 1 = 2
         conn = sqlite3.connect(store["db"])
         try:
             row = conn.execute(
@@ -171,7 +171,7 @@ class TestSynthesize:
         assert row is not None
         assert row[0] == "summary"
         assert row[1] == "synthesis"
-        assert row[2] == 1
+        assert row[2] == 2
 
     def test_synthesize_agent_failure_returns_error(self, store):
         """When the agent raises, the CLI returns error with exit code 1."""
@@ -191,12 +191,12 @@ class TestSynthesize:
         a = _ingest(store, "https://example.com/article-a")
         b = _ingest(store, "https://example.com/article-b")
 
-        # Synthesize a and b to create a node with depth=1
+        # Synthesize a and b (extracted, depth=1) to create a node with depth=2
         r1 = _synthesize(store, a["id"], b["id"])
         assert r1.returncode == 0, r1.stderr
         d1 = json.loads(r1.stdout)
 
-        # Now synthesize the first synthesis + one extracted → depth=max(1,2)+1 = 3
+        # Now synthesize the first synthesis + one extracted → depth=max(2,1)+1 = 3
         r2 = _synthesize(store, d1["id"], a["id"])
         assert r2.returncode == 0, r2.stderr
         d2 = json.loads(r2.stdout)
@@ -210,7 +210,7 @@ class TestSynthesize:
         finally:
             conn.close()
         assert row is not None
-        assert row[0] == 2, f"Expected depth 2, got {row[0]}"
+        assert row[0] == 3, f"Expected depth 3, got {row[0]}"
 
 
 class TestSynthesizeQualityGate:

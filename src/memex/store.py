@@ -1247,15 +1247,28 @@ class Store:
         removed = self._delete_node_internal(node_id, cascade)
         return {"status": "deleted", "removed": removed}
 
-    def _delete_node_internal(self, node_id: str, cascade: bool) -> list[str]:
-        """Delete a node and optionally its descendants. Returns list of all removed ids."""
+    def _delete_node_internal(
+        self, node_id: str, cascade: bool, _visited: set[str] | None = None
+    ) -> list[str]:
+        """Delete a node and optionally its descendants. Returns list of all removed ids.
+
+        ``_visited`` tracks ids already removed by a nested recursive call so
+        each node is reported exactly once in ``removed`` (the descendant walk
+        revisits nodes a deeper call has already deleted).
+        """
+        if _visited is None:
+            _visited = set()
+        if node_id in _visited:
+            return []
+        _visited.add(node_id)
+
         removed = [node_id]
 
         # Cascade: delete descendants first (deep-first)
         if cascade:
             descendants = self._find_provenance_descendants(node_id)
             for desc_id in descendants:
-                desc_removed = self._delete_node_internal(desc_id, cascade=True)
+                desc_removed = self._delete_node_internal(desc_id, cascade=True, _visited=_visited)
                 removed.extend(desc_removed)
 
         try:
