@@ -11,6 +11,8 @@ import http.server
 import json
 import sqlite3
 import threading
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -533,32 +535,32 @@ class TestWikipediaFetcher:
 
 # ── finding 1: ledger hit on a non-url node → already_registered ──────
 
-def test_extract_url_registered_as_l0_returns_already_registered(store, local_server, run_extract):
-    """Register a .md with source_url=S, then `memex extract S`: the ledger
-    hit belongs to a raw_source node, so extract must report
-    already_registered instead of rewriting that node's source row and
-    crashing with an uncaught ValueError in create_node."""
+def test_extract_url_registered_as_legacy_raw_source_returns_already_registered(store, local_server, run_extract):
+    """A legacy raw_source node owns the canonical key for S (pre-#97 DB), so
+    `memex extract S` must report already_registered instead of rewriting that
+    node's source row and crashing with an uncaught ValueError in create_node."""
     local_server.route("/article", _WEB_BODY)
     url = local_server.base_url + "/article"
 
+    # Seed a legacy raw_source node + source row directly (expand-phase DB).
+    from memex.canonical_key import canonical_key
+    from memex.store import Store
+
     vault = store["vault"]
-    md = vault / "article.md"
-    md.write_text(
-        f"---\nsource_url: {url}\ntitle: L0 Article\n---\n\n"
-        f"# L0 Article\n\n"
-        f"This is a longer L0 article body that exceeds the minimum character "
-        f"threshold of one hundred characters for the checks.\n",
-        encoding="utf-8",
-    )
-    proc = _run_memex(["register", "--db", str(store["db"]), "--vault", str(vault), str(md)])
-    assert proc.returncode == 0, proc.stderr
-    reg = json.loads(proc.stdout)
-    assert reg["status"] == "registered"
+    legacy_id = str(uuid.uuid4())
+    con = sqlite3.connect(store["db"])
+    st = Store(con)
+    st.create_node(node_id=legacy_id, kind="raw_source", depth=0, content_path="",
+                   created_at=datetime.now(timezone.utc).isoformat())
+    st.attach_source(node_id=legacy_id, canonical_key=canonical_key(url), source_url=url,
+                     title="L0 Article", fetched_at=None)
+    con.commit()
+    con.close()
 
     data = run_extract(url)
 
     assert data["status"] == "already_registered"
-    assert data["node_id"] == reg["id"]
+    assert data["node_id"] == legacy_id
     # No URL/extracted node and no new source row were created.
     assert _counts(store["db"]) == (0, 0, 1)
     assert not (vault / "extracted").exists()
@@ -567,7 +569,7 @@ def test_extract_url_registered_as_l0_returns_already_registered(store, local_se
     con = sqlite3.connect(store["db"])
     try:
         row = con.execute(
-            "SELECT title, fetched_at, failed FROM source WHERE node_id = ?", (reg["id"],)
+            "SELECT title, fetched_at, failed FROM source WHERE node_id = ?", (legacy_id,)
         ).fetchone()
     finally:
         con.close()

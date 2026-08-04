@@ -197,17 +197,21 @@ def smoke_lifecycle(tmp: Path) -> None:
 
     proc = _run(["list", "--db", str(db), "--vault", str(vault)])
     lst = _expect_json("list", proc)
-    _check("list returns 2 nodes (url + extracted)", len(lst) == 2, f"got {len(lst)}")
+    _check("list returns 1 node (extracted; URL hidden)", len(lst) == 1, f"got {len(lst)}")
     _check("list node has expected fields",
            set(lst[0].keys()) >= {"id", "kind", "tier", "trust_state", "canonical_key"})
-    # URL-node first (created first): carries the source, no trust state
-    _check("list node kind=url", lst[0]["kind"] == "url")
-    _check("list url node trust_state=None", lst[0]["trust_state"] is None)
-    _check("list node canonical_key matches source_url",
-           lst[0]["canonical_key"] == "https://example.com/article")
     # Extracted node: the content-bearing L0 of the pair, still draft
-    _check("list extracted node kind=extracted", lst[1]["kind"] == "extracted")
-    _check("list extracted node trust_state=draft", lst[1]["trust_state"] == "draft")
+    _check("list node kind=extracted", lst[0]["kind"] == "extracted")
+    _check("list extracted node trust_state=draft", lst[0]["trust_state"] == "draft")
+
+    proc = _run(["list", "--db", str(db), "--vault", str(vault), "--kind", "url"])
+    url_lst = _expect_json("list --kind url", proc)
+    _check("list --kind url returns the URL node", len(url_lst) == 1, f"got {len(url_lst)}")
+    # URL-node carries the source, no trust state
+    _check("list url node kind=url", url_lst[0]["kind"] == "url")
+    _check("list url node trust_state=None", url_lst[0]["trust_state"] is None)
+    _check("list node canonical_key matches source_url",
+           url_lst[0]["canonical_key"] == "https://example.com/article")
 
     proc = _run(["show", "--db", str(db), "--vault", str(vault), node_id])
     sh = _expect_json("show", proc)
@@ -271,10 +275,10 @@ def smoke_derive_passing(tmp: Path) -> None:
            and edge[1] == "derived_from" and edge[3] == l0_id,
            f"got {edge}")
 
-    # list includes the derivation
+    # list includes the derivation (URL-node hidden by default)
     p = _run(["list", "--db", str(db), "--vault", str(vault)])
     lst = _expect_json("list with derivation", p)
-    _check("list has 3 nodes (url + extracted + derivation)", len(lst) == 3,
+    _check("list has 2 nodes (extracted + derivation)", len(lst) == 2,
            f"got {len(lst)}")
 
     # Derivation markdown exists and has synthesis marker
@@ -501,9 +505,9 @@ def smoke_render(tmp: Path) -> None:
 
     p = _run(["render", "--db", str(db), "--vault", str(vault)])
     res = _expect_json("render L0", p)
-    _check("render returns 2 results (url skipped + extracted rendered)",
-           len(res) == 2, f"got {len(res)}")
-    _check("render statuses", {r["status"] for r in res} == {"rendered", "skipped"})
+    _check("render returns 1 result (extracted rendered; URL hidden)",
+           len(res) == 1, f"got {len(res)}")
+    _check("render statuses", {r["status"] for r in res} == {"rendered"})
     extracted_res = next(r for r in res if r["status"] == "rendered")
     _check("render extracted node rendered", extracted_res["status"] == "rendered")
 
@@ -520,7 +524,7 @@ def smoke_render(tmp: Path) -> None:
     _check("frontmatter has depth=1", fm.get("depth") == 1)
     _check("frontmatter has tags with kind/extracted", "kind/extracted" in fm.get("tags", []))
     _check("frontmatter has derived_from (pair edge)", "derived_from" in fm)
-    _check("frontmatter has aliases", fm.get("aliases") == ["Fake Article"])
+    _check("frontmatter has aliases (from URL parent title)", fm.get("aliases") == ["Fake Article Title"])
 
     # Idempotency
     p = _run(["render", "--db", str(db), "--vault", str(vault)])
@@ -540,7 +544,7 @@ def smoke_render(tmp: Path) -> None:
 
     p = _run(["render", "--db", str(db), "--vault", str(vault)])
     res = _expect_json("render with derivations", p)
-    _check("3 results (url skipped + extracted + derivation)", len(res) == 3,
+    _check("2 results (extracted + derivation)", len(res) == 2,
            f"got {len(res)}")
     _check("2 rendered nodes", sum(1 for r in res if r["status"] == "rendered") == 2,
            f"got {res}")
@@ -606,7 +610,7 @@ def smoke_full_e2e(tmp: Path) -> None:
 
     p = _run(["list", "--db", str(db), "--vault", str(vault)])
     lst = _expect_json("list", p)
-    _check("6 nodes total (2 url + 2 extracted + 2 derivations)", len(lst) == 6,
+    _check("4 nodes total (2 extracted + 2 derivations; URL hidden)", len(lst) == 4,
            f"got {len(lst)}")
 
     p = _run(["search", "--db", str(db), "--vault", str(vault), "broader pattern"])

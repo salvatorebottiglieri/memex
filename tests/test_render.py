@@ -154,11 +154,12 @@ class TestRenderL0:
         data = _ingest(store, "https://example.com/article")
         node_id = data["id"]  # extracted node
         results = _render(store)
-        # URL-node is skipped (no content_path), extracted node is rendered
-        assert len(results) == 2
+        # URL-nodes are excluded from list_nodes (no content_path), so only
+        # the extracted node is rendered
+        assert len(results) == 1
         statuses = {r["node_id"]: r["status"] for r in results}
         assert statuses[node_id] == "rendered"
-        assert statuses[data["url_node_id"]] == "skipped"
+        assert data["url_node_id"] not in statuses
 
         md_path = _md_path(store, data)
         fm, body = _read_frontmatter(md_path)
@@ -175,9 +176,9 @@ class TestRenderL0:
         assert fm["tier"] == "extracted"
         assert fm["trust_state"] == "draft"
         assert "derived_from" in fm
-        # source_url/title live on the URL-node's source row, not in the file
-        assert "source_url" not in fm
-        assert "title" not in fm
+        # source_url/title inherited from the URL-node's source row
+        assert fm.get("source_url") == "https://example.com/article"
+        assert fm.get("title") == "Test Article"
         # aliases come from the body H1
         assert "Test Article" in fm.get("aliases", [])
 
@@ -213,10 +214,10 @@ class TestRenderL0:
         assert row[0] == "https://example.com/article?utm_source=twitter"
         assert row[1] == "https://example.com/article"
 
-        # The renderer writes source_url only for legacy raw_source L0s, so
-        # the extracted file's frontmatter carries no source_url.
+        # Extracted nodes inherit source_url/title from the URL parent's
+        # source row (they carry no source row of their own).
         fm, _ = _read_frontmatter(_md_path(store, data))
-        assert "source_url" not in fm
+        assert fm.get("source_url") == "https://example.com/article?utm_source=twitter"
 
     def test_render_l0_with_alias_from_h1(self, store):
         """If no title, aliases should use the first H1 in body."""
@@ -242,12 +243,12 @@ class TestRenderDerivation:
         deriv_id = d_data["id"]
 
         results = _render(store)
-        # url (skipped) + extracted + derivation
-        assert len(results) == 3
+        # extracted + derivation (URL-nodes excluded from render results)
+        assert len(results) == 2
         statuses = {r["node_id"]: r["status"] for r in results}
         assert statuses[l0_id] == "rendered"
         assert statuses[deriv_id] == "rendered"
-        assert statuses[data["url_node_id"]] == "skipped"
+        assert data["url_node_id"] not in statuses
 
         md_path = _md_path(store, d_data)
         fm, body = _read_frontmatter(md_path)
@@ -509,11 +510,9 @@ def test_render_multiple_types(store):
     _derive(store, l0_2["id"])
 
     results = _render(store)
-    assert len(results) == 6  # 2 url + 2 extracted + 2 derivations
+    assert len(results) == 4  # 2 extracted + 2 derivations (URL-nodes excluded)
     for r in results:
         assert r["status"] in ("rendered", "skipped")
-
-    # Check the rendered nodes' frontmatter (skipped URL-nodes have no file)
     for r in results:
         if r["status"] != "rendered":
             continue

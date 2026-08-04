@@ -18,19 +18,21 @@ def test_list_returns_empty_array_when_no_nodes(store):
     assert data == []
 
 
-def test_list_returns_array_with_two_nodes_after_ingest(store):
-    """register produces a url + extracted pair, so list shows both."""
+def test_list_returns_array_with_one_node_after_ingest(store):
+    """register produces a url + extracted pair; list hides the URL-node by default."""
     register_node(store, store["vault"], "article.md", "https://example.com/article")
     result = _run_memex(["list", "--db", str(store["db"]), "--vault", str(store["vault"])])
     assert result.returncode == 0, result.stderr
     data = json.loads(result.stdout)
-    assert len(data) == 2
+    assert len(data) == 1
+    assert data[0]["kind"] == "extracted"
 
 
-def test_list_node_has_required_fields(store):
-    """The URL-node (created first) carries the source metadata."""
+def test_list_kind_url_shows_url_nodes(store):
+    """The URL-node (source metadata carrier) is visible with --kind url."""
     register_node(store, store["vault"], "article.md", "https://example.com/article")
-    result = _run_memex(["list", "--db", str(store["db"]), "--vault", str(store["vault"])])
+    result = _run_memex(["list", "--db", str(store["db"]), "--vault", str(store["vault"]),
+                         "--kind", "url"])
     node = json.loads(result.stdout)[0]
     assert "id" in node
     assert node["kind"] == "url"
@@ -40,12 +42,13 @@ def test_list_node_has_required_fields(store):
 
 
 def test_list_returns_multiple_nodes(store):
-    """Each registered file yields two nodes (url + extracted)."""
+    """Each registered file yields one visible node (extracted); URL-nodes hidden."""
     register_node(store, store["vault"], "article-1.md", "https://example.com/article-1")
     register_node(store, store["vault"], "article-2.md", "https://example.com/article-2")
     result = _run_memex(["list", "--db", str(store["db"]), "--vault", str(store["vault"])])
     data = json.loads(result.stdout)
-    assert len(data) == 4
+    assert len(data) == 2
+    assert {n["kind"] for n in data} == {"extracted"}
 
 
 def test_list_does_not_write_to_db(store):
