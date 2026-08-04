@@ -1,6 +1,6 @@
 # memex — Context
 
-memex is a personal second brain: it builds cited multi-level derivations over raw sources placed in the vault, and serves them to an agent.
+memex is a personal second brain: it builds cited multi-level derivations over content registered into the vault, and serves them to an agent.
 
 This file is the **glossary** — the project's ubiquitous language. Architectural decisions live in [`docs/adr/`](docs/adr/); the design overview lives in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
@@ -9,10 +9,13 @@ This file is the **glossary** — the project's ubiquitous language. Architectur
 ### Knowledge model
 
 **Node**:
-A unit of knowledge in the graph — either a raw source or a derivation.
+A unit of knowledge in the graph — a URL node (root), an extracted node (content-bearing L0), or a derivation.
 
-**Raw source (L0)**:
-The original source file, placed by the user in the vault with a ``source_url`` frontmatter reference to the real source. The bottom of every provenance chain.
+**URL node (root)**:
+The graph root for a registered source. It carries the source row — ``canonical_key`` / ``source_url`` / ``title`` — and has no content file of its own. Produced by ``register`` / ``extract`` alongside its extracted node.
+
+**Extracted node (content-bearing L0)**:
+The content-bearing L0 produced by ``register`` / ``extract``: it points at the markdown file in the vault and links back to its URL node via a ``derived_from`` provenance edge (depth 1). Confidence comes from the fetcher map (``EXTRACTED_CONFIDENCE``). The bottom of every provenance chain that carries content.
 
 **Derivation**:
 An LLM-produced node built from one or more lower nodes. Mutable and regenerable.

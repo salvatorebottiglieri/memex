@@ -6,12 +6,13 @@ for the *why* behind each decision see the ADRs in [`adr/`](adr/).
 ## Vision
 
 I collect interesting links by saving them to the vault as markdown files. memex reads those files,
-registers them as raw sources (L0), and an agent builds **derivations** on top at increasing levels of
-abstraction. Everything is **auditable**: any derivation traces back through provenance links to
-the raw source, which carries a ``source_url`` reference to the original. I primarily consult the
-high-level derivations; an agent navigates top-down and stops as early as it can (fewer tokens,
-less context pollution). A second class of links — associative — lets the agent connect distant
-concepts for serendipity, without ever polluting the citation chain.
+registers each as a URL-node + extracted-node pair (the L0), and an agent builds **derivations** on
+top at increasing levels of abstraction. Everything is **auditable**: any derivation traces back
+through provenance links to the URL node, which carries a ``source_url`` reference to the original,
+and to the extracted node holding the content. I primarily consult the high-level derivations; an
+agent navigates top-down and stops as early as it can (fewer tokens, less context pollution). A
+second class of links — associative — lets the agent connect distant concepts for serendipity,
+without ever polluting the citation chain.
 
 Inspired by Karpathy's personal wiki and by `iusztinpaul/ai-research-os-workshop` (see below).
 More ambitious than the reference on the knowledge model (arbitrary-depth DAG + validation states),
@@ -19,9 +20,9 @@ more conservative on scope (single user, no discovery/web-research subsystem).
 
 ## Conceptual model
 
-The knowledge space is a city of **buildings**. Each **building** is a line of reasoning rooted in one or more raw sources (L0).
+The knowledge space is a city of **buildings**. Each **building** is a line of reasoning rooted in one or more URL-node + extracted-node pairs (the L0).
 
-- **Ground floor (L0)**: the raw source itself — immutable, the foundation.
+- **Ground floor (L0)**: the extracted content anchored to its URL node — the foundation.
 - **First floor (notes)**: a single-source summary, directly resting on the ground floor.
 - **Second floor (synthesis)**: a cross-source derivation — a floor that spans multiple buildings.
 
@@ -35,7 +36,7 @@ This metaphor captures the two key invariants:
 
 | Concern | State | Surface |
 |---|---|---|
-| L0 registration (file -> node + source row) | **built** | `memex register <path>` |
+| L0 registration (file -> URL-node + extracted-node pair) | **built** | `memex register <path>` |
 | Canonical-key dedup + ledger | **built** | Store: `lookup_by_canonical_key`, `source.failed` |
 | Derivation (LLM -> notes-tier + provenance edge) | **built** | `memex derive <l0-id>` |
 | Deterministic checks (auto-verify gate) | **built** | `memex.checks.run_checks` |
@@ -58,9 +59,9 @@ Solid lines = implemented path; dashed = planned surface that doesn't yet write 
 flowchart TB
   USER((Me))
 
-  USER -->|"places .md with source_url<br/>in vault"| L0["L0 markdown<br/>(vault root, immutable)"]
+  USER -->|"places .md with source_url<br/>in vault"| L0["L0 file<br/>(user's markdown in vault root)"]
 
-  L0 -->|"memex register"| REG["Registration<br/>(creates node + source row)"]
+  L0 -->|"memex register"| REG["Registration<br/>(creates URL-node + source row<br/>and extracted-node pair)"]
 
   REG -->|canonical_key dedup| LEDGER[("source table<br/>(ledger)")]
 

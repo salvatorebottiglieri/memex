@@ -12,7 +12,7 @@ Every rule here has a concrete implementation.
 | Property | Type | Cardinality | Description |
 |---|---|---|---|
 | `id` | UUID (str) | 1 | Unique identifier |
-| `kind` | enum | 1 | `raw_source` | `summary` | (open vocabulary) |
+| `kind` | enum | 1 | `url` | `extracted` | `summary` | (open vocabulary) |
 | `tier` | enum | null | 0–1 | `raw` | `notes` | `synthesis` (fixed spine, ADR-0002). Null = L0 |
 | `trust_state` | enum | 1 | `draft` > `auto-verified` > `human-approved` > `stale` (strict ordinal) |
 | `depth` | int | 1 | Computed: `max(parent.depth) + 1`. L0 = 0 |
@@ -291,9 +291,10 @@ Rule A2 — Contested nodes require descent
     THEN the agent MUST descend to provenance children.
 
 Rule A3 — L0 nodes are always terminal
-  Agents should never stop on L0 (raw_source) nodes — they are the bottom
-  of the abstraction ladder and contain the original content, not synthesis.
-  (ADR-0001: agent navigates top-down, stops as early as possible.)
+  Agents should never stop on L0 nodes — the L0 is the URL root plus
+  its extracted content node, the bottom of the abstraction ladder,
+  carrying the original content, not synthesis. (ADR-0001: agent
+  navigates top-down, stops as early as possible.)
 ```
 
 ---

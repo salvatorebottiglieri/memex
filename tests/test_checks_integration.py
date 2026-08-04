@@ -18,11 +18,13 @@ FAKE_FAILING_AGENT = "tests.fake_llm_client_failing:FakeLLMClientFailing"
 
 
 def _ingest(store, url: str) -> dict:
-    """Create a legacy raw_source L0 directly via the Store (expand phase).
+    """Create a legacy raw_source L0 directly via the Store (transition phase).
 
     ``memex register`` now produces url+extracted pairs; derive + checks
-    still process raw_source nodes unchanged, so seed those fixtures
-    directly to keep exercising the derive->checks pipeline.
+    still process legacy raw_source nodes. The depth-0 L0 shape is what keeps
+    the passing-derivation assertions valid (a notes derivation of a depth-0
+    L0 lands at depth 1, so D5's notes=1 check passes and the node
+    auto-verifies). Seed those fixtures directly to exercise that path.
     """
     filename = url.rsplit("/", 1)[-1].split("?", 1)[0] + ".md"
     md_path = store["vault"] / filename

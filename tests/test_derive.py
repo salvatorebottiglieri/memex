@@ -29,11 +29,11 @@ def _derive(store, node_id: str) -> "subprocess.CompletedProcess":  # type: igno
 
 
 def _seed_raw_source(store: dict, filename: str, source_url: str) -> dict:
-    """Create a legacy raw_source L0 directly via the Store (expand phase).
+    """Create a legacy raw_source L0 directly via the Store (transition phase).
 
     ``memex register`` now produces url+extracted pairs, while the derive /
-    checks pipeline still processes raw_source nodes unchanged — seed those
-    fixtures directly so the derive tests keep exercising that path.
+    checks pipeline still processes legacy raw_source nodes (depth-0 L0s) —
+    seed those fixtures directly so the derive tests keep exercising that path.
     """
     node_id = str(uuid.uuid4())
     md_path = Path(store["vault"]) / filename
@@ -182,9 +182,9 @@ class TestDeriveAll:
         return _run_memex(args, env={"MEMEX_AGENT": agent})
 
     def _ingest_n(self, store, n: int, prefix: str = "article") -> list[dict]:
-        """Create n raw_source L0 nodes directly (register now produces
-        url+extracted pairs, while derive --all still processes raw_source)
-        and return their result dicts."""
+        """Create n legacy raw_source L0 nodes directly (derive --all
+        processes both extracted roots and legacy raw_source rows) and
+        return their result dicts."""
         results = []
         for i in range(n):
             results.append(
@@ -192,6 +192,66 @@ class TestDeriveAll:
                                  f"https://example.com/{prefix}-{i}")
             )
         return results
+
+    def _register_n(self, store, n: int, prefix: str = "pair") -> list[dict]:
+        """Register n files — each yields a url+extracted pair (current model).
+
+        The returned dicts use ``id`` = the extracted node id (the
+        content-bearing L0 of the pair).
+        """
+        results = []
+        for i in range(n):
+            vault = Path(store["vault"])
+            p = register_node(store, vault, f"{prefix}-{i}.md",
+                              f"https://example.com/{prefix}-{i}")
+            assert p.returncode == 0, p.stderr
+            results.append(json.loads(p.stdout))
+        return results
+
+    def test_derive_all_targets_extracted_roots(self, store):
+        """derive --all derives the extracted roots of url+extracted pairs.
+
+        Summary lands at depth=2 (extracted is depth 1, parent_depth + 1) with
+        a provenance edge back to the extracted node. It stays draft while D5
+        hardcodes tier=notes => depth 1 (ticket #103 owns the D5 fix) — do NOT
+        assert auto-verified here.
+        """
+        pairs = self._register_n(store, 3)
+        extracted_ids = {p["id"] for p in pairs}
+
+        result = self._derive_all(store)
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        assert len(data) == 3
+        assert all(r["status"] == "derived" for r in data)
+        assert {r["l0_node_id"] for r in data} == extracted_ids
+        assert all(r["trust_state"] == "draft" for r in data)
+
+        con = sqlite3.connect(store["db"])
+        depths = con.execute(
+            "SELECT depth FROM node WHERE kind = 'summary' AND tier = 'notes'"
+        ).fetchall()
+        prov_edges = con.execute(
+            "SELECT COUNT(*) FROM edge WHERE type = 'provenance' "
+            "AND relation = 'derived_from' AND from_node IN "
+            "(SELECT id FROM node WHERE kind = 'summary')"
+        ).fetchone()[0]
+        con.close()
+        assert sorted(r[0] for r in depths) == [2, 2, 2]
+        assert prov_edges == 3
+
+    def test_derive_all_mixed_extracted_and_legacy(self, store):
+        """derive --all processes extracted roots AND legacy raw_source L0s."""
+        pairs = self._register_n(store, 2)
+        raw = self._ingest_n(store, 2, prefix="legacy")
+        expected = {p["id"] for p in pairs} | {r["id"] for r in raw}
+
+        result = self._derive_all(store, limit=10)
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        assert len(data) == 4
+        assert {r["l0_node_id"] for r in data} == expected
+        assert all(r["status"] == "derived" for r in data)
 
     def test_derive_all_capped_by_limit(self, store):
         """5 L0s, --limit 3 -> only 3 derivations created."""

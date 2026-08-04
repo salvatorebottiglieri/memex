@@ -176,8 +176,8 @@ def register(db_path: Path, vault_path: Path, path: Path, source_url: str | None
     node. Chaining ``register -> show <id>`` therefore yields null source
     fields; pass ``url_node_id`` to ``show`` when the source row is needed.
     On dedup (``already_exists``) ``extracted_node_id`` is null when the
-    existing URL predates the url+extracted model (a derived legacy raw_source
-    has a summary, not an extracted pair); ``id`` is never null — it falls
+    existing URL predates the url+extracted model (the legacy L0 node has a
+    summary, not an extracted pair); ``id`` is never null — it falls
     back to the URL-node's id.
 
     The file MUST contain a ``source_url`` key in its YAML frontmatter pointing
@@ -220,9 +220,9 @@ def register(db_path: Path, vault_path: Path, path: Path, source_url: str | None
         if existing is not None:
             url_id = existing["node_id"]
             # The registered pair's extracted node — only when this URL was
-            # registered under the url+extracted model. A derived legacy
-            # raw_source also has a derived_from edge (to its summary), so the
-            # edge alone is not proof of a pair: check the node kind.
+            # registered under the url+extracted model. A derived legacy L0
+            # also has a derived_from edge (to its summary), so the edge alone
+            # is not proof of a pair: check the node kind.
             derived = store.find_derived_from(url_id)
             extracted_id = None
             if derived is not None:
@@ -539,7 +539,7 @@ def cookies_export(domain: str, output: str | None) -> None:
 
 @cli.command("list")
 @_db_options
-@click.option("--kind", default=None, help="Filter by node kind (raw_source, url, extracted, summary). URL nodes are hidden unless --kind url is given.")
+@click.option("--kind", default=None, help="Filter by node kind (url, extracted, summary). URL nodes are hidden unless --kind url is given.")
 @click.option("--tier", default=None, help="Filter by node tier (e.g. notes, synthesis, extracted).")
 @click.option("--trust-state", "trust_state", default=None, help="Filter by trust state (draft, auto-verified, human-approved, stale).")
 @click.option("--confidence", default=None, help="Filter by confidence (high, medium, low).")
@@ -1078,7 +1078,7 @@ def backfill_synthesis(db_path: Path, vault_path: Path, dry_run: bool) -> None:
     with Store.open(db_path) as store:
         candidates = [
             n for n in store.list_nodes()
-            if n["kind"] != "raw_source"
+            if n["kind"] in ("summary", "synthesis")
             and not n.get("synthesis_statements")
             and n.get("content_path")
             and Path(n["content_path"]).exists()
