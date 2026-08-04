@@ -19,3 +19,6 @@ node_modules/
 secrets/
 *.local
 .pi-subagents/
+
+# Dev scratch data (local test vaults, DBs)
+develop/
