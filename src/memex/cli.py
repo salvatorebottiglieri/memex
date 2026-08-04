@@ -253,6 +253,185 @@ def resolve(url: str | None) -> None:
 
 
 @cli.command()
+@_db_options
+@click.option(
+    "--force",
+    "force",
+    is_flag=True,
+    default=False,
+    help="Re-fetch and regenerate the extracted node in place (same node id).",
+)
+@click.argument("url")
+def extract(db_path: Path, vault_path: Path, force: bool, url: str) -> None:
+    """Fetch a URL and create the url+extracted node pair (idempotent).
+
+    Resolution rules pick the per-type fetcher (HTML/PDF). Non-ingestable
+    URLs (X/Twitter, media) get an advisory response and create no nodes.
+    Re-running the same canonical URL returns ``already_exists``; ``--force``
+    re-fetches and overwrites the extracted content in place (mutability per
+    map #76).
+    """
+    from memex.checks import run_checks
+    from memex.fetchers import FetchError, fetch, get_fetcher
+    from memex.resolve.rules import resolve_url
+    from memex.store import Store
+
+    resolution = resolve_url(url)
+    if not resolution.ingestable:
+        click.echo(json.dumps({
+            "status": "not_ingestable",
+            "url": url,
+            "type": resolution.type,
+            "ingestable": resolution.ingestable,
+            "direct_url": resolution.direct_url,
+            "note": resolution.note,
+        }))
+        return
+
+    _require_db(db_path)
+    ckey = canonical_key(url)
+    now = datetime.now(timezone.utc).isoformat()
+
+    with Store.open(db_path) as store:
+        existing = store.lookup_by_canonical_key(ckey)
+        url_node_id = existing["node_id"] if existing else str(uuid.uuid4())
+
+        # The ledger key may belong to a non-url node (e.g. an L0 .md
+        # registered with the same source_url). Extraction can only parent
+        # from a URL node, so report it cleanly instead of rewriting that
+        # node's source row and crashing in create_node downstream.
+        if existing is not None:
+            existing_node = store.get_node(existing["node_id"])
+            if existing_node is None or existing_node["kind"] != "url":
+                click.echo(json.dumps({
+                    "status": "already_registered",
+                    "node_id": existing["node_id"],
+                    "canonical_key": ckey,
+                }))
+                return
+
+        # Dedup: a URL node with an extracted child is already extracted
+        # (unless --force asks for regeneration). The lookup filters
+        # kind='extracted' so an unrelated derivation child can never be
+        # mistaken for the extracted node.
+        extracted_node = (
+            store.find_extracted_child(url_node_id) if existing is not None else None
+        )
+        if extracted_node is not None and not force:
+            click.echo(json.dumps({
+                "status": "already_exists",
+                "url_node_id": url_node_id,
+                "extracted_node_id": extracted_node["id"],
+            }))
+            return
+
+        # --- Fetch through the resolution-selected fetcher ---
+        try:
+            result = fetch(url, resolution)
+        except FetchError as exc:
+            if existing is None:
+                store.create_node(node_id=url_node_id, kind="url", created_at=now)
+                store.attach_source(
+                    node_id=url_node_id,
+                    canonical_key=ckey,
+                    source_url=url,
+                    fetched_at=now,
+                    failed=True,
+                )
+            else:
+                store.mark_source_failed(url_node_id, now)
+            click.echo(json.dumps({
+                "status": "fetch_failed",
+                "url_node_id": url_node_id,
+                "error": exc.message,
+            }))
+            return
+
+        # --- Success: write content, then create/update nodes ---
+        vault_path.mkdir(parents=True, exist_ok=True)
+        extracted_dir = vault_path / "extracted"
+        extracted_dir.mkdir(parents=True, exist_ok=True)
+
+        fetcher_type = get_fetcher(url, resolution).TYPE
+        if extracted_node is not None:
+            # --force: regenerate in place, same node id (mutability per #76)
+            extracted_node_id = extracted_node["id"]
+            md_path = Path(extracted_node["content_path"])
+            status = "re_extracted"
+        else:
+            extracted_node_id = str(uuid.uuid4())
+            md_path = extracted_dir / f"{extracted_node_id}.md"
+            status = "extracted"
+
+        # The .md file and the DB rows are one unit. New content is written
+        # to a temp file next to the final path first; the checks run against
+        # that temp file, and it is atomically renamed onto the final path
+        # ONLY after update_trust_state has succeeded — the overwrite is the
+        # last step before the Store transaction commits, so the file on disk
+        # can never be newer than the DB state. On any failure the temp file
+        # is discarded (fresh and --force alike): a fresh extract leaves no
+        # orphan, a re-extract leaves the previous file untouched.
+        tmp_path = md_path.with_name(f"{md_path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            tmp_path.write_text(result.content, encoding="utf-8")
+
+            if existing is None:
+                store.create_node(node_id=url_node_id, kind="url", created_at=now)
+                store.attach_source(
+                    node_id=url_node_id,
+                    canonical_key=ckey,
+                    source_url=url,
+                    title=result.title,
+                    fetched_at=now,
+                )
+            else:
+                store.update_source_after_fetch(url_node_id, result.title, now)
+
+            if extracted_node is None:
+                store.create_node(
+                    node_id=extracted_node_id,
+                    kind="extracted",
+                    content_path=str(md_path),
+                    fetcher_type=fetcher_type,
+                    derived_from=url_node_id,
+                    created_at=now,
+                )
+            else:
+                # --force: refresh fetcher metadata from the new fetch — a
+                # different fetcher must not leave stale values behind.
+                store.update_extracted_fetcher(extracted_node_id, fetcher_type)
+
+            # --- Checks -> trust (draft → auto-verified when checks pass) ---
+            check_result = run_checks(store._con, extracted_node_id, tmp_path)
+            trust_state = "auto-verified" if check_result.passed else "draft"
+            store.update_trust_state(
+                node_id=extracted_node_id,
+                trust_state=trust_state,
+                check_failures=check_result.failures,
+            )
+
+            # Final step before commit: atomically move the temp file into
+            # place so the on-disk content always matches the DB state.
+            os.replace(tmp_path, md_path)
+        except BaseException:
+            tmp_path.unlink(missing_ok=True)
+            raise
+
+        confidence = store.get_node(extracted_node_id)["confidence"]
+
+    click.echo(json.dumps({
+        "status": status,
+        "url_node_id": url_node_id,
+        "extracted_node_id": extracted_node_id,
+        "fetcher_type": fetcher_type,
+        "confidence": confidence,
+        "trust_state": trust_state,
+        "content_path": str(md_path),
+        "title": result.title,
+    }))
+
+
+@cli.command()
 @click.argument("url", required=False, default=None)
 def resolve_agent(url: str | None) -> None:
     """Resolve a URL using an external agent (Pi/Claude) with a browser.
