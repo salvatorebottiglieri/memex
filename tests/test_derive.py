@@ -7,12 +7,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 from memex.store import Store as _Store
-from tests.conftest import _run_memex, register_node, WORKTREE
+from tests.conftest import _run_memex, register_node
 
 
 FAKE_AGENT = "tests.fake_llm_client:FakeAgent"
@@ -21,7 +22,7 @@ FAKE_THROWS_AGENT = "tests.fake_llm_client_throws:FakeLLMClientThrows"
 
 
 
-def _derive(store, node_id: str) -> "subprocess.CompletedProcess":  # type: ignore[name-defined]
+def _derive(store, node_id: str) -> subprocess.CompletedProcess:
     return _run_memex(
         ["derive", "--db", str(store["db"]), "--vault", str(store["vault"]), node_id],
         env={"MEMEX_AGENT": FAKE_AGENT},
@@ -130,7 +131,7 @@ class TestDerive:
 
         con = sqlite3.connect(store["db"])
         row = con.execute(
-            "SELECT type, relation, from_node, to_node FROM edge "
+            "SELECT type, relation, from_node, to_node, written_by FROM edge "
             "WHERE from_node = ? AND to_node = ?",
             (deriv_id, l0_id),
         ).fetchone()
@@ -141,6 +142,8 @@ class TestDerive:
         assert row[1] == "derived_from"
         assert row[2] == deriv_id
         assert row[3] == l0_id
+        # LLM-created provenance edges carry written_by='llm' (not the default 'human')
+        assert row[4] == "llm"
 
     def test_derive_writes_markdown_file_with_synthesis_markers(self, store):
         vault = Path(store["vault"])
@@ -148,7 +151,10 @@ class TestDerive:
         ingested = json.loads(p.stdout)
         result = _derive(store, ingested["id"])
         data = json.loads(result.stdout)
-        md_path = Path(data.get("content_path", str(store["vault"] / f"{data['id']}.md")))
+        md_path = Path(data["content_path"])
+        assert md_path.exists()
+        content = md_path.read_text(encoding="utf-8")
+        assert "> Synthesis:" in content
 
     def test_derive_response_includes_l0_node_id(self, store):
         vault = Path(store["vault"])
@@ -282,7 +288,7 @@ class TestDeriveAll:
 
     def test_derive_all_capped_by_limit(self, store):
         """5 L0s, --limit 3 -> only 3 derivations created."""
-        l0s = self._ingest_n(store, 5)
+        self._ingest_n(store, 5)
         result = self._derive_all(store, limit=3)
         assert result.returncode == 0, result.stderr
         data = json.loads(result.stdout)
@@ -369,7 +375,7 @@ class TestDeriveAll:
 
     def test_derive_all_without_limit_processes_everything(self, store):
         """--all without --limit derives ALL un-derived nodes (no 10-node cap)."""
-        l0s = self._ingest_n(store, 12)
+        self._ingest_n(store, 12)
         result = self._derive_all(store)  # no --limit flag at all
         assert result.returncode == 0, result.stderr
         data = json.loads(result.stdout)
@@ -403,7 +409,7 @@ class TestDeriveAll:
 
     def test_derive_all_handles_errors(self, store):
         """Failing agent returns error status without crashing batch."""
-        l0s = self._ingest_n(store, 3)
+        self._ingest_n(store, 3)
         result = self._derive_all(store, limit=10, agent=FAKE_THROWS_AGENT)
         assert result.returncode == 0, result.stderr
         data = json.loads(result.stdout)
@@ -415,7 +421,7 @@ class TestDeriveAll:
 
     def test_derive_all_idempotent(self, store):
         """Re-run with same state -> all reported as already_derived."""
-        l0s = self._ingest_n(store, 3)
+        self._ingest_n(store, 3)
         result = self._derive_all(store, limit=10)
         assert result.returncode == 0, result.stderr
         data = json.loads(result.stdout)
@@ -611,3 +617,132 @@ class TestDeriveQualityGate:
         warning = json.loads(result.stderr.strip())
         assert "validator_warning" in warning
         assert "Validator LLM call failed" in warning["validator_warning"]
+
+
+class TestParseDeriveResponse:
+    """parse_derive_response — JSON envelope, fences, and regex fallback."""
+
+    def test_parses_bare_json_envelope(self):
+        """Bare JSON envelope yields prose and statements."""
+        from memex.utils.parsing import parse_derive_response
+
+        raw = json.dumps(
+            {
+                "prose": "# Title\n\nBody.",
+                "synthesis_statements": ["A statement."],
+            }
+        )
+        prose, statements = parse_derive_response(raw)
+        assert prose == "# Title\n\nBody."
+        assert statements == ["A statement."]
+
+    def test_parses_fenced_json_envelope(self):
+        """Markdown-fenced JSON envelope (CLI agents) parses the same way."""
+        from memex.utils.parsing import parse_derive_response
+
+        raw = (
+            "```json\n"
+            + json.dumps(
+                {
+                    "prose": "# Title\n\nBody.",
+                    "synthesis_statements": ["A statement."],
+                }
+            )
+            + "\n```"
+        )
+        prose, statements = parse_derive_response(raw)
+        assert prose == "# Title\n\nBody."
+        assert statements == ["A statement."]
+
+    def test_fallback_recovers_synthesis_markers(self):
+        """Non-JSON prose falls back to regex recovery of > Synthesis: markers (Rule S5)."""
+        from memex.utils.parsing import parse_derive_response
+
+        raw = "# Title\n\nBody prose.\n\n> Synthesis: An inference.\n> Synthesis: Another one."
+        prose, statements = parse_derive_response(raw)
+        assert prose == raw
+        assert statements == ["An inference.", "Another one."]
+
+    def test_fallback_empty_statements_without_markers(self):
+        """Prose without markers yields an empty statement list."""
+        from memex.utils.parsing import parse_derive_response
+
+        prose, statements = parse_derive_response("# Title\n\nNo markers here.")
+        assert prose == "# Title\n\nNo markers here."
+        assert statements == []
+
+
+class TestPromptCap:
+    """_cap_prompt_content — NUL strip + size cap for the LLM prompt."""
+
+    def test_nul_bytes_stripped(self):
+        from memex.services.derive import _cap_prompt_content
+
+        out = _cap_prompt_content("a\x00b\x00c")
+        assert out == "abc"
+
+    def test_short_content_untouched(self):
+        from memex.services.derive import _cap_prompt_content
+
+        out = _cap_prompt_content("short content")
+        assert out == "short content"
+
+    def test_long_content_capped_with_marker(self):
+        from memex.services.derive import _cap_prompt_content
+
+        out = _cap_prompt_content("x" * 300_000)
+        assert len(out) < 300_000
+        assert "source content truncated" in out
+        assert out.startswith("x" * 120_000)
+
+
+class TestReaderAgentMode:
+    """Reader-capable agents receive a DocumentRef, never inlined content."""
+
+    def test_derive_passes_reference_to_reader_agent(self, store):
+        from tests.fake_llm_client import FakeReaderAgent
+
+        vault = Path(store["vault"])
+        p = register_node(store, vault, "reader.md", "https://example.com/reader")
+        ingested = json.loads(p.stdout)
+        agent = FakeReaderAgent()
+        with _Store.open(store["db"]) as s:
+            from memex.services.derive import DeriverService
+
+            svc = DeriverService(s, vault, agent)
+            result = svc.derive(ingested["id"])
+
+        assert result.status == "derived"
+        assert agent.received["content"] is None
+        ref = agent.received["reference"]
+        assert ref is not None
+        assert ref.node_id == ingested["id"]
+        assert Path(ref.content_path).exists()
+        assert ref.size_bytes > 0
+
+    def test_derive_passes_content_to_non_reader(self, store):
+        from tests.fake_llm_client import FakeAgent
+
+        class RecordingFake(FakeAgent):
+            def __init__(self):
+                super().__init__()
+                self.received = {}
+
+            def derive(self, content):
+                self.received = {"content": content}
+                return super().derive(content)
+
+        vault = Path(store["vault"])
+        p = register_node(store, vault, "plain.md", "https://example.com/plain")
+        ingested = json.loads(p.stdout)
+        agent = RecordingFake()
+        with _Store.open(store["db"]) as s:
+            from memex.services.derive import DeriverService
+
+            svc = DeriverService(s, vault, agent)
+            result = svc.derive(ingested["id"])
+
+        assert result.status == "derived"
+        # Non-reader agents still get the inlined content.
+        assert "Test Article" in agent.received["content"]
+        assert agent.received["content"] is not None

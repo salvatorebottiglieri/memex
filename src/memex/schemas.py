@@ -21,3 +21,19 @@ class DerivationResult:
 
     prose: str  # Markdown prose with optional > Synthesis: markers
     synthesis_statements: list[str] = field(default_factory=list)
+
+
+@dataclass
+class DocumentRef:
+    """A reference to a source document, handed to agents that can read files.
+
+    Reader agents (``can_read_files=True``) receive this instead of the
+    inlined content: they read the file themselves in multiple passes with
+    the read tool, so arbitrarily long sources fit without a prompt cap.
+    """
+
+    node_id: str
+    content_path: str
+    title: str | None = None
+    source_url: str | None = None
+    size_bytes: int = 0

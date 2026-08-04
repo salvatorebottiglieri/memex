@@ -14,9 +14,28 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from memex.agent import Agent, load_agent
+from memex.schemas import DocumentRef
 from memex.store import Store
 from memex.utils.retry import call_with_retry
 from memex.validators.validate import validate_derivation
+
+# Upper bound on source content fed to the LLM. Extraction can produce
+# multi-megabyte files (broken PDF text layers, HTML dumps) that blow past
+# any model context window; the summary needs the head of the source, not
+# a token overflow. Kept explicit so a truncated prompt is honest about it.
+_MAX_PROMPT_CHARS = 120_000
+
+
+def _cap_prompt_content(content: str) -> str:
+    """Strip NUL bytes (PDF ToUnicode artifacts) and cap prompt size."""
+    content = content.replace("\x00", "")
+    if len(content) <= _MAX_PROMPT_CHARS:
+        return content
+    return (
+        content[:_MAX_PROMPT_CHARS]
+        + "\n\n[source content truncated — exceeds prompt limit; "
+        "the remainder was not considered]"
+    )
 
 
 @dataclass
@@ -85,7 +104,7 @@ class DeriverService:
                 detail="content_not_found",
             )
 
-        l0_content = Path(l0["content_path"]).read_text(encoding="utf-8")
+        content, reference = self._agent_inputs(l0)
 
         # --- Idempotency check ---
         existing = self._store.find_derived_from(l0_node_id)
@@ -96,7 +115,9 @@ class DeriverService:
                 l0_node_id=l0_node_id,
             )
 
-        return self._do_derive(l0_node_id, l0_content, use_retry=use_retry)
+        return self._do_derive(
+            l0_node_id, content, reference, use_retry=use_retry
+        )
 
     def derive_all(self, limit: int | None = None) -> list[DeriveResult]:
         """Derive all un-derived L0 nodes, capped at *limit* when given.
@@ -144,11 +165,9 @@ class DeriverService:
                 continue
 
             try:
-                l0_content = Path(l0["content_path"]).read_text(
-                    encoding="utf-8"
-                )
+                content, reference = self._agent_inputs(l0)
                 result = self._do_derive(
-                    node["id"], l0_content, use_retry=True
+                    node["id"], content, reference, use_retry=True
                 )
                 results.append(result)
             except Exception as e:
@@ -167,19 +186,49 @@ class DeriverService:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _agent_inputs(self, l0: dict) -> tuple[str | None, DocumentRef | None]:
+        """Decide what the agent receives for an L0.
+
+        Reader agents (``can_read_files``) get a :class:`DocumentRef` and read
+        the file themselves in multiple passes — no prompt cap, any length.
+        Other agents get the (NUL-stripped, size-capped) inlined content.
+        """
+        content_path = Path(l0["content_path"])
+        if getattr(self._agent, "can_read_files", False):
+            return None, DocumentRef(
+                node_id=l0["id"],
+                content_path=str(content_path),
+                title=l0.get("title"),
+                source_url=l0.get("source_url"),
+                size_bytes=content_path.stat().st_size,
+            )
+        content = _cap_prompt_content(
+            content_path.read_text(encoding="utf-8")
+        )
+        return content, None
+
     def _do_derive(
-        self, l0_node_id: str, l0_content: str, *, use_retry: bool = False
+        self,
+        l0_node_id: str,
+        l0_content: str | None,
+        reference: DocumentRef | None,
+        *,
+        use_retry: bool = False,
     ) -> DeriveResult:
         """Core derivation pipeline (assumes caller owns idempotency)."""
         from memex.checks import run_checks
 
+        def _agent_derive():
+            kwargs = {"content": l0_content}
+            if reference is not None:
+                kwargs["reference"] = reference
+            return self._agent.derive(**kwargs)
+
         try:
-            def _deriv_fn():
-                return self._agent.derive(l0_content)
             deriv = (
-                call_with_retry(_deriv_fn)
+                call_with_retry(_agent_derive)
                 if use_retry
-                else self._agent.derive(l0_content)
+                else _agent_derive()
             )
         except Exception as e:
             return DeriveResult(
@@ -194,7 +243,7 @@ class DeriverService:
         # --- Adversarial validation gate ---
         if self._validator is not None:
             passes, warning = validate_derivation(
-                self._validator, l0_content, deriv
+                self._validator, l0_content, deriv, reference=reference
             )
             if warning:
                 import json as _json
@@ -241,6 +290,7 @@ class DeriverService:
             relation="derived_from",
             from_node=deriv_id,
             to_node=l0_node_id,
+            written_by="llm",
         )
 
         # Notes-tier with 1 parent → medium confidence

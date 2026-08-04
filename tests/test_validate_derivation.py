@@ -12,7 +12,6 @@ Covers all dispatch paths:
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
 
 from memex.derivers.demo import DemoAgent
 from memex.schemas import DerivationResult
@@ -97,3 +96,30 @@ class TestValidateDerivation:
         agent = _NoCallLlmAgent()
         result = validate_derivation(agent, _PARENT_CONTENT, _DERIV)
         assert result == (True, None), f"Expected (True, None), got {result}"
+
+
+class TestValidateReaderMode:
+    """Reader validators get a reference block and read-enabled calls."""
+
+    def test_reader_validator_receives_reference_block(self):
+        from memex.derivers.pi import OMPAgent
+        from memex.schemas import DerivationResult, DocumentRef
+        from memex.validators.validate import validate_derivation
+
+        captured = {}
+
+        class ReaderValidator(OMPAgent):
+            def call_llm(self, prompt, *, allow_read=False):
+                captured["allow_read"] = allow_read
+                captured["has_path"] = "/tmp/parent.md" in prompt
+                return '{"passes": true}'
+
+        v = ReaderValidator()
+        ref = DocumentRef(node_id="p1", content_path="/tmp/parent.md", size_bytes=42)
+        ok, warn = validate_derivation(
+            v, None, DerivationResult(prose="# X", synthesis_statements=["s"]),
+            reference=ref,
+        )
+        assert ok is True and warn is None
+        assert captured["allow_read"] is True
+        assert captured["has_path"] is True

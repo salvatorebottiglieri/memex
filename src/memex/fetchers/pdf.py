@@ -36,4 +36,6 @@ class PDFFetcher(Fetcher):
         content = "\n\n".join(pages).strip()
         if not content:
             raise FetchError(f"PDF contained no extractable text: {url}")
-        return FetchResult(content=content)
+        # pypdf emits NUL bytes from broken ToUnicode maps in some PDFs;
+        # they poison the LLM prompt (and crash argv-based agents).
+        return FetchResult(content=content.replace("\x00", ""))

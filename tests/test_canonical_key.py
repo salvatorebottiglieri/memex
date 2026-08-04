@@ -4,8 +4,6 @@ canonical_key is the dedup identity of a source: a normalized URL with
 tracking params stripped (utm_*, fbclid, etc.), scheme/host normalized,
 and known platforms mapped to stable URI schemes.
 """
-import pytest
-
 from memex.canonical_key import canonical_key
 
 

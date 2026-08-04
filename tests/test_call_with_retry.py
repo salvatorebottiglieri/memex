@@ -86,9 +86,6 @@ class TestCallWithRetry:
 
     def test_backoff_delays_increase(self):
         """Exponential backoff: later delays are longer (double each attempt)."""
-        call_count = 0
-        delays = []
-
         def tracker_fn():
             return "ok"  # succeeds first time, so no retries
 

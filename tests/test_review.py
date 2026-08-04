@@ -9,7 +9,7 @@ import json
 import uuid
 
 from memex.store import Store as _Store
-from tests.conftest import _run_memex, register_node, WORKTREE
+from tests.conftest import _run_memex, register_node
 
 FAKE_AGENT = "tests.fake_llm_client:FakeAgent"
 FAKE_AGENT_VALID_REFS = "tests.fake_llm_client:FakeAgentValidRefs"
@@ -23,21 +23,22 @@ def _derive(store, node_id: str):
     )
 
 
+def _add_contradicts_edge(store_dict, from_node: str, to_node: str):
+    """Open the db and create a contradicts edge to trigger an event."""
+    with _Store.open(store_dict["db"]) as s:
+        s.init_schema()
+        edge_id = str(uuid.uuid4())
+        s.create_edge(
+            edge_id=edge_id,
+            type="association",
+            relation="contradicts",
+            from_node=from_node,
+            to_node=to_node,
+        )
+
+
 class TestReviewCLI:
     """Integration tests for memex review and memex review list."""
-
-    def _add_contradicts_edge(self, store_dict, from_node: str, to_node: str):
-        """Open the db and create a contradicts edge to trigger an event."""
-        with _Store.open(store_dict["db"]) as s:
-            s.init_schema()
-            edge_id = str(uuid.uuid4())
-            s.create_edge(
-                edge_id=edge_id,
-                type="association",
-                relation="contradicts",
-                from_node=from_node,
-                to_node=to_node,
-            )
 
     def test_review_full_flow(self, store):
         """Register, derive, add contradicts edge, review, assert proposal JSON."""
@@ -50,7 +51,7 @@ class TestReviewCLI:
         derived = json.loads(derive_result.stdout)
         derived_id = derived["id"]
 
-        self._add_contradicts_edge(store, derived_id, l0_id)
+        _add_contradicts_edge(store, derived_id, l0_id)
 
         # memex review -- produces proposals
         review_result = _run_memex(
@@ -90,7 +91,7 @@ class TestReviewCLI:
         assert derive_result.returncode == 0, derive_result.stderr
         derived = json.loads(derive_result.stdout)
         derived_id = derived["id"]
-        self._add_contradicts_edge(store, derived_id, l0_id)
+        _add_contradicts_edge(store, derived_id, l0_id)
 
         result1 = _run_memex(
             ["review", "--db", str(store["db"]), "--vault", str(store["vault"])],
@@ -140,7 +141,7 @@ class TestReviewCLI:
             derive_result = _derive(store, node_id)
             assert derive_result.returncode == 0, derive_result.stderr
             derived = json.loads(derive_result.stdout)
-            self._add_contradicts_edge(store, derived["id"], node_id)
+            _add_contradicts_edge(store, derived["id"], node_id)
 
         THROWING_AGENT = "tests.fake_llm_client:FakeAgentThrowsOnReview"
         result = _run_memex(
@@ -168,7 +169,7 @@ class TestReviewCLI:
         derive_result = _derive(store, node_id)
         assert derive_result.returncode == 0, derive_result.stderr
         derived = json.loads(derive_result.stdout)
-        self._add_contradicts_edge(store, derived["id"], node_id)
+        _add_contradicts_edge(store, derived["id"], node_id)
         # Generate proposal
         review_result = _run_memex(
             ["review", "--db", str(store["db"]), "--vault", str(store["vault"])],
@@ -204,7 +205,7 @@ class TestReviewCLI:
         derive_result = _derive(store, node_id)
         assert derive_result.returncode == 0, derive_result.stderr
         derived = json.loads(derive_result.stdout)
-        self._add_contradicts_edge(store, derived["id"], node_id)
+        _add_contradicts_edge(store, derived["id"], node_id)
         review_result = _run_memex(
             ["review", "--db", str(store["db"]), "--vault", str(store["vault"])],
             env={"MEMEX_AGENT": FAKE_AGENT_VALID_REFS},
@@ -235,7 +236,7 @@ class TestReviewCLI:
         derive_result = _derive(store, node_id)
         assert derive_result.returncode == 0, derive_result.stderr
         derived = json.loads(derive_result.stdout)
-        self._add_contradicts_edge(store, derived["id"], node_id)
+        _add_contradicts_edge(store, derived["id"], node_id)
         review_result = _run_memex(
             ["review", "--db", str(store["db"]), "--vault", str(store["vault"])],
             env={"MEMEX_AGENT": FAKE_AGENT_VALID_REFS},
@@ -266,7 +267,7 @@ class TestReviewCLI:
         derive_result = _derive(store, node_id)
         assert derive_result.returncode == 0, derive_result.stderr
         derived = json.loads(derive_result.stdout)
-        self._add_contradicts_edge(store, derived["id"], node_id)
+        _add_contradicts_edge(store, derived["id"], node_id)
         review_result = _run_memex(
             ["review", "--db", str(store["db"]), "--vault", str(store["vault"])],
             env={"MEMEX_AGENT": FAKE_AGENT_VALID_REFS},
@@ -297,7 +298,7 @@ class TestReviewCLI:
         derive_result = _derive(store, node_id)
         assert derive_result.returncode == 0, derive_result.stderr
         derived = json.loads(derive_result.stdout)
-        self._add_contradicts_edge(store, derived["id"], node_id)
+        _add_contradicts_edge(store, derived["id"], node_id)
         review_result = _run_memex(
             ["review", "--db", str(store["db"]), "--vault", str(store["vault"])],
             env={"MEMEX_AGENT": FAKE_AGENT_VALID_REFS},
@@ -314,3 +315,68 @@ class TestReviewCLI:
                 "SELECT human_note FROM review_proposal WHERE id = ?", (pid,)
             ).fetchone()
             assert row["human_note"] is None
+
+
+class TestReviewPacket:
+    """Review receives compact node references, never full content files."""
+
+    @staticmethod
+    def _node(**overrides):
+        node = {
+            "id": "abc123",
+            "title": "The Article",
+            "source_url": "https://x.example/a",
+            "kind": "summary",
+            "tier": "notes",
+            "synthesis_statements": ["Claim one.", "Claim two."],
+        }
+        node.update(overrides)
+        return node
+
+    def test_packet_contains_metadata_and_statements(self):
+        from memex.services.review import ReviewService
+
+        packet = ReviewService._node_review_packet(self._node())
+        assert "abc123" in packet
+        assert "The Article" in packet
+        assert "https://x.example/a" in packet
+        assert "Claim one." in packet
+        assert "Claim two." in packet
+        # No full-content markers: the packet is metadata-only.
+        assert "# Extracted Body" not in packet
+
+    def test_packet_marks_l0_without_statements(self):
+        from memex.services.review import ReviewService
+
+        packet = ReviewService._node_review_packet(
+            self._node(title=None, source_url=None, kind="extracted",
+                       tier="extracted", synthesis_statements=None)
+        )
+        assert "(no title)" in packet
+        assert "no claims extracted" in packet
+
+    def test_review_succeeds_with_missing_content_files(self, store):
+        """Packet-based review works even when node content files are gone
+        (previously read full files and failed with FileNotFoundError)."""
+        r = register_node(store, store["vault"], "no-file.md",
+                          "https://example.com/nofile")
+        l0_id = json.loads(r.stdout)["id"]
+        derive_result = _derive(store, l0_id)
+        assert derive_result.returncode == 0, derive_result.stderr
+        derived_id = json.loads(derive_result.stdout)["id"]
+
+        # Delete BOTH content files from disk.
+        (store["vault"] / "no-file.md").unlink()
+        for md in (store["vault"] / "extracted").glob("*.md"):
+            md.unlink()
+
+        _add_contradicts_edge(store, derived_id, l0_id)
+
+        result = _run_memex(
+            ["review", "--db", str(store["db"]), "--vault", str(store["vault"])],
+            env={"MEMEX_AGENT": FAKE_AGENT_VALID_REFS},
+        )
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        assert data["processed"] >= 1
+        assert all(p["status"] == "proposed" for p in data["proposals"])

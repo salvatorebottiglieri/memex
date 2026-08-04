@@ -31,6 +31,7 @@ build-backend = "uv_build"
 dev = [
     "pytest>=9.1.1",
     "pypdf>=5.4.0",
+    "ruff>=0.15.0,<0.16",
 ]
 
 [tool.pytest.ini_options]

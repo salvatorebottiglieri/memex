@@ -10,9 +10,7 @@ import json
 import sqlite3
 import uuid
 
-from memex.store import Store
-
-from tests.conftest import _run_memex, register_node, WORKTREE, _store, _utcnow
+from tests.conftest import _run_memex, register_node, _store, _utcnow
 
 FAKE_AGENT = "tests.fake_llm_client:FakeAgent"
 
@@ -179,9 +177,8 @@ class TestShow:
 
 class TestList:
     def test_list_emits_confidence(self, store):
-        result = register_node(store, store["vault"], "article.md",
+        register_node(store, store["vault"], "article.md",
                                 "https://example.com/article")
-        ingested = json.loads(result.stdout)
         list_result = _run_memex(
             ["list", "--db", str(store["db"]), "--vault", str(store["vault"])],
         )

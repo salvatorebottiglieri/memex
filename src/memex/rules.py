@@ -18,6 +18,8 @@ from typing import Any
 
 MIN_CHARS = 100
 MAX_CHARS = 50_000
+# Synthesis nodes rest on many parents; allow triple the notes-tier ceiling.
+_SYNTH_MAX_CHARS = 150_000
 
 
 # ── Rule dataclass ─────────────────────────────────────────────────
@@ -230,15 +232,23 @@ def _d3_synthesis_check(
 def _d4_size_bounds(
     con: sqlite3.Connection, node_id: str, content_path: Path, content: str
 ) -> list[str]:
-    """D4: Content length between MIN_CHARS and MAX_CHARS."""
+    """D4: Content length between MIN_CHARS and MAX_CHARS.
+
+    Synthesis-tier nodes aggregate several parents and routinely exceed the
+    notes-tier cap — they get a wider ceiling.
+    """
+    row = con.execute(
+        "SELECT tier FROM node WHERE id = ?", (node_id,)
+    ).fetchone()
+    max_chars = _SYNTH_MAX_CHARS if row and row[0] == "synthesis" else MAX_CHARS
     length = len(content)
     if length < MIN_CHARS:
         return [
             f"Size check failed: derivation is too short ({length} chars, minimum is {MIN_CHARS})"
         ]
-    elif length > MAX_CHARS:
+    elif length > max_chars:
         return [
-            f"Size check failed: derivation is too long ({length} chars, maximum is {MAX_CHARS})"
+            f"Size check failed: derivation is too long ({length} chars, maximum is {max_chars})"
         ]
     return []
 

@@ -44,14 +44,22 @@ def _strip_tracking(query: str) -> str:
 
 
 def _youtube_id(parsed) -> str | None:
-    """Return the YouTube video id if this URL is a YouTube watch page, else None."""
+    """Return the YouTube video id if this URL is a YouTube watch page, else None.
+
+    Handles ``youtube.com``/``www.``/``m.`` hosts, ``/watch?v=`` and
+    ``/live/<id>`` paths, plus ``youtu.be/<id>`` shortlinks.
+    """
     host = parsed.netloc.lower()
-    if host in ("www.youtube.com", "youtube.com"):
+    if host in ("www.youtube.com", "youtube.com", "m.youtube.com"):
         if parsed.path == "/watch":
             params = parse_qs(parsed.query)
             ids = params.get("v")
             if ids:
                 return ids[0]
+        if parsed.path.startswith("/live/"):
+            vid = parsed.path[len("/live/") :].lstrip("/")
+            if vid:
+                return vid
     if host == "youtu.be":
         vid = parsed.path.lstrip("/")
         if vid:

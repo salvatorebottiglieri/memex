@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from memex.schemas import DerivationResult, ReviewProposal
+from memex.schemas import DerivationResult, DocumentRef, ReviewProposal
 
 
 class Agent(ABC):
@@ -17,11 +17,23 @@ class Agent(ABC):
     Implementations must provide at minimum ``derive()``, ``review()``, and
     ``extract_ideas()``. Optional overrides for ``generate_title()``.
 
+    ``can_read_files`` declares whether the agent can read source documents
+    itself (via a read tool). Reader agents receive a :class:`DocumentRef`
+    instead of inlined content — the document is read in multiple passes, so
+    sources of any length fit without a prompt cap.
+
     Subclasses are loaded via :func:`load_agent` using ``MEMEX_AGENT`` env var.
     """
 
+    can_read_files: bool = False
+
     @abstractmethod
-    def derive(self, content: str) -> DerivationResult:
+    def derive(
+        self,
+        content: str | None = None,
+        *,
+        reference: DocumentRef | None = None,
+    ) -> DerivationResult:
         ...
 
     @abstractmethod
@@ -37,10 +49,17 @@ class Agent(ABC):
         """Infer a human-readable title from content and URL. Return None to skip."""
         return None
 
-    def extract_ideas(self, content: str, source_url: str | None = None) -> list[str]:
+    def extract_ideas(
+        self,
+        content: str | None = None,
+        source_url: str | None = None,
+        *,
+        reference: DocumentRef | None = None,
+    ) -> list[str]:
         """Extract 3-5 key ideas from content. Return empty list by default.
 
         ``source_url`` is advisory (for context) — implementations may use or ignore it.
+        Reader agents may receive ``reference`` instead of ``content``.
         """
         return []
 

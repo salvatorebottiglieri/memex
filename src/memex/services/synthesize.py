@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from memex.agent import Agent, load_agent
+from memex.schemas import DocumentRef
 from memex.store import Store
 from memex.utils.retry import call_with_retry
 from memex.validators.validate import validate_derivation
@@ -59,6 +60,7 @@ class SynthesizerService:
         # --- Validate parents ---
         max_depth = 0
         contents: list[str] = []
+        references: list[DocumentRef] = []
         for pid in parent_ids:
             parent = self._store.get_node(pid)
             if parent is None:
@@ -73,17 +75,32 @@ class SynthesizerService:
                 contents.append(
                     Path(content_path).read_text(encoding="utf-8")
                 )
+                if getattr(self._agent, "can_read_files", False):
+                    references.append(
+                        DocumentRef(
+                            node_id=parent["id"],
+                            content_path=content_path,
+                            title=parent.get("title"),
+                            source_url=parent.get("source_url"),
+                            size_bytes=Path(content_path).stat().st_size,
+                        )
+                    )
             else:
                 contents.append("")
 
         combined_content = "\n\n---\n\n".join(contents)
 
         # --- Agent call ---
-        try:
-            def _deriv_fn():
-                return self._agent.derive(combined_content)
+        def _agent_derive():
+            kwargs = (
+                {"reference": references}
+                if references
+                else {"content": combined_content}
+            )
+            return self._agent.derive(**kwargs)
 
-            deriv = call_with_retry(_deriv_fn)
+        try:
+            deriv = call_with_retry(_agent_derive)
         except Exception as e:
             return {
                 "status": "error",
@@ -96,7 +113,8 @@ class SynthesizerService:
         # --- Adversarial validation gate ---
         if self._validator is not None:
             passes, warning = validate_derivation(
-                self._validator, combined_content, deriv
+                self._validator, combined_content, deriv,
+                reference=references or None,
             )
             if warning:
                 import json as _json
@@ -142,6 +160,7 @@ class SynthesizerService:
                 relation="derived_from",
                 from_node=deriv_id,
                 to_node=pid,
+                written_by="llm",
             )
 
         # Synthesis: confidence = min(parents' confidence)

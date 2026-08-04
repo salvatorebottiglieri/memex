@@ -7,6 +7,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -193,7 +194,6 @@ def register(db_path: Path, vault_path: Path, path: Path, source_url: str | None
     # --- Read & parse file ---
     text = path.read_text(encoding="utf-8")
     fm: dict[str, str] = {}
-    body_start = 0
     if text.startswith("---"):
         end = text.find("---", 3)
         if end != -1:
@@ -201,7 +201,6 @@ def register(db_path: Path, vault_path: Path, path: Path, source_url: str | None
                 fm = yaml.safe_load(text[3:end]) or {}
             except yaml.YAMLError:
                 _fail("invalid_frontmatter", path=str(path))
-            body_start = end + 3
 
     src = source_url or fm.get("source_url")
     if not src:
@@ -842,9 +841,26 @@ def extract_ideas(db_path: Path, vault_path: Path, node_id: str) -> None:
             click.echo(json.dumps({"error": "no_content", "detail": "Content file not found in vault; place the file and re-register."}))
             return
 
-        content = Path(node["content_path"]).read_text(encoding="utf-8")
+        content_path = Path(node["content_path"])
+        if getattr(agent, "can_read_files", False):
+            from memex.schemas import DocumentRef
+
+            reference = DocumentRef(
+                node_id=node_id,
+                content_path=str(content_path),
+                title=node.get("title"),
+                source_url=node.get("source_url"),
+                size_bytes=content_path.stat().st_size,
+            )
+            content = None
+        else:
+            reference = None
+            content = content_path.read_text(encoding="utf-8")
         try:
-            ideas = agent.extract_ideas(content, source_url=node.get("source_url"))
+            kwargs = {"content": content, "source_url": node.get("source_url")}
+            if reference is not None:
+                kwargs["reference"] = reference
+            ideas = agent.extract_ideas(**kwargs)
         except Exception as e:
             click.echo(json.dumps({"error": "agent_failed", "detail": str(e)}))
             return
@@ -934,7 +950,6 @@ def review_list(ctx: click.Context) -> None:
     from memex.store import Store
 
     db_path = ctx.parent.params["db_path"]
-    vault_path = ctx.parent.params["vault_path"]
     
     with Store.open(db_path) as store:
         queue = store.get_review_queue()
@@ -949,7 +964,6 @@ def review_accept(ctx: click.Context, proposal_id: int, note: str | None) -> Non
     """Accept a review proposal — mark affected nodes as stale, close event."""
     from memex.store import Store
     db_path = ctx.parent.params["db_path"]
-    vault_path = ctx.parent.params["vault_path"]
     
     with Store.open(db_path) as store:
         result = store.accept_proposal(proposal_id, human_note=note)
@@ -964,7 +978,6 @@ def review_reject(ctx: click.Context, proposal_id: int, note: str | None) -> Non
     """Reject a review proposal — close event, no trust_state changes."""
     from memex.store import Store
     db_path = ctx.parent.params["db_path"]
-    vault_path = ctx.parent.params["vault_path"]
     
     with Store.open(db_path) as store:
         result = store.reject_proposal(proposal_id, human_note=note)
@@ -979,7 +992,6 @@ def review_dismiss(ctx: click.Context, proposal_id: int, note: str | None) -> No
     """Dismiss a review proposal — close event, no trust_state changes."""
     from memex.store import Store
     db_path = ctx.parent.params["db_path"]
-    vault_path = ctx.parent.params["vault_path"]
     
     with Store.open(db_path) as store:
         result = store.dismiss_proposal(proposal_id, human_note=note)

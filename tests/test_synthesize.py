@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -25,7 +26,7 @@ def _ingest(store, url: str) -> dict:
     return json.loads(result.stdout)
 
 
-def _synthesize(store, *node_ids: str) -> "subprocess.CompletedProcess":  # type: ignore[name-defined]
+def _synthesize(store, *node_ids: str) -> subprocess.CompletedProcess:
     return _run_memex(
         ["synthesize", "--db", str(store["db"]), "--vault", str(store["vault"]), *node_ids],
         env={"MEMEX_AGENT": FAKE_AGENT},
