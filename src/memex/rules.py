@@ -122,6 +122,9 @@ EXTRACTED_CONFIDENCE: dict[str, str] = {
     "http": "medium",
     "youtube": "low",
     "pdf": "high",
+    # The REST summary is curated prose (parallel to pdf): it goes through
+    # MediaWiki's summarization pipeline, not raw HTML scraping.
+    "wikipedia": "high",
 }
 
 
