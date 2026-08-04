@@ -752,6 +752,50 @@ def contradict(db_path: Path, vault_path: Path, target_id: str, asserted_by: str
 
 @cli.command()
 @_db_options
+@click.argument("source_id")
+@click.argument("target_id")
+@click.option(
+    "--relation",
+    type=click.Choice(["related", "refines"]),
+    default="related",
+    help="Type of associative relation (default: related).",
+)
+def relate(db_path: Path, vault_path: Path, source_id: str, target_id: str, relation: str) -> None:
+    """Write an associative edge (related|refines) between two nodes.
+
+    No contestation propagation — associative edges other than contradicts
+    are purely informational. Both nodes must already exist.
+
+    Output JSON: ``{edge_id, source_id, target_id, relation, written_by}``.
+    """
+    import uuid
+
+    from memex.store import Store
+
+    if source_id == target_id:
+        _fail("cannot_relate_to_self", source=source_id, target=target_id)
+
+    edge_id = str(uuid.uuid4())
+    with Store.open(db_path) as store:
+        store.create_edge(
+            edge_id=edge_id,
+            type="association",
+            relation=relation,
+            from_node=source_id,
+            to_node=target_id,
+            written_by="human",
+        )
+    click.echo(json.dumps({
+        "edge_id": edge_id,
+        "source_id": source_id,
+        "target_id": target_id,
+        "relation": relation,
+        "written_by": "human",
+    }))
+
+
+@cli.command()
+@_db_options
 @click.argument("node_id")
 @click.option("--cascade", is_flag=True, default=False, help="Remove node and all provenance descendants transitively.")
 def delete(db_path: Path, vault_path: Path, node_id: str, cascade: bool) -> None:
@@ -886,5 +930,42 @@ def _install_sync_hooks(vault_path: Path) -> None:
     )
     hook.chmod(0o755)
     click.echo(json.dumps({"hook_installed": str(hook)}))
+
+
+@cli.command()
+@click.option("--check", is_flag=True, default=False, help="Check if file matches registry (exit 1 if not).")
+def ontology(check: bool) -> None:
+    """Generate docs/ONTOLOGY.md from the Rule registry."""
+    from memex.rules import render_ontology
+
+    # Find project root by walking up from cwd looking for pyproject.toml
+    cwd = Path.cwd()
+    root = cwd
+    for parent in [cwd] + list(cwd.parents):
+        if (parent / "pyproject.toml").exists():
+            root = parent
+            break
+
+    path = root / "docs" / "ONTOLOGY.md"
+
+    generated = render_ontology()
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    if check:
+        if path.exists():
+            current = path.read_text(encoding="utf-8")
+            if current == generated:
+                click.echo(json.dumps({"status": "identical", "path": str(path)}))
+                return
+        click.echo(json.dumps({"status": "drifted", "path": str(path)}))
+        raise SystemExit(1)
+    else:
+        if path.exists() and path.read_text(encoding="utf-8") == generated:
+            click.echo(json.dumps({"status": "identical", "path": str(path)}))
+        else:
+            path.write_text(generated, encoding="utf-8")
+            click.echo(json.dumps({"status": "written", "path": str(path)}))
+
+
 if __name__ == "__main__":
     cli()
