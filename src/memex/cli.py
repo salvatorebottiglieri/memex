@@ -322,8 +322,8 @@ def cookies_export(domain: str, output: str | None) -> None:
 
 @cli.command("list")
 @_db_options
-@click.option("--kind", default=None, help="Filter by node kind (e.g. raw_source, summary).")
-@click.option("--tier", default=None, help="Filter by node tier (e.g. notes, synthesis).")
+@click.option("--kind", default=None, help="Filter by node kind (raw_source, url, extracted, summary). URL nodes are hidden unless --kind url is given.")
+@click.option("--tier", default=None, help="Filter by node tier (e.g. notes, synthesis, extracted).")
 @click.option("--trust-state", "trust_state", default=None, help="Filter by trust state (draft, auto-verified, human-approved, stale).")
 @click.option("--confidence", default=None, help="Filter by confidence (high, medium, low).")
 @click.option(
@@ -338,7 +338,7 @@ def list_nodes(db_path: Path, vault_path: Path,
                kind: str | None, tier: str | None, trust_state: str | None,
                confidence: str | None, synthesis_statement: str | None,
                limit: int | None, offset: int | None) -> None:
-    """Return JSON array of all nodes."""
+    """Return JSON array of nodes (URL nodes hidden unless --kind url is given)."""
     from memex.store import Store
 
     
@@ -365,23 +365,49 @@ def show(db_path: Path, vault_path: Path, node_id: str) -> None:
     """Return JSON with a node's content, metadata, trust state, and provenance (read-only)."""
     from memex.store import Store
 
-    
     with Store.open(db_path) as store:
         node = store.get_node(node_id)
 
-    if node is None:
-        _fail("not_found", id=node_id)
+        if node is None:
+            _fail("not_found", id=node_id)
 
-    # Load file content (stays in CLI — ADR-0008: markdown owns content)
-    content = None
-    if node.get("content_path"):
-        p = Path(node["content_path"])
-        if p.exists():
-            content = p.read_text(encoding="utf-8")
+        # URL nodes are zero-content roots: metadata only, no content file,
+        # trust state, confidence, or tier. Children = nodes deriving from it.
+        if node.get("kind") == "url":
+            children = sorted(
+                e["from_node"]
+                for e in store.list_edges(node_id=node_id, type="provenance",
+                                          relation="derived_from")
+                if e["to_node"] == node_id
+            )
+            click.echo(json.dumps({
+                "id": node["id"],
+                "kind": node["kind"],
+                "depth": node["depth"],
+                "created_at": node["created_at"],
+                "canonical_key": node.get("canonical_key"),
+                "source_url": node.get("source_url"),
+                "title": node.get("title"),
+                "children": children,
+            }))
+            return
 
-    node["content"] = content
-    node["l0_path"] = node.pop("content_path", None) or None
-    click.echo(json.dumps(node))
+        # Load file content (stays in CLI — ADR-0008: markdown owns content)
+        content = None
+        if node.get("content_path"):
+            p = Path(node["content_path"])
+            if p.exists():
+                content = p.read_text(encoding="utf-8")
+
+        node["content"] = content
+        node["l0_path"] = node.pop("content_path", None) or None
+
+        # Extracted nodes: surface the URL parent id (provenance derived_from edge).
+        if node.get("kind") == "extracted":
+            url_parent = store.find_url_parent(node_id)
+            node["url_parent_id"] = url_parent["id"] if url_parent else None
+
+        click.echo(json.dumps(node))
 
 
 @cli.command()

@@ -485,6 +485,10 @@ class Store:
 
         Optional filters: kind, tier, trust_state, confidence, limit, offset.
 
+        ``kind`` defaults to excluding URL nodes (they are roots, not viewing
+        surfaces); pass ``kind='url'`` to include them. The exclusion happens
+        in the WHERE clause so limit/offset pagination stays correct.
+
         Returns the same per-node fields as ``get_node``: ``{id, kind, tier,
         trust_state, depth, content_path, created_at, confidence, check_failures,
         synthesis_statements, is_contested, contested_at, fetcher_type,
@@ -492,7 +496,9 @@ class Store:
         """
         clauses: list[str] = []
         params: list[Any] = []
-        if kind is not None:
+        if kind is None:
+            clauses.append("n.kind != 'url'")
+        else:
             clauses.append("n.kind = ?")
             params.append(kind)
         if tier is not None:
@@ -1057,6 +1063,26 @@ class Store:
         ).fetchone()
         return dict(row) if row is not None else None
 
+    def find_url_parent(self, node_id: str) -> dict[str, Any] | None:
+        """Return the node targeted by the first outgoing provenance derived_from edge.
+
+        Extracted nodes carry no source row — their source_url/title live on
+        the URL node referenced by their outgoing ``derived_from`` edge.
+        Returns the full parent node dict (via ``get_node``) or ``None`` when
+        no such edge exists.
+        """
+        row = self._con.execute(
+            """
+            SELECT to_node FROM edge
+            WHERE from_node = ? AND type = 'provenance' AND relation = 'derived_from'
+            LIMIT 1
+            """,
+            (node_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return self.get_node(row["to_node"])
+
     def find_synthesis_by_parents(self, parent_ids: list[str]) -> dict | None:
         """Find a synthesis node whose unordered derived_from set matches *exactly*.
 
@@ -1232,8 +1258,12 @@ class Store:
                 "SELECT kind, COUNT(*) FROM node GROUP BY kind ORDER BY kind"
             ).fetchall())
 
+            # URL nodes have tier NULL — group by COALESCE(tier, kind) so they
+            # appear under their own 'url' key instead of being lumped into
+            # the legacy 'raw_source' bucket.
             by_tier = dict(self._con.execute(
-                "SELECT COALESCE(tier, 'raw_source'), COUNT(*) FROM node GROUP BY tier ORDER BY tier"
+                "SELECT COALESCE(tier, kind), COUNT(*) FROM node "
+                "GROUP BY COALESCE(tier, kind) ORDER BY COALESCE(tier, kind)"
             ).fetchall())
 
             by_trust = dict(self._con.execute(
@@ -1244,19 +1274,23 @@ class Store:
                 "SELECT COALESCE(confidence, 'unset'), COUNT(*) FROM node GROUP BY confidence"
             ).fetchall())
 
-            # Derivation coverage: pct of L0 nodes with at least one derivation
-            l0_total = self._con.execute(
-                "SELECT COUNT(*) FROM node WHERE kind = 'raw_source' AND tier IS NULL"
+            # Roots are URL nodes; coverage measures how many extracted nodes
+            # carry a provenance derived_from edge (ticket #98).
+            roots = self._con.execute(
+                "SELECT COUNT(*) FROM node WHERE kind = 'url'"
             ).fetchone()[0]
-            l0_derived = self._con.execute(
+            extracted_total = self._con.execute(
+                "SELECT COUNT(*) FROM node WHERE kind = 'extracted'"
+            ).fetchone()[0]
+            extracted_derived = self._con.execute(
                 """
-                SELECT COUNT(DISTINCT e.to_node) FROM edge e
-                JOIN node n ON n.id = e.to_node
+                SELECT COUNT(DISTINCT e.from_node) FROM edge e
+                JOIN node n ON n.id = e.from_node
                 WHERE e.type = 'provenance' AND e.relation = 'derived_from'
-                  AND n.kind = 'raw_source' AND n.tier IS NULL
+                  AND n.kind = 'extracted'
                 """
             ).fetchone()[0]
-            coverage = round(l0_derived / l0_total * 100, 1) if l0_total > 0 else 0.0
+            coverage = round(extracted_derived / extracted_total * 100, 1) if extracted_total > 0 else 0.0
 
             pending_reviews = self._con.execute(
                 "SELECT COUNT(*) FROM event_queue WHERE status = 'pending'"
@@ -1266,6 +1300,7 @@ class Store:
 
             return {
                 "total_nodes": total,
+                "roots": roots,
                 "by_kind": by_kind,
                 "by_tier": by_tier,
                 "by_trust_state": by_trust,

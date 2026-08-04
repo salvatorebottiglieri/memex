@@ -60,6 +60,10 @@ def _build_frontmatter(node: dict[str, Any], body: str, store: Store) -> dict[st
     fm["created_at"] = node["created_at"]
     fm["confidence"] = node["confidence"]
 
+    # Extracted nodes carry no source row: source_url/title (and the display
+    # title for aliases) come from the URL node they derive from.
+    url_parent = _url_parent(node, store) if node.get("kind") == "extracted" else None
+
     # ── Tags ─────────────────────────────────────────────────────
     tags = [f"kind/{node['kind']}"]
     trust_state = node.get("trust_state")
@@ -73,7 +77,10 @@ def _build_frontmatter(node: dict[str, Any], body: str, store: Store) -> dict[st
     fm["tags"] = tags
 
     # ── Aliases ──────────────────────────────────────────────────
-    alias = _resolve_alias(node, body)
+    alias_source = node
+    if url_parent is not None and url_parent.get("title"):
+        alias_source = {**node, "title": url_parent["title"]}
+    alias = _resolve_alias(alias_source, body)
     if alias:
         fm["aliases"] = [alias]
 
@@ -81,8 +88,15 @@ def _build_frontmatter(node: dict[str, Any], body: str, store: Store) -> dict[st
     if node.get("kind") == "raw_source":
         fm["source_url"] = node.get("source_url") or ""
         fm["title"] = node.get("title") or ""
+    elif node.get("kind") == "extracted":
+        # L0-style: source_url/title from the URL parent's source row
+        # (lookup: provenance derived_from edge -> URL node -> its source row).
+        fm["source_url"] = (url_parent or {}).get("source_url") or ""
+        fm["title"] = (url_parent or {}).get("title") or ""
 
     # ── Derivation-specific fields ───────────────────────────────
+    # Only raw_source is excluded here — URL nodes are skipped before
+    # frontmatter (no content_path), so extracted emits trust_state/tier.
     is_derivation = node.get("kind") != "raw_source"
     if is_derivation and trust_state:
         fm["trust_state"] = trust_state
@@ -109,7 +123,12 @@ def _build_frontmatter(node: dict[str, Any], body: str, store: Store) -> dict[st
     rel_groups: dict[str, list[str]] = []
     for e in edges:
         rel = e["relation"]
-        target = store.get_node(e["to_node"])
+        # The URL parent was already fetched above (find_url_parent); reuse it
+        # instead of re-querying for the derived_from edge target.
+        if url_parent is not None and e["to_node"] == url_parent["id"]:
+            target = url_parent
+        else:
+            target = store.get_node(e["to_node"])
         # Filename: stem of the target's content_path. Falls back to the
         # UUID as a last resort (Obsidian will then create an empty file
         # with that name — the user will notice and we can fix it).
@@ -133,6 +152,15 @@ def _build_frontmatter(node: dict[str, Any], body: str, store: Store) -> dict[st
             fm[rel] = [existing, wikilink]
 
     return fm
+
+
+def _url_parent(node: dict[str, Any], store: Store) -> dict[str, Any] | None:
+    """Return the URL node this node derives from (provenance edge target).
+
+    Extracted nodes have no source row — their source_url/title live on the
+    URL node referenced by their outgoing ``derived_from`` edge.
+    """
+    return store.find_url_parent(node["id"])
 
 
 def _resolve_alias(node: dict[str, Any], body: str) -> str | None:

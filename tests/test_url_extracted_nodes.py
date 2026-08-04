@@ -406,7 +406,9 @@ class TestCreateExtractedNode:
         store.create_node(node_id=str(uuid.uuid4()), kind="raw_source")
         assert len(store.list_nodes(kind="url")) == 1
         assert len(store.list_nodes(kind="extracted")) == 1
-        assert len(store.list_nodes()) == 3
+        # Ticket #98: the default list excludes URL nodes (roots are not
+        # viewing surfaces); they are only returned via the explicit filter.
+        assert len(store.list_nodes()) == 2
 
 
 # ── Source binding ─────────────────────────────────────────────────────
