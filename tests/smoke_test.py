@@ -6,6 +6,12 @@ Each test is a small sequence of CLI invocations + assertions on stdout/exit.
 This is *not* a pytest module — invoke directly:
 
     uv run python tests/smoke_test.py
+
+Environment contract: the suite is hermetic — it must run with NO ambient
+``MEMEX_DB`` / ``MEMEX_VAULT`` set, because ``smoke_auto_defaults`` asserts
+that ``--vault`` alone derives ``<vault>/.memex/memex.db`` (cli.py prefers
+the env vars over derivation). We unset them below so the assumption is
+enforced, not just documented; per-call ``env=`` overrides still win.
 """
 from __future__ import annotations
 
@@ -18,6 +24,12 @@ import sys
 import tempfile
 import uuid
 from pathlib import Path
+
+# Hermetic env contract — see module docstring. Ambient MEMEX_DB/MEMEX_VAULT
+# would override vault-derived paths in cli.py and break the auto-defaults
+# assertions; explicit env= overrides passed to _run() still take precedence.
+os.environ.pop("MEMEX_DB", None)
+os.environ.pop("MEMEX_VAULT", None)
 
 REPO = Path(__file__).resolve().parent.parent
 FAKE_AGENT = "tests.fake_llm_client:FakeAgent"
