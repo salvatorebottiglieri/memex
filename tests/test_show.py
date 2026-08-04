@@ -37,18 +37,20 @@ def test_show_includes_content(store):
 
 
 def test_show_includes_canonical_key(store):
+    """The source row (canonical_key) lives on the URL-node of the pair."""
     result = register_node(store, store["vault"], "article.md", "https://example.com/article?utm_source=test")
     ingested = json.loads(result.stdout)
-    result2 = show(store, ingested["id"])
+    result2 = show(store, ingested["url_node_id"])
     data = json.loads(result2.stdout)
     assert data["canonical_key"] == "https://example.com/article"
 
 
 def test_show_includes_source_url(store):
+    """The source row (source_url) lives on the URL-node of the pair."""
     url = "https://example.com/article"
     result = register_node(store, store["vault"], "article.md", url)
     ingested = json.loads(result.stdout)
-    result2 = show(store, ingested["id"])
+    result2 = show(store, ingested["url_node_id"])
     data = json.loads(result2.stdout)
     assert data["source_url"] == url
 

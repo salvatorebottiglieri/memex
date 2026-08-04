@@ -150,32 +150,35 @@ class TestRenderL0:
         assert result == []
 
     def test_render_l0_node(self, store):
-        """Ingest an L0 node, render, assert frontmatter."""
+        """Register a file, render, assert frontmatter of the extracted node."""
         data = _ingest(store, "https://example.com/article")
-        node_id = data["id"]
+        node_id = data["id"]  # extracted node
         results = _render(store)
-        assert len(results) == 1
-        assert results[0]["node_id"] == node_id
-        assert results[0]["status"] == "rendered"
+        # URL-node is skipped (no content_path), extracted node is rendered
+        assert len(results) == 2
+        statuses = {r["node_id"]: r["status"] for r in results}
+        assert statuses[node_id] == "rendered"
+        assert statuses[data["url_node_id"]] == "skipped"
 
         md_path = _md_path(store, data)
         fm, body = _read_frontmatter(md_path)
 
         assert fm["id"] == node_id
-        assert fm["kind"] == "raw_source"
-        assert fm["depth"] == 0
+        assert fm["kind"] == "extracted"
+        assert fm["depth"] == 1
         assert "created_at" in fm
-        # confidence should be present for all nodes
-        assert fm["confidence"] in ("high", "medium", "low")
-        assert fm["confidence"] == "low"  # L0 (raw_source, no tier) defaults to low
+        # no fetcher on manual registration -> confidence stays unset
+        assert fm.get("confidence") is None
         assert "tags" in fm
-        assert "kind/raw_source" in fm["tags"]
-        assert fm["source_url"] == "https://example.com/article"
-        assert fm["title"] == "Test Article"
-        # trust_state and tier should not be present for L0 nodes
-        assert fm.get("trust_state") is None
-        assert fm.get("tier") is None
-        # aliases should contain the title
+        assert "kind/extracted" in fm["tags"]
+        # the extracted node carries tier + trust_state + the provenance edge
+        assert fm["tier"] == "extracted"
+        assert fm["trust_state"] == "draft"
+        assert "derived_from" in fm
+        # source_url/title live on the URL-node's source row, not in the file
+        assert "source_url" not in fm
+        assert "title" not in fm
+        # aliases come from the body H1
         assert "Test Article" in fm.get("aliases", [])
 
     def test_render_l0_body_preserved(self, store):
@@ -195,15 +198,25 @@ class TestRenderL0:
         assert "This is a longer article body" in body
 
     def test_render_l0_preserves_original_source_url(self, store):
-        """Render preserves the original source_url (canonical key tracks separately)."""
+        """Render preserves the original source_url on the URL-node's source row."""
         data = _ingest(store, "https://example.com/article?utm_source=twitter")
-        node_id = data["id"]
         _render(store)
 
-        md_path = _md_path(store, data)
-        fm, _ = _read_frontmatter(md_path)
-        # The source_url preserves the original, canonical_key is separate
-        assert fm["source_url"] == "https://example.com/article?utm_source=twitter"
+        # The source row on the URL-node keeps the original URL; the
+        # canonical_key tracks separately.
+        con = sqlite3.connect(store["db"])
+        row = con.execute(
+            "SELECT source_url, canonical_key FROM source WHERE node_id = ?",
+            (data["url_node_id"],),
+        ).fetchone()
+        con.close()
+        assert row[0] == "https://example.com/article?utm_source=twitter"
+        assert row[1] == "https://example.com/article"
+
+        # The renderer writes source_url only for legacy raw_source L0s, so
+        # the extracted file's frontmatter carries no source_url.
+        fm, _ = _read_frontmatter(_md_path(store, data))
+        assert "source_url" not in fm
 
     def test_render_l0_with_alias_from_h1(self, store):
         """If no title, aliases should use the first H1 in body."""
@@ -229,22 +242,25 @@ class TestRenderDerivation:
         deriv_id = d_data["id"]
 
         results = _render(store)
-        assert len(results) == 2  # L0 + derivation
+        # url (skipped) + extracted + derivation
+        assert len(results) == 3
         statuses = {r["node_id"]: r["status"] for r in results}
         assert statuses[l0_id] == "rendered"
         assert statuses[deriv_id] == "rendered"
+        assert statuses[data["url_node_id"]] == "skipped"
 
         md_path = _md_path(store, d_data)
         fm, body = _read_frontmatter(md_path)
 
         assert fm["id"] == deriv_id
         assert fm["kind"] == "summary"
-        assert fm["depth"] == 1
+        assert fm["depth"] == 2  # derived from an extracted (depth=1) node
         assert "trust_state" in fm
         assert fm["tier"] == "notes"
         assert "tags" in fm
         assert "kind/summary" in fm["tags"]
-        assert "trust_state/auto-verified" in fm["tags"]
+        # legacy D5 (notes=1) keeps depth-2 notes derivations in draft
+        assert "trust_state/draft" in fm["tags"]
         assert "tier/notes" in fm["tags"]
         # check_failures should be present for derivation nodes
         assert "check_failures" in fm
@@ -366,13 +382,16 @@ class TestRenderEdgeWikilinks:
         fm, _ = _read_frontmatter(md_path)
 
         assert "derived_from" in fm, f"Expected derived_from in {fm}"
-        # Renderer emits `[[<target-filename>|<title>]]`. Obsidian resolves
-        # wikilinks by filename; the title (after |) is the display text.
-        assert fm["derived_from"] == "[[article|Test Article]]", \
+        # Renderer emits `[[<target-filename>|<alias>]]`. Obsidian resolves
+        # wikilinks by filename; the alias (after |) is the display text.
+        # The extracted node has no source title (no source row), so the
+        # alias falls back to its node id.
+        assert fm["derived_from"] == f"[[article|{l0_id}]]", \
             f"got {fm['derived_from']!r}"
-        # L0 node should NOT have derived_from (it's the target, not source)
+        # The extracted node points back at the URL-node via its own
+        # derived_from (title comes from the URL-node's source row).
         l0_fm, _ = _read_frontmatter(_md_path(store, data))
-        assert "derived_from" not in l0_fm
+        assert l0_fm["derived_from"] == f"[[{data['url_node_id']}|Test Article]]"
 
     def test_related_edge_yields_wikilink(self, store):
         """Node with outgoing related edge renders related: [[uuid]]."""
@@ -434,17 +453,18 @@ class TestRenderEdgeWikilinks:
         assert f"[[{node_c}|{node_c}]]" in rel
 
     def test_node_with_no_edges_unchanged(self, store):
-        """Node with zero outgoing edges produces same frontmatter as slice 1."""
+        """Registered node: slice-1 fields plus the pair's derived_from edge."""
         data = _ingest(store, "https://example.com/article")
         _render(store)
 
         md_path = _md_path(store, data)
         fm, _ = _read_frontmatter(md_path)
 
-        # Should have slice 1 fields but no edge fields
+        # The extracted node has the provenance edge to its URL-node, and
+        # no association edges.
         assert "id" in fm
         assert "kind" in fm
-        assert "derived_from" not in fm
+        assert "derived_from" in fm
         assert "related" not in fm
         assert "contradicts" not in fm
         assert "refines" not in fm
@@ -489,12 +509,14 @@ def test_render_multiple_types(store):
     _derive(store, l0_2["id"])
 
     results = _render(store)
-    assert len(results) == 4  # 2 L0 + 2 derivations
+    assert len(results) == 6  # 2 url + 2 extracted + 2 derivations
     for r in results:
         assert r["status"] in ("rendered", "skipped")
 
-    # Check a derivation's frontmatter
+    # Check the rendered nodes' frontmatter (skipped URL-nodes have no file)
     for r in results:
+        if r["status"] != "rendered":
+            continue
         fm, _ = _read_frontmatter(_md_path(store, r["node_id"]))
         assert "id" in fm
         assert "kind" in fm

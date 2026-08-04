@@ -160,6 +160,7 @@ class TestListNodes:
 
 class TestShow:
     def test_show_emits_confidence(self, store):
+        """A manually registered extracted node has no fetcher -> no confidence."""
         result = register_node(store, store["vault"], "article.md",
                                 "https://example.com/article")
         ingested = json.loads(result.stdout)
@@ -170,7 +171,8 @@ class TestShow:
         assert show_result.returncode == 0, show_result.stderr
         data = json.loads(show_result.stdout)
         assert "confidence" in data
-        assert data["confidence"] == "low"
+        # Extracted confidence comes from fetcher_type (#77); register has none.
+        assert data["confidence"] is None
 
 
 # ── CLI list ────────────────────────────────────────────────────────────
@@ -270,13 +272,17 @@ class TestSynthesizeConfidence:
         # min(medium, medium) = medium
         assert row[0] == "medium"
 
-    def test_synthesize_confidence_from_low_parent(self, store):
-        """Synthesize from medium + low → low (min)."""
+    def test_synthesize_confidence_ignores_no_confidence_parent(self, store):
+        """Synthesize from medium + no-confidence parent → medium.
+
+        A registered (extracted) node has no confidence (no fetcher_type), so
+        the min rule only considers parents that carry a confidence.
+        """
         a = self._ingest(store, "https://example.com/article-a")
         b = self._ingest(store, "https://example.com/article-b")
         da = self._derive(store, a["id"])
         assert da.returncode == 0
-        # Use an L0 (low confidence) as second parent
+        # Registered nodes (extracted) have confidence None — not a 'low' parent
         result = self._synthesize(store, json.loads(da.stdout)["id"], b["id"])
         assert result.returncode == 0, result.stderr
         data = json.loads(result.stdout)
@@ -288,8 +294,8 @@ class TestSynthesizeConfidence:
         ).fetchone()
         con.close()
         assert row is not None
-        # min(medium, low) = low
-        assert row[0] == "low"
+        # min(medium, None) = medium
+        assert row[0] == "medium"
 # ── Contradicts cascade ────────────────────────────────────────────
 
 class TestContradictsCascade:

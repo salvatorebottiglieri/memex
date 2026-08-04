@@ -129,6 +129,47 @@ def _register_file(
     return path
 
 
+def _seed_raw_source(db: Path, vault: Path, n: int, prefix: str = "raw") -> list[str]:
+    """Insert n legacy raw_source L0 nodes directly (expand phase).
+
+    ``memex register`` now produces url+extracted pairs; ``derive --all``
+    still processes raw_source nodes, so seed those fixtures directly to
+    exercise the batch mode.
+    """
+    import uuid as _uuid
+    from datetime import datetime, timezone
+
+    node_ids: list[str] = []
+    con = sqlite3.connect(str(db))
+    now = datetime.now(timezone.utc).isoformat()
+    for i in range(n):
+        node_id = str(_uuid.uuid4())
+        md = vault / f"{prefix}-{i}.md"
+        md.write_text(
+            f"---\nsource_url: https://example.com/{prefix}-{i}\ntitle: Title {i}\n---\n\n"
+            f"# {prefix}-{i}\n\n"
+            f"Fake content for raw_source fixture {i}.\n\n"
+            f"This is a longer article body that exceeds the minimum character threshold "
+            f"of one hundred characters so that the L0 markdown file gets created in tests.",
+            encoding="utf-8",
+        )
+        con.execute(
+            "INSERT INTO node (id, kind, tier, trust_state, depth, content_path, created_at, confidence) "
+            "VALUES (?, 'raw_source', NULL, 'draft', 0, ?, ?, 'low')",
+            (node_id, str(md), now),
+        )
+        con.execute(
+            "INSERT INTO source (node_id, canonical_key, source_url, title, fetched_at, failed) "
+            "VALUES (?, ?, ?, ?, NULL, 0)",
+            (node_id, f"https://example.com/{prefix}-{i}",
+             f"https://example.com/{prefix}-{i}", f"Title {i}"),
+        )
+        node_ids.append(node_id)
+    con.commit()
+    con.close()
+    return node_ids
+
+
 # ── smoke groups ─────────────────────────────────────────────────
 
 
@@ -156,13 +197,17 @@ def smoke_lifecycle(tmp: Path) -> None:
 
     proc = _run(["list", "--db", str(db), "--vault", str(vault)])
     lst = _expect_json("list", proc)
-    _check("list returns 1 node", len(lst) == 1, f"got {len(lst)}")
+    _check("list returns 2 nodes (url + extracted)", len(lst) == 2, f"got {len(lst)}")
     _check("list node has expected fields",
            set(lst[0].keys()) >= {"id", "kind", "tier", "trust_state", "canonical_key"})
-    _check("list node kind=raw_source", lst[0]["kind"] == "raw_source")
-    _check("list node trust_state=draft", lst[0]["trust_state"] == "draft")
+    # URL-node first (created first): carries the source, no trust state
+    _check("list node kind=url", lst[0]["kind"] == "url")
+    _check("list url node trust_state=None", lst[0]["trust_state"] is None)
     _check("list node canonical_key matches source_url",
            lst[0]["canonical_key"] == "https://example.com/article")
+    # Extracted node: the content-bearing L0 of the pair, still draft
+    _check("list extracted node kind=extracted", lst[1]["kind"] == "extracted")
+    _check("list extracted node trust_state=draft", lst[1]["trust_state"] == "draft")
 
     proc = _run(["show", "--db", str(db), "--vault", str(vault), node_id])
     sh = _expect_json("show", proc)
@@ -188,12 +233,12 @@ def smoke_idempotency(tmp: Path) -> None:
     n = con.execute("SELECT COUNT(*) FROM node").fetchone()[0]
     s = con.execute("SELECT COUNT(*) FROM source").fetchone()[0]
     con.close()
-    _check("exactly 1 node row", n == 1, f"got {n}")
+    _check("exactly 2 node rows (url + extracted)", n == 2, f"got {n}")
     _check("exactly 1 source row", s == 1, f"got {s}")
 
 
 def smoke_derive_passing(tmp: Path) -> None:
-    print("\n[DERIVE PASS] derive -> auto-verified")
+    print("\n[DERIVE PASS] derive on extracted -> draft (legacy D5 notes=1)")
     db, vault = _fresh_store(tmp, "deriveok")
     md_path = _register_file(vault, "deriveok.md", "https://example.com/article")
     p = _run(["register", "--db", str(db), "--vault", str(vault), str(md_path)])
@@ -203,15 +248,17 @@ def smoke_derive_passing(tmp: Path) -> None:
              env={"MEMEX_AGENT": FAKE_AGENT})
     d = _expect_json("derive", p)
     _check("derive status=derived", d.get("status") == "derived")
-    _check("trust_state=auto-verified", d.get("trust_state") == "auto-verified")
-    _check("check_failures empty", d.get("check_failures") == [])
+    # Derived from an extracted node (depth=1) the notes derivation lands at
+    # depth=2; the legacy D5 rule (notes=1) keeps it in draft.
+    _check("trust_state=draft (D5 notes=1 is legacy)", d.get("trust_state") == "draft")
+    _check("check_failures populated (D5)", len(d.get("check_failures", [])) >= 1)
     deriv_id = d["id"]
 
     # show surfaces trust_state + check_failures
     p = _run(["show", "--db", str(db), "--vault", str(vault), deriv_id])
     sh = _expect_json("show derivation", p)
-    _check("show trust_state=auto-verified", sh["trust_state"] == "auto-verified")
-    _check("show check_failures=[]", sh["check_failures"] == [])
+    _check("show trust_state=draft", sh["trust_state"] == "draft")
+    _check("show check_failures non-empty", len(sh["check_failures"]) >= 1)
 
     # Edges in DB
     con = sqlite3.connect(db)
@@ -227,7 +274,8 @@ def smoke_derive_passing(tmp: Path) -> None:
     # list includes the derivation
     p = _run(["list", "--db", str(db), "--vault", str(vault)])
     lst = _expect_json("list with derivation", p)
-    _check("list has 2 nodes (l0 + derivation)", len(lst) == 2, f"got {len(lst)}")
+    _check("list has 3 nodes (url + extracted + derivation)", len(lst) == 3,
+           f"got {len(lst)}")
 
     # Derivation markdown exists and has synthesis marker
     deriv_path = _node_file(db, deriv_id)
@@ -286,20 +334,24 @@ def smoke_derive_idempotent(tmp: Path) -> None:
 
 
 def smoke_derive_all(tmp: Path) -> None:
-    print("\n[DERIVE ALL] derive --all batch mode")
+    print("\n[DERIVE ALL] derive --all batch mode (raw_source L0s)")
     db, vault = _fresh_store(tmp, "deriveall")
     env = {"MEMEX_AGENT": FAKE_AGENT}
 
-    # Register 3 files
+    # Register 3 files — each yields a url+extracted pair; batch derive
+    # (still raw_source-only) has nothing to do for them.
     for i in range(3):
         md_path = _register_file(vault, f"deriveall-{i}.md", f"https://example.com/article-{i}")
         p = _run(["register", "--db", str(db), "--vault", str(vault), str(md_path)])
         _expect_json(f"register {i}", p)
 
-    p = _run(["list", "--db", str(db), "--vault", str(vault)])
-    lst = _expect_json("list", p)
-    l0_ids = [r["id"] for r in lst]
-    _check("3 L0 nodes", len(l0_ids) == 3)
+    p = _run(["derive", "--db", str(db), "--vault", str(vault), "--all"], env=env)
+    res = _expect_json("derive --all (url+extracted only)", p)
+    _check("derive --all ignores url/extracted pairs", res == [], f"got {res}")
+
+    # Seed legacy raw_source L0s directly and exercise the batch mode
+    l0_ids = _seed_raw_source(db, vault, 3, prefix="raw")
+    _check("3 raw_source L0s seeded", len(l0_ids) == 3)
 
     p = _run(["derive", "--db", str(db), "--vault", str(vault), l0_ids[0]], env=env)
     d = _expect_json("manual derive", p)
@@ -449,8 +501,11 @@ def smoke_render(tmp: Path) -> None:
 
     p = _run(["render", "--db", str(db), "--vault", str(vault)])
     res = _expect_json("render L0", p)
-    _check("render returns 1 result", len(res) == 1, f"got {len(res)}")
-    _check("render status=rendered", res[0]["status"] == "rendered")
+    _check("render returns 2 results (url skipped + extracted rendered)",
+           len(res) == 2, f"got {len(res)}")
+    _check("render statuses", {r["status"] for r in res} == {"rendered", "skipped"})
+    extracted_res = next(r for r in res if r["status"] == "rendered")
+    _check("render extracted node rendered", extracted_res["status"] == "rendered")
 
     # Frontmatter is valid YAML with expected fields
     md_files = list(vault.glob("*.md"))
@@ -461,33 +516,34 @@ def smoke_render(tmp: Path) -> None:
     _, fm_raw, _ = text.split("---\n", 2)
     fm = yaml.safe_load(fm_raw)
     _check("frontmatter has id", "id" in fm)
-    _check("frontmatter has kind=raw_source", fm.get("kind") == "raw_source")
-    _check("frontmatter has depth=0", fm.get("depth") == 0)
-    _check("frontmatter has tags with kind/raw_source", "kind/raw_source" in fm.get("tags", []))
-    _check("frontmatter has source_url", "source_url" in fm)
-    _check("frontmatter has title", fm.get("title") == "Fake Article Title")
-    _check("frontmatter has aliases", fm.get("aliases") == ["Fake Article Title"])
+    _check("frontmatter has kind=extracted", fm.get("kind") == "extracted")
+    _check("frontmatter has depth=1", fm.get("depth") == 1)
+    _check("frontmatter has tags with kind/extracted", "kind/extracted" in fm.get("tags", []))
+    _check("frontmatter has derived_from (pair edge)", "derived_from" in fm)
+    _check("frontmatter has aliases", fm.get("aliases") == ["Fake Article"])
 
     # Idempotency
     p = _run(["render", "--db", str(db), "--vault", str(vault)])
     res = _expect_json("render idempotent", p)
-    _check("re-render still returns rendered", res[0]["status"] == "rendered")
+    _check("re-render still returns rendered", any(r["status"] == "rendered" for r in res))
     import yaml as _y
     text2 = md_files[0].read_text(encoding="utf-8")
     _, fm_raw2, _ = text2.split("---\n", 2)
     fm2 = _y.safe_load(fm_raw2)
-    _check("idempotent: same kind", fm2.get("kind") == "raw_source")
-    _check("idempotent: same title", fm2.get("title") == "Fake Article Title")
+    _check("idempotent: same kind", fm2.get("kind") == "extracted")
 
     # Derivation render
-    p = _run(["derive", "--db", str(db), "--vault", str(vault), str(res[0]["node_id"])],
+    p = _run(["derive", "--db", str(db), "--vault", str(vault), str(extracted_res["node_id"])],
              env={"MEMEX_AGENT": FAKE_AGENT})
     d = _expect_json("derive for render", p)
     deriv_id = d["id"]
 
     p = _run(["render", "--db", str(db), "--vault", str(vault)])
     res = _expect_json("render with derivations", p)
-    _check("2 nodes rendered", len(res) == 2, f"got {len(res)}")
+    _check("3 results (url skipped + extracted + derivation)", len(res) == 3,
+           f"got {len(res)}")
+    _check("2 rendered nodes", sum(1 for r in res if r["status"] == "rendered") == 2,
+           f"got {res}")
 
     deriv_md = _node_file(db, deriv_id)
     dtext = deriv_md.read_text(encoding="utf-8")
@@ -539,16 +595,19 @@ def smoke_full_e2e(tmp: Path) -> None:
 
     p = _run(["list", "--db", str(db), "--vault", str(vault)])
     lst = _expect_json("list", p)
-    l0_ids = [r["id"] for r in lst]
-    _check("2 L0 nodes from register", len(l0_ids) == 2, f"got {len(l0_ids)}")
+    # register yields url+extracted pairs; derive the extracted (L0) nodes
+    extracted_ids = [r["id"] for r in lst if r["kind"] == "extracted"]
+    _check("2 extracted L0 nodes from register", len(extracted_ids) == 2,
+           f"got {len(extracted_ids)}")
 
-    for l0_id in l0_ids:
+    for l0_id in extracted_ids:
         _run(["derive", "--db", str(db), "--vault", str(vault), l0_id],
              env={"MEMEX_AGENT": FAKE_AGENT})
 
     p = _run(["list", "--db", str(db), "--vault", str(vault)])
     lst = _expect_json("list", p)
-    _check("4 nodes total (2 l0 + 2 derivations)", len(lst) == 4, f"got {len(lst)}")
+    _check("6 nodes total (2 url + 2 extracted + 2 derivations)", len(lst) == 6,
+           f"got {len(lst)}")
 
     p = _run(["search", "--db", str(db), "--vault", str(vault), "broader pattern"])
     res = _expect_json("search", p)
