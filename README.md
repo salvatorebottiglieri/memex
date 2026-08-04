@@ -25,7 +25,7 @@ memex exposes a JSON-only CLI (one command per operation, all output is structur
 | `memex extract-ideas <node-id>` | Extract 3-5 key ideas from a node (lightweight, no full derive) |
 | `memex ideas [query]` | Search across extracted ideas (empty query = all ideas) |
 | `memex derive <node-id>` | Generate a notes-tier derivation from an L0 (agent via `MEMEX_AGENT`) |
-| `memex derive --all [--limit N]` | Batch-derive all un-derived L0 nodes (default limit: 10) |
+| `memex derive --all [--limit N]` | Batch-derive all un-derived L0 nodes (default: all; `--limit 0` also means no cap) |
 | `memex search <query>` | Keyword search over derivations AND L0 metadata (title/URL/key) |
 | `memex resolve [url]` | Resolve a URL through resolution rules (arXiv, GitHub, Wikipedia) |
 | `memex resolve-agent <url>` | Resolve a URL using an external agent (Pi/Claude) with a browser |

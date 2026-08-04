@@ -247,13 +247,39 @@ class TestDeriveAll:
         assert "trust_state" in entry
         assert "check_failures" in entry
 
-    def test_derive_all_limit_zero(self, store):
-        """limit=0 -> empty result."""
-        self._ingest_n(store, 3)
+    def test_derive_all_without_limit_processes_everything(self, store):
+        """--all without --limit derives ALL un-derived nodes (no 10-node cap)."""
+        l0s = self._ingest_n(store, 12)
+        result = self._derive_all(store)  # no --limit flag at all
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        assert len(data) == 12
+        assert all(r["status"] == "derived" for r in data)
+
+        con = sqlite3.connect(store["db"])
+        count = con.execute(
+            "SELECT COUNT(*) FROM node WHERE kind = 'summary' AND tier = 'notes'"
+        ).fetchone()[0]
+        con.close()
+        assert count == 12, f"expected 12 derivations, got {count}"
+
+    def test_derive_all_limit_zero_processes_more_than_ten(self, store):
+        """--limit 0 on >10 un-derived nodes derives all of them."""
+        self._ingest_n(store, 11)
         result = self._derive_all(store, limit=0)
         assert result.returncode == 0, result.stderr
         data = json.loads(result.stdout)
-        assert data == []
+        assert len(data) == 11
+        assert all(r["status"] == "derived" for r in data)
+
+    def test_derive_all_limit_negative_is_unlimited(self, store):
+        """--limit -1 on >10 un-derived nodes also derives all of them (<= 0 = unlimited)."""
+        self._ingest_n(store, 11)
+        result = self._derive_all(store, limit=-1)
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        assert len(data) == 11
+        assert all(r["status"] == "derived" for r in data)
 
     def test_derive_all_handles_errors(self, store):
         """Failing agent returns error status without crashing batch."""

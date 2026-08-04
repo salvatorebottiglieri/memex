@@ -388,9 +388,9 @@ def show(db_path: Path, vault_path: Path, node_id: str) -> None:
 @_db_options
 @click.argument("node_id", required=False)
 @click.option("--all", "derive_all", is_flag=True, default=False, help="Derive all un-derived extracted/L0 nodes.")
-@click.option("--limit", "limit", default=10, type=int, help="Max derivations per run (default 10).")
+@click.option("--limit", "limit", default=None, type=int, help="Max derivations per run (default: unlimited).")
 def derive(db_path: Path, vault_path: Path, node_id: str | None = None,
-           derive_all: bool = False, limit: int = 10) -> None:
+           derive_all: bool = False, limit: int | None = None) -> None:
     """Generate a notes-tier derivation from an L0 node using an LLM.
 
     Single node:  memex derive --db DB --vault V <node-id>

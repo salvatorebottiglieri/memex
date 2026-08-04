@@ -98,16 +98,15 @@ class DeriverService:
 
         return self._do_derive(l0_node_id, l0_content, use_retry=use_retry)
 
-    def derive_all(self, limit: int = 10) -> list[DeriveResult]:
-        """Derive all un-derived L0 nodes up to *limit*.
+    def derive_all(self, limit: int | None = None) -> list[DeriveResult]:
+        """Derive all un-derived L0 nodes, capped at *limit* when given.
+
+        ``limit=None`` or ``limit <= 0`` means unlimited (derive everything).
 
         Returns results for already-derived L0s (status="already_derived")
         alongside newly derived ones.  Never raises; individual failures
         are captured per-node in the result list.
         """
-        if limit <= 0:
-            return []
-
         all_nodes = self._store.list_nodes()
         results: list[DeriveResult] = []
         seen_derived: set[str] = set()
@@ -134,7 +133,7 @@ class DeriverService:
                 continue
             if node["id"] in seen_derived:
                 continue
-            if count >= limit:
+            if limit is not None and limit > 0 and count >= limit:
                 break
             count += 1
 
