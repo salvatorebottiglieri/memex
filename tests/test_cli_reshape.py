@@ -1,7 +1,8 @@
 """Tests for ticket #98 — CLI reshape for the new kinds (url / extracted).
 
-Covers the four viewing surfaces against a url+extracted+summary+raw_source
-graph seeded directly via Store (no register/derive subprocesses):
+Covers the four viewing surfaces against a url+extracted+summary graph
+seeded directly via Store (no register/derive subprocesses), plus one
+legacy raw_source node to pin the transition behavior:
 
   list   — url nodes hidden by default; ``--kind url`` returns them;
            ``--tier extracted`` filters correctly
@@ -10,7 +11,7 @@ graph seeded directly via Store (no register/derive subprocesses):
   render — url node produces no file; extracted node renders L0-style
            frontmatter with source_url/title from the URL parent's source row
   stats  — roots counted as kind='url'; coverage over extracted nodes;
-           url nodes appear under their own tier key, not raw_source
+           legacy rows group under their own kind key
 
 The store-level contract is also pinned here (middle-out: data layer first):
 ``list_nodes(kind=None)`` excludes url nodes so CLI limit/offset pagination
@@ -34,7 +35,9 @@ def _now() -> str:
 
 
 def _seed(store) -> dict:
-    """Create a url + extracted + summary + raw_source graph via Store directly.
+    """Create a url + extracted + summary graph via Store directly, plus one
+    legacy raw_source node to pin the transition behavior (legacy rows still
+    list/render/group under their own kind).
 
     Returns a dict of node ids plus the extracted node's content path.
     """
@@ -223,7 +226,8 @@ class TestStatsReshape:
         assert data["roots"] == 1
         assert data["by_kind"]["url"] == 1
         assert data["by_kind"]["extracted"] == 1
-        # URL nodes (tier NULL) group under their own tier key, not raw_source.
+        # URL nodes (tier NULL) group under their own tier key; legacy
+        # raw_source rows group under their own kind key too.
         assert data["by_tier"]["url"] == 1
         assert data["by_tier"]["extracted"] == 1
         assert data["by_tier"]["raw_source"] == 1
@@ -311,6 +315,6 @@ class TestStoreStatsReshape:
         stats = store.get_stats()
         assert stats["roots"] == 0
         assert stats["derivation_coverage_pct"] == 0.0
-        # Legacy nodes still group under 'raw_source' (no raw_source assumption
-        # introduced — kind replaces the NULL-tier lump).
+        # Legacy rows group under their own kind key (COALESCE(tier, kind)
+        # grouping is data-driven — no hardcoded kind assumptions).
         assert stats["by_tier"] == {"raw_source": 1}

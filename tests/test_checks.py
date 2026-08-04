@@ -38,6 +38,9 @@ def _setup_db(tmp_path: Path) -> tuple[sqlite3.Connection, str, Path]:
     with Store.open(db_path) as store:
         store.init_schema()
         l0_id = str(uuid.uuid4())
+        # Legacy L0 shape (NULL tier, depth 0). The checks are kind-agnostic —
+        # D2 only needs the provenance target to exist — so the legacy kind is
+        # a fine stand-in for "an L0 node" here.
         store.create_node(node_id=l0_id, kind="raw_source", trust_state="draft", depth=0,
                           content_path="", created_at=_utcnow())
         store.attach_source(node_id=l0_id, canonical_key="test://l0",
@@ -283,7 +286,7 @@ class TestTierDepthConsistency:
         assert any("Tier/depth" in f for f in result.failures)
 
     def test_null_tier_depth_0_passes(self, tmp_path):
-        """A raw_source (NULL tier) with depth=0 passes tier/depth check."""
+        """A legacy L0 (NULL tier, depth 0) passes the tier/depth check."""
         con, deriv_id, content_path = _setup_db(tmp_path)
         l0_id = con.execute("SELECT id FROM node WHERE kind = 'raw_source'").fetchone()[0]
         # L0 has tier=NULL, depth=0 — run check on it

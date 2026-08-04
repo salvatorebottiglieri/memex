@@ -1340,9 +1340,9 @@ class Store:
                 "SELECT kind, COUNT(*) FROM node GROUP BY kind ORDER BY kind"
             ).fetchall())
 
-            # URL nodes have tier NULL — group by COALESCE(tier, kind) so they
-            # appear under their own 'url' key instead of being lumped into
-            # the legacy 'raw_source' bucket.
+            # URL nodes have tier NULL — group by COALESCE(tier, kind) so each
+            # kind appears under its own key; legacy rows group under their
+            # own kind key too.
             by_tier = dict(self._con.execute(
                 "SELECT COALESCE(tier, kind), COUNT(*) FROM node "
                 "GROUP BY COALESCE(tier, kind) ORDER BY COALESCE(tier, kind)"

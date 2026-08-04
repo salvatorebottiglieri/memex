@@ -130,11 +130,11 @@ def _register_file(
 
 
 def _seed_raw_source(db: Path, vault: Path, n: int, prefix: str = "raw") -> list[str]:
-    """Insert n legacy raw_source L0 nodes directly (expand phase).
+    """Insert n legacy raw_source L0 nodes directly (transition phase).
 
     ``memex register`` now produces url+extracted pairs; ``derive --all``
-    still processes raw_source nodes, so seed those fixtures directly to
-    exercise the batch mode.
+    processes both extracted roots and legacy raw_source nodes, so seed
+    those fixtures directly to exercise the legacy path in batch mode.
     """
     import uuid as _uuid
     from datetime import datetime, timezone
@@ -338,49 +338,56 @@ def smoke_derive_idempotent(tmp: Path) -> None:
 
 
 def smoke_derive_all(tmp: Path) -> None:
-    print("\n[DERIVE ALL] derive --all batch mode (raw_source L0s)")
+    print("\n[DERIVE ALL] derive --all batch mode (extracted roots + legacy raw_source L0s)")
     db, vault = _fresh_store(tmp, "deriveall")
     env = {"MEMEX_AGENT": FAKE_AGENT}
 
     # Register 3 files — each yields a url+extracted pair; batch derive
-    # (still raw_source-only) has nothing to do for them.
+    # targets the extracted (content-bearing L0) roots.
     for i in range(3):
         md_path = _register_file(vault, f"deriveall-{i}.md", f"https://example.com/article-{i}")
         p = _run(["register", "--db", str(db), "--vault", str(vault), str(md_path)])
         _expect_json(f"register {i}", p)
 
     p = _run(["derive", "--db", str(db), "--vault", str(vault), "--all"], env=env)
-    res = _expect_json("derive --all (url+extracted only)", p)
-    _check("derive --all ignores url/extracted pairs", res == [], f"got {res}")
+    res = _expect_json("derive --all (url+extracted pairs)", p)
+    _check("derive --all derives the 3 extracted roots",
+           len(res) == 3 and all(r["status"] == "derived" for r in res), f"got {res}")
+    # Notes derived from extracted roots (depth 1) land at depth 2 and stay
+    # draft while D5 hardcodes tier=notes => depth 1 (ticket #103 owns D5).
+    _check("extracted-derived notes stay draft (D5 legacy)",
+           all(r["trust_state"] == "draft" for r in res), f"got {res}")
 
-    # Seed legacy raw_source L0s directly and exercise the batch mode
+    # Seed legacy raw_source L0s directly and exercise the legacy path
     l0_ids = _seed_raw_source(db, vault, 3, prefix="raw")
-    _check("3 raw_source L0s seeded", len(l0_ids) == 3)
+    _check("3 legacy raw_source L0s seeded", len(l0_ids) == 3)
 
     p = _run(["derive", "--db", str(db), "--vault", str(vault), l0_ids[0]], env=env)
     d = _expect_json("manual derive", p)
     _check("manual derive ok", d["status"] == "derived")
 
-    # derive --all with limit 1: 1 already_derived + 1 new
+    # derive --all with limit 1: 4 already_derived (3 extracted + 1 raw) + 1 new
     p = _run(["derive", "--db", str(db), "--vault", str(vault), "--all", "--limit", "1"], env=env)
     res = _expect_json("derive --all limit=1", p)
-    _check("2 results (1 already + 1 new)", len(res) == 2, f"got {len(res)}")
-    statuses = sorted(r["status"] for r in res)
-    _check("statuses: already_derived + derived", statuses == ["already_derived", "derived"])
+    _check("5 results (4 already + 1 new)", len(res) == 5, f"got {len(res)}")
+    already_count = sum(1 for r in res if r["status"] == "already_derived")
+    derived_count = sum(1 for r in res if r["status"] == "derived")
+    _check("4 already_derived", already_count == 4)
+    _check("1 new derived", derived_count == 1)
 
     # derive --all again: remaining 1
     p = _run(["derive", "--db", str(db), "--vault", str(vault), "--all"], env=env)
     res = _expect_json("derive --all #2", p)
-    _check("3 results (2 already + 1 new)", len(res) == 3, f"got {len(res)}")
+    _check("6 results (5 already + 1 new)", len(res) == 6, f"got {len(res)}")
     derived_count = sum(1 for r in res if r["status"] == "derived")
     already_count = sum(1 for r in res if r["status"] == "already_derived")
     _check("1 new derived", derived_count == 1)
-    _check("2 already_derived", already_count == 2)
+    _check("5 already_derived", already_count == 5)
 
     # All derived now
     p = _run(["derive", "--db", str(db), "--vault", str(vault), "--all"], env=env)
     res = _expect_json("derive --all #3", p)
-    _check("3 already_derived", len(res) == 3 and all(r["status"] == "already_derived" for r in res))
+    _check("6 already_derived", len(res) == 6 and all(r["status"] == "already_derived" for r in res))
 
 
 def smoke_search(tmp: Path) -> None:

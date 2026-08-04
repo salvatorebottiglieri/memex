@@ -102,6 +102,10 @@ def _make_node(store, *, node_id: str | None = None, kind: str = "raw_source",
                title: str | None = None) -> tuple[str, Path | None]:
     """Create a node + source row directly via Store and return (node_id, md_path).
 
+    The default legacy raw_source L0 shape is only a stand-in: these tests
+    exercise frontmatter mechanics (tags, wikilinks, contested state) that are
+    kind-agnostic — only source_url/title inheritance differs per kind.
+
     If ``content_path`` is an explicit empty string, the node is created with
     no file on disk and ``md_path`` is ``None``.
     """
@@ -228,6 +232,31 @@ class TestRenderL0:
         assert len(results) == 1
         fm, _ = _read_frontmatter(md_path)
         assert "My Custom Title" in fm.get("aliases", [])
+
+    def test_render_legacy_raw_source_preserves_source_fields(self, store):
+        """A legacy raw_source L0 node keeps source_url/title from its OWN
+        source row (list_nodes LEFT JOIN) through a render cycle.
+
+        Regression: the renderer must not strip source_url/title from
+        transition-era L0 files whose DB source row still holds them —
+        re-rendering a legacy vault on sync would otherwise permanently
+        lose the attribution even though the data is intact.
+        """
+        node_id, md_path = _make_node(store, kind="raw_source", title="Legacy Article",
+                                      content="# Legacy\n\nOriginal body text.")
+
+        results = _render(store)
+        assert len(results) == 1
+
+        fm, body = _read_frontmatter(md_path)
+        # source_url/title come from the node's own source row
+        assert fm.get("source_url") == f"https://test.example/{node_id}"
+        assert fm.get("title") == "Legacy Article"
+        # body is untouched through the render cycle
+        assert body == "# Legacy\n\nOriginal body text."
+        # legacy raw_source nodes now also emit trust_state (deliberate:
+        # previously suppressed for raw_source, pinned here)
+        assert fm.get("trust_state") == "draft"
 
 
 # ── Derivation Render ─────────────────────────────────────────────

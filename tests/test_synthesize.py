@@ -5,10 +5,12 @@ The fake agent module lives at tests/fake_llm_client.py.
 """
 from __future__ import annotations
 
-from pathlib import Path
 import json
 import sqlite3
+from datetime import datetime, timezone
+from pathlib import Path
 
+from memex.store import Store
 from tests.conftest import _run_memex, register_node
 
 
@@ -282,3 +284,129 @@ class TestSynthesizeQualityGate:
         warning = json.loads(result.stderr.strip())
         assert "validator_warning" in warning
         assert "Validator LLM call failed" in warning["validator_warning"]
+
+
+class TestBackfillSynthesis:
+    """Tests for `memex backfill-synthesis` — synthesis_statements backfill.
+
+    The candidate filter is kind-aware (``kind in ('summary', 'synthesis')``
+    only). Regression: extracted/legacy raw_source files that merely contain a
+    literal ``'> Synthesis:'`` line must never be backfilled — that would
+    mislabel raw content as inference statements.
+    """
+
+    def test_backfill_only_populates_summary_and_synthesis_kinds(self, store):
+        """Backfill scans summary/synthesis nodes only; url/extracted/
+        raw_source nodes with marker lines stay untouched."""
+        con = sqlite3.connect(store["db"])
+        st = Store(con)
+        now = datetime.now(timezone.utc).isoformat()
+        vault = Path(store["vault"])
+
+        def _mk(kind, filename, content, **kw) -> str:
+            path = vault / filename
+            path.write_text(content, encoding="utf-8")
+            node_id = filename.replace(".md", "")
+            st.create_node(node_id=node_id, kind=kind, content_path=str(path),
+                           created_at=now, **kw)
+            return node_id
+
+        url_id = "url-node"
+        st.create_node(node_id=url_id, kind="url", created_at=now)
+
+        # extracted content containing a literal marker line — must NOT backfill
+        extracted_id = _mk(
+            "extracted", "extracted-node.md",
+            "# Extracted\n\nBody mentions:\n> Synthesis: not a real statement\n",
+            derived_from=url_id,
+        )
+        # legacy raw_source with its own source row — must NOT backfill
+        raw_id = _mk(
+            "raw_source", "legacy-raw.md",
+            "# Legacy\n\n> Synthesis: legacy marker\n",
+        )
+        st.attach_source(node_id=raw_id, canonical_key="test://legacy-raw",
+                         source_url="https://test.example/legacy-raw",
+                         title="Legacy Raw", fetched_at=now)
+        # derivation kinds — MUST backfill
+        summary_id = _mk(
+            "summary", "summary-node.md",
+            "# Summary\n\n> Synthesis: Key point one\n> Synthesis: Key point two\n",
+            tier="notes", depth=2,
+        )
+        synth_id = _mk(
+            "synthesis", "synthesis-node.md",
+            "# Synthesis\n\n> Synthesis: Cross-source claim\n",
+            tier="synthesis", depth=2,
+        )
+        # summary without markers — scanned, no update
+        nomarker_id = _mk(
+            "summary", "summary-nomarker.md",
+            "# Summary\n\nNo marker here.\n", tier="notes", depth=2,
+        )
+        con.commit()
+        con.close()
+
+        result = _run_memex(
+            ["backfill-synthesis", "--db", str(store["db"]), "--vault", str(store["vault"])],
+        )
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        by_id = {r["id"]: r for r in data["results"]}
+
+        # candidates: the 3 summary/synthesis nodes with an existing file
+        assert data["scanned"] == 3
+        assert by_id[summary_id]["status"] == "updated"
+        assert by_id[synth_id]["status"] == "updated"
+        assert by_id[nomarker_id]["status"] == "no_marker_found"
+        # url/extracted/raw_source are never scanned
+        assert url_id not in by_id
+        assert extracted_id not in by_id
+        assert raw_id not in by_id
+
+        # DB: only the two derivation nodes carry synthesis_statements
+        con = sqlite3.connect(store["db"])
+        try:
+            rows = {
+                r[0]: r[1] for r in con.execute(
+                    "SELECT id, synthesis_statements FROM node"
+                ).fetchall()
+            }
+        finally:
+            con.close()
+        assert json.loads(rows[summary_id]) == ["Key point one", "Key point two"]
+        assert json.loads(rows[synth_id]) == ["Cross-source claim"]
+        assert rows[extracted_id] is None
+        assert rows[raw_id] is None
+        assert rows[url_id] is None
+        assert rows[nomarker_id] is None
+
+    def test_backfill_dry_run_writes_nothing(self, store):
+        """--dry-run reports would_update but leaves the DB untouched."""
+        con = sqlite3.connect(store["db"])
+        st = Store(con)
+        now = datetime.now(timezone.utc).isoformat()
+        path = Path(store["vault"]) / "summary-dry.md"
+        path.write_text("# Summary\n\n> Synthesis: Dry run claim\n", encoding="utf-8")
+        st.create_node(node_id="summary-dry", kind="summary", tier="notes", depth=2,
+                       content_path=str(path), created_at=now)
+        con.commit()
+        con.close()
+
+        result = _run_memex(
+            ["backfill-synthesis", "--dry-run",
+             "--db", str(store["db"]), "--vault", str(store["vault"])],
+        )
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        assert data["dry_run"] is True
+        assert data["results"][0]["status"] == "would_update"
+
+        con = sqlite3.connect(store["db"])
+        try:
+            ss = con.execute(
+                "SELECT synthesis_statements FROM node WHERE id = 'summary-dry'"
+            ).fetchone()[0]
+        finally:
+            con.close()
+        assert ss is None

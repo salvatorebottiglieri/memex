@@ -41,7 +41,8 @@ def _store() -> tuple[Store, sqlite3.Connection]:
 
 
 def _add_l0(store: Store) -> str:
-    """Add an L0 node, return its id."""
+    """Add an L0 node (legacy depth-0 shape — the rules are kind-agnostic),
+    return its id."""
     l0_id = str(uuid.uuid4())
     store.create_node(node_id=l0_id, kind="raw_source", trust_state="draft", depth=0,
                       content_path="", created_at=_utcnow())
@@ -72,6 +73,8 @@ def _setup_check_db(tmp_path: Path) -> tuple[sqlite3.Connection, str, Path]:
     with S.open(db_path) as store:
         store.init_schema()
         l0_id = str(uuid.uuid4())
+        # Legacy L0 shape (NULL tier, depth 0) — D5's tier/depth rule is
+        # kind-agnostic, so the legacy kind works as a generic L0 here.
         store.create_node(node_id=l0_id, kind="raw_source", trust_state="draft", depth=0,
                           content_path="", created_at=_utcnow())
         store.attach_source(node_id=l0_id, canonical_key=f"test://{l0_id}",

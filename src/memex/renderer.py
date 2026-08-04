@@ -85,22 +85,27 @@ def _build_frontmatter(node: dict[str, Any], body: str, store: Store) -> dict[st
         fm["aliases"] = [alias]
 
     # ── L0-specific fields ──────────────────────────────────────
-    if node.get("kind") == "raw_source":
-        fm["source_url"] = node.get("source_url") or ""
-        fm["title"] = node.get("title") or ""
-    elif node.get("kind") == "extracted":
+    # Data-driven: a node's OWN source-row fields (carried via the LEFT JOIN
+    # in list_nodes — legacy L0 nodes carry their own source row) are emitted
+    # verbatim; extracted nodes carry none, so their source_url/title come
+    # from the URL parent's source row instead.
+    if node.get("kind") == "extracted":
         # L0-style: source_url/title from the URL parent's source row
         # (lookup: provenance derived_from edge -> URL node -> its source row).
         fm["source_url"] = (url_parent or {}).get("source_url") or ""
         fm["title"] = (url_parent or {}).get("title") or ""
+    elif node.get("source_url") or node.get("title"):
+        # Legacy L0 with its own source row (list_nodes JOIN).
+        fm["source_url"] = node.get("source_url") or ""
+        fm["title"] = node.get("title") or ""
 
     # ── Derivation-specific fields ───────────────────────────────
-    # Only raw_source is excluded here — URL nodes are skipped before
-    # frontmatter (no content_path), so extracted emits trust_state/tier.
-    is_derivation = node.get("kind") != "raw_source"
-    if is_derivation and trust_state:
+    # URL nodes never reach frontmatter (no content_path), so every
+    # content-bearing node — extracted L0 content, legacy raw_source L0s,
+    # and derivations alike — emits trust_state/tier.
+    if trust_state:
         fm["trust_state"] = trust_state
-    if is_derivation and tier:
+    if tier:
         fm["tier"] = tier
     cf = node.get("check_failures")
     if cf is not None:

@@ -111,9 +111,11 @@ class DeriverService:
         results: list[DeriveResult] = []
         seen_derived: set[str] = set()
 
-        # Phase 1 — report already-derived L0s
+        # Phase 1 — report already-derived L0s (extracted roots are the
+        # content-bearing L0 of the url+extracted model; legacy raw_source
+        # rows remain derivable during the transition).
         for node in all_nodes:
-            if node.get("kind") != "raw_source":
+            if node.get("kind") not in ("raw_source", "extracted"):
                 continue
             existing = self._store.find_derived_from(node["id"])
             if existing is not None:
@@ -126,10 +128,10 @@ class DeriverService:
                 )
                 seen_derived.add(node["id"])
 
-        # Phase 2 — derive un-derived L0s
+        # Phase 2 — derive un-derived L0s (same L0 set as phase 1)
         count = 0
         for node in all_nodes:
-            if node.get("kind") != "raw_source":
+            if node.get("kind") not in ("raw_source", "extracted"):
                 continue
             if node["id"] in seen_derived:
                 continue
