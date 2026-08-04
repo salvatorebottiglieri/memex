@@ -153,6 +153,25 @@ class TestConfidenceRuleC4:
         rule = _rule(CONFIDENCE_RULES, "C4")
         assert rule.condition(store, deriv_id) == False
 
+    def test_fires_for_extracted_node(self):
+        """C4 is kind-agnostic: it fires on extracted nodes too, so
+        compute_node_confidence can honour it before the fetcher map."""
+        store, _ = _store()
+        url_id = str(uuid.uuid4())
+        store.create_node(node_id=url_id, kind="url")
+        ext = str(uuid.uuid4())
+        store.create_node(
+            node_id=ext, kind="extracted", fetcher_type="http",
+            content_path="/tmp/e.md", derived_from=url_id,
+        )
+        store.create_edge(
+            edge_id=str(uuid.uuid4()), type="association",
+            relation="contradicts", from_node=url_id, to_node=ext,
+        )
+
+        rule = _rule(CONFIDENCE_RULES, "C4")
+        assert rule.condition(store, ext) == True
+
 
 class TestConfidenceRuleC3:
     """C3: 2+ provenance parents -> high."""
