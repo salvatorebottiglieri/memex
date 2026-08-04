@@ -1057,6 +1057,29 @@ class Store:
         ).fetchone()
         return dict(row) if row is not None else None
 
+    def find_extracted_child(self, url_node_id: str) -> dict | None:
+        """Return the ``kind='extracted'`` child of a URL node, or None.
+
+        Filters on the node kind explicitly (a URL node may have other
+        derivation children) and orders deterministically, so the dedup
+        lookup can never mistake a summary/synthesis child for the
+        extracted node. Returns the full node dict (via ``get_node``).
+        """
+        row = self._con.execute(
+            """
+            SELECT e.from_node FROM edge e
+            JOIN node n ON n.id = e.from_node
+            WHERE e.to_node = ? AND e.type = 'provenance' AND e.relation = 'derived_from'
+              AND n.kind = 'extracted'
+            ORDER BY n.created_at
+            LIMIT 1
+            """,
+            (url_node_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return self.get_node(row["from_node"])
+
     def find_synthesis_by_parents(self, parent_ids: list[str]) -> dict | None:
         """Find a synthesis node whose unordered derived_from set matches *exactly*.
 
@@ -1097,12 +1120,59 @@ class Store:
             (trust_state, failures_json, node_id),
         )
 
+    def update_extracted_fetcher(self, node_id: str, fetcher_type: str) -> None:
+        """Refresh an extracted node's fetcher metadata after a re-extract.
+
+        Sets ``fetcher_type`` and recomputes ``confidence`` from the fetcher
+        map so a re-extract through a different fetcher never leaves stale
+        values behind (an incoming C4 ``contradicts`` edge keeps its 'low'
+        override via ``compute_node_confidence``).
+        """
+        try:
+            self._con.execute(
+                "UPDATE node SET fetcher_type = ? WHERE id = ?",
+                (fetcher_type, node_id),
+            )
+        except sqlite3.Error as e:
+            raise StoreError(str(e)) from e
+        confidence = self.compute_node_confidence(node_id)
+        if confidence is not None:
+            try:
+                self._con.execute(
+                    "UPDATE node SET confidence = ? WHERE id = ?",
+                    (confidence, node_id),
+                )
+            except sqlite3.Error as e:
+                raise StoreError(str(e)) from e
+
     def update_source_title(self, node_id: str, title: str) -> None:
         """Update the title of a source row."""
         try:
             self._con.execute(
                 "UPDATE source SET title = ? WHERE node_id = ?",
                 (title, node_id),
+            )
+        except sqlite3.Error as e:
+            raise StoreError(str(e)) from e
+
+    def mark_source_failed(self, node_id: str, fetched_at: str) -> None:
+        """Record a failed fetch on a source row (``failed=1``)."""
+        try:
+            self._con.execute(
+                "UPDATE source SET fetched_at = ?, failed = 1 WHERE node_id = ?",
+                (fetched_at, node_id),
+            )
+        except sqlite3.Error as e:
+            raise StoreError(str(e)) from e
+
+    def update_source_after_fetch(
+        self, node_id: str, title: str | None, fetched_at: str
+    ) -> None:
+        """Record a successful fetch: clear the failed flag and refresh the title."""
+        try:
+            self._con.execute(
+                "UPDATE source SET failed = 0, fetched_at = ?, title = ? WHERE node_id = ?",
+                (fetched_at, title, node_id),
             )
         except sqlite3.Error as e:
             raise StoreError(str(e)) from e
