@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from memex.rules import CONFIDENCE_RULES
+from memex.rules import CONFIDENCE_RULES, EXTRACTED_CONFIDENCE
 
 
 class StoreError(Exception):
@@ -31,10 +31,11 @@ CREATE TABLE IF NOT EXISTS node (
     id           TEXT PRIMARY KEY,
     kind         TEXT NOT NULL,
     tier         TEXT,
-    trust_state  TEXT NOT NULL CHECK (trust_state IN ('draft','auto-verified','human-approved','stale')),
+    trust_state  TEXT CHECK (trust_state IN ('draft','auto-verified','human-approved','stale')),
     depth        INTEGER NOT NULL,
-    content_path TEXT NOT NULL,
-    created_at   TEXT NOT NULL
+    content_path TEXT,
+    created_at   TEXT NOT NULL,
+    fetcher_type TEXT
 );
 
 CREATE TABLE IF NOT EXISTS source (
@@ -134,44 +135,138 @@ class Store:
     # ── Schema ────────────────────────────────────────────────────
 
     def init_schema(self) -> None:
-        """Create all tables (idempotent) and apply pending migrations."""
+        """Create all tables (idempotent) and apply pending migrations.
+
+        The whole migration — column ALTERs, the node-table rebuild, and
+        the confidence backfill — runs inside a single transaction, so a
+        failure in any step rolls everything back: the destructive node
+        rebuild can never be left committed while later steps are
+        half-applied. ``PRAGMA foreign_keys`` is a no-op inside a
+        transaction, so it is toggled here (in autocommit, right after
+        the schema script) around the rebuild and restored afterwards.
+        Every step is idempotent, so re-running ``init_schema`` after a
+        failure recovers.
+        """
         self._con.executescript(_SCHEMA_SQL)
+        fk_was_on = bool(self._con.execute("PRAGMA foreign_keys").fetchone()[0])
+        if fk_was_on:
+            self._con.execute("PRAGMA foreign_keys = OFF")
         try:
-            self._con.execute("ALTER TABLE source ADD COLUMN failed INTEGER NOT NULL DEFAULT 0")
-        except sqlite3.OperationalError:
-            pass  # column already exists
-        try:
-            self._con.execute("ALTER TABLE node ADD COLUMN check_failures TEXT")
-        except sqlite3.OperationalError:
-            pass  # column already exists
-        try:
-            self._con.execute("ALTER TABLE node ADD COLUMN is_contested INTEGER NOT NULL DEFAULT 0")
-        except sqlite3.OperationalError:
-            pass  # column already exists
-        try:
-            self._con.execute("ALTER TABLE node ADD COLUMN contested_at TEXT")
-        except sqlite3.OperationalError:
-            pass  # column already exists
-        try:
-            self._con.execute(
-                "ALTER TABLE edge ADD COLUMN written_by TEXT NOT NULL DEFAULT 'human'"
-                " CHECK (written_by IN ('human','llm','check','system'))"
+            self._con.execute("BEGIN")
+            try:
+                try:
+                    self._con.execute("ALTER TABLE source ADD COLUMN failed INTEGER NOT NULL DEFAULT 0")
+                except sqlite3.OperationalError:
+                    pass  # column already exists
+                try:
+                    self._con.execute("ALTER TABLE node ADD COLUMN check_failures TEXT")
+                except sqlite3.OperationalError:
+                    pass  # column already exists
+                try:
+                    self._con.execute("ALTER TABLE node ADD COLUMN is_contested INTEGER NOT NULL DEFAULT 0")
+                except sqlite3.OperationalError:
+                    pass  # column already exists
+                try:
+                    self._con.execute("ALTER TABLE node ADD COLUMN contested_at TEXT")
+                except sqlite3.OperationalError:
+                    pass  # column already exists
+                try:
+                    self._con.execute(
+                        "ALTER TABLE edge ADD COLUMN written_by TEXT NOT NULL DEFAULT 'human'"
+                        " CHECK (written_by IN ('human','llm','check','system'))"
+                    )
+                except sqlite3.OperationalError:
+                    pass  # column already exists
+                try:
+                    self._con.execute(
+                        "ALTER TABLE node ADD COLUMN confidence TEXT CHECK (confidence IN ('high','medium','low'))"
+                )
+                except sqlite3.OperationalError:
+                    pass  # column already exists
+                try:
+                    self._con.execute(
+                        "ALTER TABLE node ADD COLUMN synthesis_statements TEXT"
+                    )
+                except sqlite3.OperationalError:
+                    pass  # column already exists
+                self._rebuild_node_table_for_url_kind()
+                self._backfill_confidence()
+            except BaseException:
+                self._con.execute("ROLLBACK")
+                raise
+            else:
+                self._con.execute("COMMIT")
+        finally:
+            if fk_was_on:
+                self._con.execute("PRAGMA foreign_keys = ON")
+
+    def _rebuild_node_table_for_url_kind(self) -> None:
+        """Rebuild ``node`` so trust_state/content_path are nullable + fetcher_type exists.
+
+        SQLite cannot drop a NOT NULL constraint via ALTER TABLE, so DBs
+        created before ticket #95 (which declared ``trust_state`` and
+        ``content_path`` NOT NULL) need a full table rebuild — the standard
+        12-step procedure: disable FK, create ``node_new`` with the
+        desired schema, copy every existing column, drop the old table,
+        rename, re-enable FK, verify ``foreign_key_check``.
+
+        The guard above returns early when ``node`` already has the
+        post-#95 shape — nullable ``trust_state``/``content_path`` plus the
+        ``fetcher_type`` column, which fresh DBs get directly from
+        ``_SCHEMA_SQL``. So the rebuild is a genuine one-time migration for
+        pre-#95 DBs only. The column definitions below must match
+        ``_SCHEMA_SQL`` plus the columns added by the ALTER TABLE
+        migrations above.
+
+        Runs inside ``init_schema``'s migration transaction with
+        ``foreign_keys`` already disabled (the pragma is a no-op inside a
+        transaction), so this method only issues DDL and never commits on
+        its own — a failure in a later migration step rolls the rebuild
+        back too, and re-running ``init_schema`` recovers.
+        """
+        info = self._con.execute("PRAGMA table_info(node)").fetchall()
+        existing = {r["name"]: r for r in info}
+        trust_notnull = bool(existing["trust_state"]["notnull"])
+        content_notnull = bool(existing["content_path"]["notnull"])
+        if not trust_notnull and not content_notnull and "fetcher_type" in existing:
+            return
+
+        self._con.execute(
+            """
+            CREATE TABLE node_new (
+                id           TEXT PRIMARY KEY,
+                kind         TEXT NOT NULL,
+                tier         TEXT,
+                trust_state  TEXT CHECK (trust_state IN ('draft','auto-verified','human-approved','stale')),
+                depth        INTEGER NOT NULL,
+                content_path TEXT,
+                created_at   TEXT NOT NULL,
+                check_failures       TEXT,
+                is_contested         INTEGER NOT NULL DEFAULT 0,
+                contested_at         TEXT,
+                confidence           TEXT CHECK (confidence IN ('high','medium','low')),
+                synthesis_statements TEXT,
+                fetcher_type         TEXT
             )
-        except sqlite3.OperationalError:
-            pass  # column already exists
-        try:
-            self._con.execute(
-                "ALTER TABLE node ADD COLUMN confidence TEXT CHECK (confidence IN ('high','medium','low'))"
+            """
         )
-        except sqlite3.OperationalError:
-            pass  # column already exists
-        try:
-            self._con.execute(
-                "ALTER TABLE node ADD COLUMN synthesis_statements TEXT"
+        copy_cols = [name for name in (
+            "id", "kind", "tier", "trust_state", "depth", "content_path",
+            "created_at", "check_failures", "is_contested", "contested_at",
+            "confidence", "synthesis_statements", "fetcher_type",
+        ) if name in existing]
+        collist = ", ".join(copy_cols)
+        self._con.execute(
+            f"INSERT INTO node_new ({collist}) SELECT {collist} FROM node"
+        )
+        self._con.execute("DROP TABLE node")
+        self._con.execute("ALTER TABLE node_new RENAME TO node")
+
+        violations = self._con.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise StoreError(
+                f"foreign key violations after node table rebuild: {violations!r}"
             )
-        except sqlite3.OperationalError:
-            pass  # column already exists
-        self._backfill_confidence()
 
     # ── Ledger ────────────────────────────────────────────────────
 
@@ -196,38 +291,84 @@ class Store:
         node_id: str,
         kind: str,
         tier: str | None = None,
-        trust_state: str = "draft",
+        trust_state: str | None = "draft",
         depth: int = 0,
-        content_path: str = "",
+        content_path: str | None = "",
         created_at: str | None = None,
         confidence: str | None = None,
         synthesis_statements: list[str] | None = None,
+        fetcher_type: str | None = None,
+        derived_from: str | None = None,
     ) -> None:
         """Insert a node row. ``created_at`` defaults to now (UTC ISO).
 
-        When ``confidence`` is omitted, it is computed automatically.
+        When ``confidence`` is omitted it is computed automatically: URL
+        nodes have none (NULL), extracted nodes follow the fetcher_type map
+        (``rules.EXTRACTED_CONFIDENCE``), everything else defaults to 'low'
+        for fresh nodes with no edges yet.
+
+        Kind invariants (ticket #95):
+
+        - ``kind='url'`` — the root of every chain, zero content. tier,
+          trust_state, confidence, content_path, synthesis_statements and
+          fetcher_type are always stored NULL and depth is 0, regardless
+          of the arguments passed.
+        - ``kind='extracted'`` — tier='extracted', depth=1, content_path
+          pointing to a file, plus a provenance ``derived_from`` edge to a
+          URL node. ``content_path`` and ``derived_from`` are required and
+          ``derived_from`` must reference an existing ``kind='url'`` node.
+
         ``synthesis_statements`` is persisted as JSON for structured querying.
         """
+        if kind == "url":
+            tier, trust_state, depth, content_path, confidence = None, None, 0, None, None
+            # Zero-content invariant: LLM-derived statements and fetcher
+            # metadata never belong on a URL node, whatever the caller passed.
+            synthesis_statements = None
+            fetcher_type = None
+        elif kind == "extracted":
+            tier, depth = "extracted", 1
+            if not content_path:
+                raise ValueError("extracted nodes require a content_path")
+            if not derived_from:
+                raise ValueError("extracted nodes require a derived_from URL node")
+            parent = self._con.execute(
+                "SELECT kind FROM node WHERE id = ?", (derived_from,)
+            ).fetchone()
+            if parent is None or parent["kind"] != "url":
+                raise ValueError("extracted nodes must derive from a URL node")
+            if confidence is None:
+                confidence = EXTRACTED_CONFIDENCE.get(fetcher_type)
         if created_at is None:
             created_at = datetime.now(timezone.utc).isoformat()
-        if confidence is None:
+        if confidence is None and kind not in ("url", "extracted"):
             confidence = "low"  # default for fresh nodes with no edges yet
         synth_json = json.dumps(synthesis_statements) if synthesis_statements else None
         try:
             self._con.execute(
                 """
                 INSERT INTO node (
-                    id, kind, tier, trust_state, depth, content_path, created_at, confidence, synthesis_statements
+                    id, kind, tier, trust_state, depth, content_path, created_at,
+                    confidence, synthesis_statements, fetcher_type
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     node_id, kind, tier, trust_state, depth,
-                    content_path, created_at, confidence, synth_json,
+                    content_path, created_at, confidence, synth_json, fetcher_type,
                 ),
             )
         except sqlite3.Error as e:
             raise StoreError(str(e)) from e
+
+        if kind == "extracted":
+            self.create_edge(
+                edge_id=str(uuid.uuid4()),
+                type="provenance",
+                relation="derived_from",
+                from_node=node_id,
+                to_node=derived_from,
+            )
 
     def _backfill_confidence(self) -> None:
         """Set confidence for nodes created before the column existed.
@@ -236,9 +377,9 @@ class Store:
         Notes tier → medium (1 parent after creation).
         Synthesis tier → min(parents' confidence), or low when unresolvable.
         """
-        # L0 nodes: no tier → low
+        # L0 nodes: no tier → low (URL nodes have no confidence — never set)
         self._con.execute(
-            "UPDATE node SET confidence = 'low' WHERE confidence IS NULL AND tier IS NULL"
+            "UPDATE node SET confidence = 'low' WHERE confidence IS NULL AND tier IS NULL AND kind != 'url'"
         )
         # Notes tier → medium
         self._con.execute(
@@ -272,17 +413,33 @@ class Store:
                 "UPDATE node SET confidence = ? WHERE id = ?", (min_c, nid)
             )
 
-    def compute_node_confidence(self, node_id: str) -> str:
-        """Compute confidence score for a node per the inference rules.
+    def compute_node_confidence(self, node_id: str) -> str | None:
+        """Compute confidence score for a node.
 
-        Evaluates ``CONFIDENCE_RULES`` in priority order; first match wins.
-        See ``src/memex/rules.py`` for the rule definitions (C1–C4).
+        URL nodes have no confidence (None). Extracted nodes take their
+        confidence from the fetcher_type map (``rules.EXTRACTED_CONFIDENCE``),
+        unless a ``contradicts`` edge targets them — C4 (incoming contradicts
+        overrides everything) is evaluated first and wins, matching the 'low'
+        that ``_propagate_contradiction`` writes into the row.
+        Everything else evaluates ``CONFIDENCE_RULES`` in priority order;
+        first match wins. See ``src/memex/rules.py`` for the rule
+        definitions (C1–C4).
 
         Raises ``ValueError`` if ``node_id`` is not found.
         """
         node = self.get_node(node_id)
         if node is None:
             raise ValueError(f"node not found: {node_id}")
+
+        if node["kind"] == "url":
+            return None
+        if node["kind"] == "extracted":
+            # C4 is first in priority order: an incoming contradicts edge
+            # overrides everything, fetcher map included.
+            c4 = next(rule for rule in CONFIDENCE_RULES if rule.id == "C4")
+            if c4.condition(self, node_id):
+                return c4.consequence
+            return EXTRACTED_CONFIDENCE.get(node.get("fetcher_type"))
 
         for rule in CONFIDENCE_RULES:
             if rule.condition(self, node_id):
@@ -330,7 +487,7 @@ class Store:
 
         Returns the same per-node fields as ``get_node``: ``{id, kind, tier,
         trust_state, depth, content_path, created_at, confidence, check_failures,
-        synthesis_statements, is_contested, contested_at,
+        synthesis_statements, is_contested, contested_at, fetcher_type,
         canonical_key, source_url, title, fetched_at, failed}``.
         """
         clauses: list[str] = []
@@ -353,7 +510,7 @@ class Store:
                 n.id, n.kind, n.tier, n.trust_state, n.depth,
                 n.content_path, n.created_at, n.check_failures,
                 n.synthesis_statements,
-                n.is_contested, n.contested_at, n.confidence,
+                n.is_contested, n.contested_at, n.confidence, n.fetcher_type,
                 s.canonical_key, s.source_url, s.title, s.fetched_at, s.failed
             FROM node n
             LEFT JOIN source s ON s.node_id = n.id
@@ -389,7 +546,7 @@ class Store:
         """Full node + source by id.
         Returns ``{id, kind, tier, trust_state, depth, content_path, created_at,
         confidence, check_failures, synthesis_statements, is_contested, contested_at,
-        canonical_key, source_url, title, fetched_at, failed}`` or ``None``.
+        fetcher_type, canonical_key, source_url, title, fetched_at, failed}`` or ``None``.
         """
         row = self._con.execute(
             """
@@ -397,7 +554,7 @@ class Store:
                 n.id, n.kind, n.tier, n.trust_state, n.depth, n.content_path, n.created_at,
                 n.check_failures,
                 n.synthesis_statements,
-                n.is_contested, n.contested_at, n.confidence,
+                n.is_contested, n.contested_at, n.confidence, n.fetcher_type,
                 s.canonical_key, s.source_url, s.title, s.fetched_at, s.failed
             FROM node n
             LEFT JOIN source s ON s.node_id = n.id
@@ -435,7 +592,17 @@ class Store:
 
         When ``relation == 'contradicts'`` the contested-state propagation
         flow is triggered automatically within the current transaction.
+
+        Raises ``StoreError`` when a 'contradicts' edge targets a URL node:
+        URL nodes are the immutable root of every chain and can never become
+        contested. The check runs before the insert, so nothing is written.
         """
+        if relation == "contradicts":
+            target = self._con.execute(
+                "SELECT kind FROM node WHERE id = ?", (to_node,)
+            ).fetchone()
+            if target is not None and target["kind"] == "url":
+                raise StoreError("URL nodes cannot be contested")
         try:
             self._con.execute(
                 """

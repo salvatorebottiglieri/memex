@@ -113,6 +113,18 @@ CONFIDENCE_RULES: list[Rule] = [
 ]
 
 
+# ── Extracted-node confidence (ticket #95) ──────────────────────────────
+
+# Extracted nodes carry no provenance of their own; their confidence is set
+# from the fetcher that produced them. URL nodes (the root of every chain)
+# have no confidence at all — handled in ``store.compute_node_confidence``.
+EXTRACTED_CONFIDENCE: dict[str, str] = {
+    "http": "medium",
+    "youtube": "low",
+    "pdf": "high",
+}
+
+
 # ── Deterministic check rules (accumulate all failures) ────────────
 
 def _d1_provenance_check(
