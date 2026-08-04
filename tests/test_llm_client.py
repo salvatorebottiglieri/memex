@@ -142,9 +142,6 @@ class TestAnthropicAgent:
     @staticmethod
     def _make_mock_anthropic(message_text: str):
         """Build a fake anthropic module returning the given message text."""
-        import sys  # noqa: PLC0415
-        from unittest.mock import MagicMock  # noqa: PLC0415
-
         fake_message = MagicMock()
         fake_message.content = [MagicMock(text=message_text)]
 
@@ -302,9 +299,6 @@ class TestExtractIdeas:
     @staticmethod
     def _make_mock_anthropic(message_text: str):
         """Build a fake anthropic module returning the given message text."""
-        import sys  # noqa: PLC0415
-        from unittest.mock import MagicMock  # noqa: PLC0415
-
         fake_message = MagicMock()
         fake_message.content = [MagicMock(text=message_text)]
 
@@ -382,3 +376,112 @@ class TestExtractIdeas:
                 sys.modules["anthropic"] = saved
 
         assert result == []
+
+
+class TestCliAgents:
+    """PiAgent / OMPAgent — instantiation and review() contract."""
+
+    def test_omp_agent_loads(self):
+        """OMPAgent instantiates via MEMEX_AGENT module:Class path (regression: abstract review())."""
+        from memex.derivers.pi import OMPAgent  # noqa: PLC0415
+
+        client = load_agent("memex.derivers.pi:OMPAgent")
+        assert isinstance(client, OMPAgent)
+
+    def test_pi_agent_loads(self):
+        """PiAgent instantiates via MEMEX_AGENT module:Class path."""
+        from memex.derivers.pi import PiAgent  # noqa: PLC0415
+
+        client = load_agent("memex.derivers.pi:PiAgent")
+        assert isinstance(client, PiAgent)
+
+    def test_review_parses_fenced_json(self):
+        """OMPAgent.review parses a fenced JSON response from call_llm."""
+        from memex.derivers.pi import OMPAgent  # noqa: PLC0415
+
+        client = OMPAgent()
+        raw = (
+            '```json\n{"affected_node_ids": ["n1", "n2"], '
+            '"damage_boundary_node_id": "n2", '
+            '"rationale_md": "Both depend on the claim.", '
+            '"confidence": "medium"}\n```'
+        )
+        with patch.object(client, "call_llm", return_value=raw) as mock_call:
+            rp = client.review("target", "asserting", {"edge_id": "e1"})
+
+        mock_call.assert_called_once()
+        assert isinstance(rp, ReviewProposal)
+        assert rp.affected_node_ids == ["n1", "n2"]
+        assert rp.damage_boundary_node_id == "n2"
+        assert rp.confidence == "medium"
+
+    def test_review_fallback_on_bad_json(self):
+        """OMPAgent.review degrades gracefully when call_llm returns non-JSON."""
+        from memex.derivers.pi import OMPAgent  # noqa: PLC0415
+
+        client = OMPAgent()
+        with patch.object(client, "call_llm", return_value="I cannot analyze this.") as mock_call:
+            rp = client.review("target", "asserting", {})
+
+        mock_call.assert_called_once()
+        assert isinstance(rp, ReviewProposal)
+        assert rp.affected_node_ids == []
+        assert rp.damage_boundary_node_id is None
+        assert rp.confidence == "low"
+        assert "cannot analyze" in rp.rationale_md
+
+
+class TestReaderModePrompts:
+    """Reader agents format a DocumentRef prompt and enable the read tool."""
+
+    def test_derive_with_reference_enables_read_and_lists_path(self):
+        from unittest.mock import patch
+
+        from memex.derivers.pi import OMPAgent
+        from memex.schemas import DocumentRef
+
+        agent = OMPAgent()
+        ref = DocumentRef(
+            node_id="n1", content_path="/tmp/doc.md",
+            title="Doc", source_url="https://x.example/d",
+            size_bytes=12345,
+        )
+        with patch.object(agent, "call_llm", return_value='{"prose":"# T\\nBody.","synthesis_statements":[]}') as mock:
+            agent.derive(reference=ref)
+
+        args, kwargs = mock.call_args
+        assert kwargs["allow_read"] is True
+        assert "/tmp/doc.md" in args[0]
+        assert "12345" in args[0]
+
+    def test_derive_with_content_disables_read(self):
+        from unittest.mock import patch
+
+        from memex.derivers.pi import OMPAgent
+
+        agent = OMPAgent()
+        with patch.object(agent, "call_llm", return_value='{"prose":"# T\\nBody.","synthesis_statements":[]}') as mock:
+            agent.derive(content="some inline content")
+
+        args, kwargs = mock.call_args
+        # No reference -> read tool stays disabled (allow_read absent/false).
+        assert kwargs.get("allow_read", False) is False
+        assert "some inline content" in args[0]
+
+    def test_derive_with_reference_list_formats_each_document(self):
+        from unittest.mock import patch
+
+        from memex.derivers.pi import OMPAgent
+        from memex.schemas import DocumentRef
+
+        agent = OMPAgent()
+        refs = [
+            DocumentRef(node_id="n1", content_path="/tmp/a.md", size_bytes=1),
+            DocumentRef(node_id="n2", content_path="/tmp/b.md", size_bytes=2),
+        ]
+        with patch.object(agent, "call_llm", return_value='{"prose":"# T\\nBody.","synthesis_statements":[]}') as mock:
+            agent.derive(reference=refs)
+
+        args, _ = mock.call_args
+        assert "Document 1" in args[0] and "/tmp/a.md" in args[0]
+        assert "Document 2" in args[0] and "/tmp/b.md" in args[0]

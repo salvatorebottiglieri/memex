@@ -86,3 +86,30 @@ class FakeAgentThrowsOnReview(Agent):
 
     def extract_ideas(self, content: str, source_url: str | None = None) -> list[str]:
         pass
+
+
+class FakeReaderAgent(Agent):
+    """Reader-capable fake: records what the service hands it (content vs reference)."""
+
+    can_read_files = True
+
+    def __init__(self):
+        self.received: dict = {}
+
+    def derive(self, content=None, *, reference=None):
+        self.received = {"content": content, "reference": reference}
+        return DerivationResult(
+            prose="# Notes\n\nBody.\n\n> Synthesis: A reader-mode claim.\n",
+            synthesis_statements=["A reader-mode claim."],
+        )
+
+    def review(self, target_content, asserting_content, edge_payload):
+        return ReviewProposal(
+            affected_node_ids=[],
+            damage_boundary_node_id=None,
+            rationale_md="Reader fake review.",
+            confidence="high",
+        )
+
+    def extract_ideas(self, content=None, source_url=None, *, reference=None):
+        return ["Reader idea"]

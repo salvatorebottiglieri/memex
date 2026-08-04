@@ -5,7 +5,7 @@ derivation (impartial judge). The prompt asks it to be critical.
 """
 
 from memex.agent import Agent
-from memex.schemas import DerivationResult
+from memex.schemas import DerivationResult, DocumentRef
 from memex.derivers.demo import DemoAgent
 
 _VERIFY_QUALITY_PROMPT = """\
@@ -38,10 +38,15 @@ Synthesis statements:
 
 def validate_derivation(
     agent: Agent,
-    parent_content: str,
+    parent_content: str | None,
     derivation: DerivationResult,
+    *,
+    reference: DocumentRef | None = None,
 ) -> tuple[bool, str | None]:
     """Adversarial validation: check if derivation genuinely re-elaborates parent.
+
+    Reader validators receive ``reference`` instead of inlined parent content
+    and read the parent document themselves.
 
     Returns (bool, str | None):
       (True, None) — clean pass
@@ -57,17 +62,34 @@ def validate_derivation(
     if call is None:
         return True, None  # Unknown agent type, skip validation
 
+    allow_read = bool(reference is not None and getattr(agent, "can_read_files", False))
+    if allow_read:
+        docs = reference if isinstance(reference, list) else [reference]
+        doc_lines = "\n".join(
+            f"- path: {d.content_path}\n  size_bytes: {d.size_bytes}"
+            for d in docs
+        )
+        parent_block = (
+            "Parent content is available at the paths below — read every file "
+            "yourself with the read tool:\n" + doc_lines
+        )
+    else:
+        parent_block = parent_content or "(no parent content)"
     statements = "\n".join(f"- {s}" for s in derivation.synthesis_statements)
     try:
         prompt = _VERIFY_QUALITY_PROMPT.format(
-            parent_content=parent_content,
+            parent_content=parent_block,
             derivation_prose=derivation.prose,
             statements=statements,
         )
     except (KeyError, ValueError, AttributeError):
         return True, "Validator prompt formatting failed, validation skipped"
     try:
-        raw = call(prompt)
+        try:
+            raw = call(prompt, allow_read=allow_read)
+        except TypeError:
+            # Legacy validator callables without the allow_read keyword.
+            raw = call(prompt)
     except Exception:
         return True, "Validator LLM call failed, validation skipped"
 
