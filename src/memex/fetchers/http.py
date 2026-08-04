@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 from memex.fetchers import FetchError, FetchResult, Fetcher
 
@@ -74,7 +75,7 @@ class HttpFetcher(Fetcher):
 
     TYPE = "http"
 
-    def fetch(self, url: str) -> FetchResult:
+    def fetch(self, url: str, *, cache_dir: Path | None = None) -> FetchResult:
         raw = download_bytes(url)
         html = raw.decode("utf-8", errors="replace")
 

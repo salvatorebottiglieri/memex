@@ -1145,19 +1145,32 @@ class Store:
             (trust_state, failures_json, node_id),
         )
 
-    def update_extracted_fetcher(self, node_id: str, fetcher_type: str) -> None:
+    def update_extracted_fetcher(
+        self, node_id: str, fetcher_type: str, content_path: str | None = None
+    ) -> None:
         """Refresh an extracted node's fetcher metadata after a re-extract.
 
         Sets ``fetcher_type`` and recomputes ``confidence`` from the fetcher
         map so a re-extract through a different fetcher never leaves stale
         values behind (an incoming C4 ``contradicts`` edge keeps its 'low'
-        override via ``compute_node_confidence``).
+        override via ``compute_node_confidence``). When ``content_path`` is
+        given, the node row's file location is updated too — a re-extract
+        may move the node between a fetcher cache artifact
+        (``vault/.cache/...``) and a CLI-owned file
+        (``vault/extracted/<node>.md``), and derive/render read the row's
+        content_path (ticket #99, findings 2/3).
         """
         try:
-            self._con.execute(
-                "UPDATE node SET fetcher_type = ? WHERE id = ?",
-                (fetcher_type, node_id),
-            )
+            if content_path is None:
+                self._con.execute(
+                    "UPDATE node SET fetcher_type = ? WHERE id = ?",
+                    (fetcher_type, node_id),
+                )
+            else:
+                self._con.execute(
+                    "UPDATE node SET fetcher_type = ?, content_path = ? WHERE id = ?",
+                    (fetcher_type, content_path, node_id),
+                )
         except sqlite3.Error as e:
             raise StoreError(str(e)) from e
         confidence = self.compute_node_confidence(node_id)

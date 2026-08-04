@@ -40,6 +40,18 @@ def _store():
     return s
 
 
+def _counts(db_path) -> tuple[int, int, int]:
+    """Return (url_nodes, extracted_nodes, source_rows) in the DB."""
+    con = sqlite3.connect(str(db_path))
+    try:
+        urls = con.execute("SELECT COUNT(*) FROM node WHERE kind = 'url'").fetchone()[0]
+        exts = con.execute("SELECT COUNT(*) FROM node WHERE kind = 'extracted'").fetchone()[0]
+        srcs = con.execute("SELECT COUNT(*) FROM source").fetchone()[0]
+    finally:
+        con.close()
+    return urls, exts, srcs
+
+
 def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
 

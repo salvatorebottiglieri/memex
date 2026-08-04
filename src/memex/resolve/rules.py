@@ -150,6 +150,29 @@ class MediaRule(ResolutionRule):
         return None
 
 
+class YouTubeRule(ResolutionRule):
+    """Matches YouTube watch pages and resolves to the transcript fetcher.
+
+    ``youtube.com/watch?v=<id>`` (with or without ``www.``) and
+    ``youtu.be/<id>`` shortlinks. Reuses ``canonical_key._youtube_id`` so
+    resolution and dedup agree on what counts as a YouTube video URL.
+    """
+
+    def match(self, url: str) -> Resolution | None:
+        from urllib.parse import urlparse
+
+        from memex.canonical_key import _youtube_id
+
+        parsed = urlparse(url)
+        if _youtube_id(parsed) is not None:
+            return Resolution(
+                url=url,
+                type="youtube",
+                ingestable=True,
+            )
+        return None
+
+
 class DefaultRule(ResolutionRule):
     """Fallback rule: matches any http/https URL as a generic web page."""
 
@@ -170,6 +193,7 @@ _default_rules: list[ResolutionRule] = [
     GitHubBlobRule(),
     WikipediaRule(),
     MediaRule(),
+    YouTubeRule(),
     DefaultRule(),
 ]
 

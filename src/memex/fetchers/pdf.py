@@ -6,6 +6,7 @@ missing the fetcher raises a clear ``FetchError`` instead of crashing.
 from __future__ import annotations
 
 import io
+from pathlib import Path
 
 from memex.fetchers import FetchError, FetchResult, Fetcher
 from memex.fetchers.http import download_bytes
@@ -16,7 +17,7 @@ class PDFFetcher(Fetcher):
 
     TYPE = "pdf"
 
-    def fetch(self, url: str) -> FetchResult:
+    def fetch(self, url: str, *, cache_dir: Path | None = None) -> FetchResult:
         try:
             from pypdf import PdfReader
         except ImportError as exc:

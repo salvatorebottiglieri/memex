@@ -303,11 +303,13 @@ def resolve(url: str | None) -> None:
 def extract(db_path: Path, vault_path: Path, force: bool, url: str) -> None:
     """Fetch a URL and create the url+extracted node pair (idempotent).
 
-    Resolution rules pick the per-type fetcher (HTML/PDF). Non-ingestable
-    URLs (X/Twitter, media) get an advisory response and create no nodes.
-    Re-running the same canonical URL returns ``already_exists``; ``--force``
-    re-fetches and overwrites the extracted content in place (mutability per
-    map #76).
+    Resolution rules pick the per-type fetcher (HTML/PDF/Wikipedia/YouTube).
+    Per-type fetchers may cache immutable artifacts under ``vault/.cache``
+    (YouTube transcripts, ADR-0013) — the extracted node then points at the
+    cache file. Non-ingestable URLs (X/Twitter, media) get an advisory
+    response and create no nodes. Re-running the same canonical URL returns
+    ``already_exists``; ``--force`` re-fetches and overwrites the extracted
+    content in place (mutability per map #76).
     """
     from memex.checks import run_checks
     from memex.fetchers import FetchError, fetch, get_fetcher
@@ -364,8 +366,10 @@ def extract(db_path: Path, vault_path: Path, force: bool, url: str) -> None:
             return
 
         # --- Fetch through the resolution-selected fetcher ---
+        # The vault-level cache dir (vault/.cache, ADR-0013) lets per-type
+        # fetchers cache immutable artifacts (YouTube transcripts).
         try:
-            result = fetch(url, resolution)
+            result = fetch(url, resolution, cache_dir=vault_path / ".cache")
         except FetchError as exc:
             if existing is None:
                 store.create_node(node_id=url_node_id, kind="url", created_at=now)
@@ -386,22 +390,34 @@ def extract(db_path: Path, vault_path: Path, force: bool, url: str) -> None:
             return
 
         # --- Success: write content, then create/update nodes ---
+        # vault/.cache is NOT created eagerly: only per-type fetchers that
+        # cache immutable artifacts (YouTube transcripts, ADR-0013) mkdir it
+        # lazily, so http/pdf/wikipedia extracts never leave an empty dir.
         vault_path.mkdir(parents=True, exist_ok=True)
         extracted_dir = vault_path / "extracted"
         extracted_dir.mkdir(parents=True, exist_ok=True)
 
         fetcher_type = get_fetcher(url, resolution).TYPE
         if extracted_node is not None:
-            # --force: regenerate in place, same node id (mutability per #76)
+            # --force: regenerate in place, same node id (mutability per #76).
+            # When the fetch writes no artifact, the content ALWAYS lands on a
+            # fresh CLI-owned file under vault/extracted/<node_id>.md — never
+            # the DB's previous content_path, which may be a fetcher cache
+            # artifact (vault/.cache/youtube-<id>.md). Overwriting a cache
+            # file with metadata-only content would poison the immutable
+            # cache-first branch forever (ticket #99, finding 3).
             extracted_node_id = extracted_node["id"]
-            md_path = Path(extracted_node["content_path"])
+            md_path = extracted_dir / f"{extracted_node_id}.md"
             status = "re_extracted"
         else:
             extracted_node_id = str(uuid.uuid4())
             md_path = extracted_dir / f"{extracted_node_id}.md"
             status = "extracted"
 
-        # The .md file and the DB rows are one unit. New content is written
+        # The .md file and the DB rows are one unit. When the fetcher wrote
+        # its own artifact (YouTube transcript cache, ADR-0013) the file is
+        # already on disk and immutable — checks run against it in place and
+        # the temp/rename dance is skipped. Otherwise new content is written
         # to a temp file next to the final path first; the checks run against
         # that temp file, and it is atomically renamed onto the final path
         # ONLY after update_trust_state has succeeded — the overwrite is the
@@ -409,9 +425,18 @@ def extract(db_path: Path, vault_path: Path, force: bool, url: str) -> None:
         # can never be newer than the DB state. On any failure the temp file
         # is discarded (fresh and --force alike): a fresh extract leaves no
         # orphan, a re-extract leaves the previous file untouched.
-        tmp_path = md_path.with_name(f"{md_path.name}.{uuid.uuid4().hex}.tmp")
+        fetcher_wrote_file = result.content_path is not None
+        if fetcher_wrote_file:
+            md_path = Path(result.content_path)
+        tmp_path = (
+            None
+            if fetcher_wrote_file
+            else md_path.with_name(f"{md_path.name}.{uuid.uuid4().hex}.tmp")
+        )
+        check_path = md_path if fetcher_wrote_file else tmp_path
         try:
-            tmp_path.write_text(result.content, encoding="utf-8")
+            if not fetcher_wrote_file:
+                tmp_path.write_text(result.content, encoding="utf-8")
 
             if existing is None:
                 store.create_node(node_id=url_node_id, kind="url", created_at=now)
@@ -436,11 +461,16 @@ def extract(db_path: Path, vault_path: Path, force: bool, url: str) -> None:
                 )
             else:
                 # --force: refresh fetcher metadata from the new fetch — a
-                # different fetcher must not leave stale values behind.
-                store.update_extracted_fetcher(extracted_node_id, fetcher_type)
+                # different fetcher must not leave stale values behind, and
+                # the node row must track the resolved content file (which
+                # may have moved between a fetcher cache artifact and a
+                # CLI-owned vault/extracted file, ticket #99 finding 2).
+                store.update_extracted_fetcher(
+                    extracted_node_id, fetcher_type, content_path=str(md_path)
+                )
 
             # --- Checks -> trust (draft → auto-verified when checks pass) ---
-            check_result = run_checks(store._con, extracted_node_id, tmp_path)
+            check_result = run_checks(store._con, extracted_node_id, check_path)
             trust_state = "auto-verified" if check_result.passed else "draft"
             store.update_trust_state(
                 node_id=extracted_node_id,
@@ -448,11 +478,15 @@ def extract(db_path: Path, vault_path: Path, force: bool, url: str) -> None:
                 check_failures=check_result.failures,
             )
 
-            # Final step before commit: atomically move the temp file into
-            # place so the on-disk content always matches the DB state.
-            os.replace(tmp_path, md_path)
+            if not fetcher_wrote_file:
+                # Final step before commit: atomically move the temp file
+                # into place so the on-disk content always matches the DB
+                # state. Fetcher-written artifacts (cache files) are already
+                # in place and must stay untouched.
+                os.replace(tmp_path, md_path)
         except BaseException:
-            tmp_path.unlink(missing_ok=True)
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
             raise
 
         confidence = store.get_node(extracted_node_id)["confidence"]
