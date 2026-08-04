@@ -146,7 +146,7 @@ class TestConfidenceRuleC4:
                           relation="contradicts", from_node=l0_id, to_node=deriv_id)
 
         rule = _rule(CONFIDENCE_RULES, "C4")
-        assert rule.condition(store, deriv_id) == True
+        assert rule.condition(store, deriv_id) is True
 
     def test_no_contradict_does_not_fire(self):
         store, _ = _store()
@@ -154,7 +154,7 @@ class TestConfidenceRuleC4:
         deriv_id = _add_derived(store, l0_id)
 
         rule = _rule(CONFIDENCE_RULES, "C4")
-        assert rule.condition(store, deriv_id) == False
+        assert rule.condition(store, deriv_id) is False
 
     def test_fires_for_extracted_node(self):
         """C4 is kind-agnostic: it fires on extracted nodes too, so
@@ -173,7 +173,7 @@ class TestConfidenceRuleC4:
         )
 
         rule = _rule(CONFIDENCE_RULES, "C4")
-        assert rule.condition(store, ext) == True
+        assert rule.condition(store, ext) is True
 
 
 class TestConfidenceRuleC3:
@@ -188,7 +188,7 @@ class TestConfidenceRuleC3:
                           relation="derived_from", from_node=deriv_id, to_node=l0_2)
 
         rule = _rule(CONFIDENCE_RULES, "C3")
-        assert rule.condition(store, deriv_id) == True
+        assert rule.condition(store, deriv_id) is True
 
     def test_one_parent_does_not_fire_c3(self):
         store, _ = _store()
@@ -196,7 +196,7 @@ class TestConfidenceRuleC3:
         deriv_id = _add_derived(store, l0_id)
 
         rule = _rule(CONFIDENCE_RULES, "C3")
-        assert rule.condition(store, deriv_id) == False
+        assert rule.condition(store, deriv_id) is False
 
 
 class TestConfidenceRuleC2:
@@ -208,7 +208,7 @@ class TestConfidenceRuleC2:
         deriv_id = _add_derived(store, l0_id)
 
         rule = _rule(CONFIDENCE_RULES, "C2")
-        assert rule.condition(store, deriv_id) == True
+        assert rule.condition(store, deriv_id) is True
 
     def test_two_parents_does_not_fire_c2(self):
         store, _ = _store()
@@ -219,7 +219,7 @@ class TestConfidenceRuleC2:
                           relation="derived_from", from_node=deriv_id, to_node=l0_2)
 
         rule = _rule(CONFIDENCE_RULES, "C2")
-        assert rule.condition(store, deriv_id) == False
+        assert rule.condition(store, deriv_id) is False
 
 
 class TestConfidenceRuleC1:
@@ -230,7 +230,7 @@ class TestConfidenceRuleC1:
         l0_id = _add_l0(store)
 
         rule = _rule(CONFIDENCE_RULES, "C1")
-        assert rule.condition(store, l0_id) == True
+        assert rule.condition(store, l0_id) is True
 
     def test_derived_node_does_not_fire_c1(self):
         store, _ = _store()
@@ -238,7 +238,7 @@ class TestConfidenceRuleC1:
         deriv_id = _add_derived(store, l0_id)
 
         rule = _rule(CONFIDENCE_RULES, "C1")
-        assert rule.condition(store, deriv_id) == False
+        assert rule.condition(store, deriv_id) is False
 
 
 class TestConfidenceRulePriority:

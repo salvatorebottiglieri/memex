@@ -10,7 +10,7 @@ from pathlib import Path
 
 from memex.store import Store, StoreError
 
-from tests.conftest import _store, _utcnow
+from tests.conftest import _store
 
 
 
@@ -1252,3 +1252,48 @@ class TestEdgeCursor:
             assert callable(getattr(store, name)), f"store.{name} is not callable"
 
 
+
+
+class TestMigrateOnOpen:
+    """Store.open auto-migrates existing pre-#95 DBs (ADR-0015 git sync)."""
+
+    def test_open_migrates_pre_95_db(self, tmp_path):
+        """A DB missing fetcher_type is migrated in place; data survives."""
+        db = tmp_path / "legacy.db"
+        con = sqlite3.connect(db)
+        con.execute(
+            "CREATE TABLE node ("
+            " id TEXT PRIMARY KEY, kind TEXT NOT NULL, tier TEXT,"
+            " trust_state TEXT NOT NULL, depth INTEGER NOT NULL,"
+            " content_path TEXT NOT NULL, created_at TEXT NOT NULL)"
+        )
+        con.execute(
+            "INSERT INTO node VALUES ("
+            " 'n1', 'raw_source', NULL, 'draft', 0, '/tmp/n1.md', '2024-01-01T00:00:00')"
+        )
+        con.commit()
+        con.close()
+
+        with Store.open(db) as store:
+            node = store.get_node("n1")
+            assert node is not None
+            assert node["id"] == "n1"
+
+        cols = {
+            r[1]
+            for r in sqlite3.connect(db).execute("PRAGMA table_info(node)").fetchall()
+        }
+        assert "fetcher_type" in cols
+
+    def test_open_leaves_fresh_db_alone(self, tmp_path):
+        """A brand-new empty DB is not schema-created by open (init owns it)."""
+        db = tmp_path / "empty.db"
+        with Store.open(db):
+            pass
+        con = sqlite3.connect(db)
+        tables = {
+            r[0]
+            for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        con.close()
+        assert "node" not in tables

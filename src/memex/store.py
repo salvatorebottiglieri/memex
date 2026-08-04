@@ -124,13 +124,34 @@ class Store:
         con.row_factory = sqlite3.Row
         con.execute("PRAGMA foreign_keys = ON")
         try:
-            yield cls(con)
+            store = cls(con)
+            store._migrate_if_needed()
+            yield store
             con.commit()
         except BaseException:
             con.rollback()
             raise
         finally:
             con.close()
+
+    def _migrate_if_needed(self) -> None:
+        """Apply pending schema migrations when the DB exists but is behind.
+
+        Fresh/empty DBs (no ``node`` table) are left alone — ``memex init``
+        owns schema creation. Existing DBs missing the post-#95
+        ``fetcher_type`` column are migrated in place (idempotent and
+        transactional via ``init_schema``). Without this, a pre-#95 DB that
+        arrives via git sync (ADR-0015) crashes every read command with
+        ``no such column: n.fetcher_type``.
+        """
+        row = self._con.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'node'"
+        ).fetchone()
+        if row is None:
+            return
+        cols = {r[1] for r in self._con.execute("PRAGMA table_info(node)")}
+        if "fetcher_type" not in cols:
+            self.init_schema()
 
     # ── Schema ────────────────────────────────────────────────────
 
@@ -1369,23 +1390,27 @@ class Store:
                 "SELECT COALESCE(confidence, 'unset'), COUNT(*) FROM node GROUP BY confidence"
             ).fetchall())
 
-            # Roots are URL nodes; coverage measures how many extracted nodes
-            # carry a provenance derived_from edge (ticket #98).
+            # Roots are URL nodes; coverage measures how many content-bearing
+            # L0 nodes (legacy raw_source or extracted) have at least one
+            # derivation resting on them. Count over e.to_node — the L0 target
+            # — never e.from_node: counting from_node would measure the
+            # extracted->url edge that every ingested pair has by construction
+            # (regression introduced by #98, made the metric read 100% always).
             roots = self._con.execute(
                 "SELECT COUNT(*) FROM node WHERE kind = 'url'"
             ).fetchone()[0]
-            extracted_total = self._con.execute(
-                "SELECT COUNT(*) FROM node WHERE kind = 'extracted'"
+            l0_total = self._con.execute(
+                "SELECT COUNT(*) FROM node WHERE kind IN ('raw_source', 'extracted')"
             ).fetchone()[0]
-            extracted_derived = self._con.execute(
+            l0_derived = self._con.execute(
                 """
-                SELECT COUNT(DISTINCT e.from_node) FROM edge e
-                JOIN node n ON n.id = e.from_node
+                SELECT COUNT(DISTINCT e.to_node) FROM edge e
+                JOIN node n ON n.id = e.to_node
                 WHERE e.type = 'provenance' AND e.relation = 'derived_from'
-                  AND n.kind = 'extracted'
+                  AND n.kind IN ('raw_source', 'extracted')
                 """
             ).fetchone()[0]
-            coverage = round(extracted_derived / extracted_total * 100, 1) if extracted_total > 0 else 0.0
+            coverage = round(l0_derived / l0_total * 100, 1) if l0_total > 0 else 0.0
 
             pending_reviews = self._con.execute(
                 "SELECT COUNT(*) FROM event_queue WHERE status = 'pending'"

@@ -37,10 +37,13 @@ class ResolutionRule(ABC):
 
 
 class ArxivRule(ResolutionRule):
-    """Matches arxiv.org/abs/ URLs and resolves to PDF."""
+    """Matches arxiv.org/abs/ and arxiv.org/pdf/ URLs, resolves to the PDF."""
 
+    # abs pages and direct pdf links (with or without trailing .pdf) share
+    # the same paper id; direct pdf links without the extension previously
+    # fell through to the http fetcher, which stored the binary as text.
     _ARXIV_PATTERN = re.compile(
-        r"^https?://arxiv\.org/abs/(\d+\.\d+)(v\d+)?"
+        r"^https?://arxiv\.org/(?:abs|pdf)/(\d+\.\d+)(v\d+)?(?:\.pdf)?"
     )
 
     def match(self, url: str) -> Resolution | None:

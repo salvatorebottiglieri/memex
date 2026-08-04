@@ -9,8 +9,6 @@ import sqlite3
 import uuid
 from pathlib import Path
 
-import pytest
-
 from memex.checks import CheckResult, run_checks
 
 
@@ -470,3 +468,33 @@ class TestMultipleFailures:
 
         assert result1.passed == result2.passed
         assert result1.failures == result2.failures
+
+
+class TestSizeBoundsSynthesisTier:
+    """Synthesis-tier nodes get a wider size ceiling than notes."""
+
+    def test_synthesis_over_max_chars_passes(self, tmp_path):
+        """Content above MAX_CHARS but under the synthesis ceiling passes."""
+        from memex.checks import MAX_CHARS
+        con, deriv_id, content_path = _setup_db(tmp_path)
+        con.execute("UPDATE node SET tier = 'synthesis', depth = 2 WHERE id = ?", (deriv_id,))
+        con.commit()
+        content_path.write_text("> Synthesis: ok\n" + "x" * (MAX_CHARS + 1), encoding="utf-8")
+
+        result = run_checks(con, deriv_id, content_path)
+        con.close()
+
+        assert result.passed is True
+
+    def test_synthesis_way_over_max_chars_fails(self, tmp_path):
+        """Even synthesis tier fails beyond its wider ceiling."""
+        con, deriv_id, content_path = _setup_db(tmp_path)
+        con.execute("UPDATE node SET tier = 'synthesis', depth = 2 WHERE id = ?", (deriv_id,))
+        con.commit()
+        content_path.write_text("> Synthesis: ok\n" + "x" * 160_000, encoding="utf-8")
+
+        result = run_checks(con, deriv_id, content_path)
+        con.close()
+
+        assert result.passed is False
+        assert any("long" in f.lower() for f in result.failures)

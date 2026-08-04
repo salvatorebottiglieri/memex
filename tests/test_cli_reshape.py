@@ -72,7 +72,7 @@ def _seed(store) -> dict:
     )
     st.create_edge(
         edge_id=str(uuid.uuid4()), type="provenance", relation="derived_from",
-        from_node=summary_id, to_node=url_id,
+        from_node=summary_id, to_node=ext_id,
     )
 
     raw_id = str(uuid.uuid4())
@@ -159,7 +159,8 @@ class TestShowReshape:
         assert data["canonical_key"] == "https://example.com/article"
         assert data["source_url"] == "https://example.com/article"
         assert data["title"] == "Example Article"
-        assert set(data["children"]) == {ids["extracted"], ids["summary"]}
+        # The summary rests on the extracted node, not on the URL root.
+        assert set(data["children"]) == {ids["extracted"]}
         # Metadata only: no content, trust, confidence, tier or file fields.
         assert set(data.keys()) == {
             "id", "kind", "depth", "created_at",
@@ -221,7 +222,7 @@ class TestRenderReshape:
 
 class TestStatsReshape:
     def test_stats_counts_url_roots_and_extracted_coverage(self, store):
-        ids = _seed(store)
+        _seed(store)
         data = _memex(store, "stats")
         assert data["roots"] == 1
         assert data["by_kind"]["url"] == 1
@@ -231,8 +232,10 @@ class TestStatsReshape:
         assert data["by_tier"]["url"] == 1
         assert data["by_tier"]["extracted"] == 1
         assert data["by_tier"]["raw_source"] == 1
-        # Coverage: derived extracted / total extracted (1/1 here).
-        assert data["derivation_coverage_pct"] == 100.0
+        # Coverage: content-bearing L0s with a derivation / total L0s.
+        # The extracted node carries the summary; the legacy raw_source does
+        # not -> 1 of 2.
+        assert data["derivation_coverage_pct"] == 50.0
 
 
 # ── store layer (middle-out) ─────────────────────────────────────────
@@ -273,7 +276,8 @@ class TestStoreListNodesDefault:
 
 
 class TestStoreStatsReshape:
-    def test_stats_roots_and_coverage_over_extracted(self):
+    def test_stats_coverage_counts_l0s_with_derivations(self):
+        """Coverage = share of content-bearing L0s with a derivation resting on them."""
         store = _store()
         url_id = str(uuid.uuid4())
         store.create_node(node_id=url_id, kind="url")
@@ -285,13 +289,22 @@ class TestStoreStatsReshape:
         store.create_node(
             node_id=e2, kind="extracted", content_path="/tmp/e2.md", derived_from=url_id,
         )
+        s1 = str(uuid.uuid4())
+        store.create_node(node_id=s1, kind="summary", tier="notes", depth=1)
+        store.create_edge(
+            edge_id=str(uuid.uuid4()), type="provenance", relation="derived_from",
+            from_node=s1, to_node=e1,
+        )
         stats = store.get_stats()
         assert stats["roots"] == 1
-        assert stats["derivation_coverage_pct"] == 100.0
+        # 1 of 2 L0s carries a derivation.
+        assert stats["derivation_coverage_pct"] == 50.0
         assert stats["by_tier"]["url"] == 1
         assert stats["by_tier"]["extracted"] == 2
 
-    def test_stats_coverage_partial_when_extracted_edge_missing(self):
+    def test_stats_coverage_unaffected_by_extracted_url_edge(self):
+        """Contract guard (regression #98): the extracted->url provenance edge
+        is NOT a derivation — removing it must not move coverage."""
         store = _store()
         url_id = str(uuid.uuid4())
         store.create_node(node_id=url_id, kind="url")
@@ -303,11 +316,41 @@ class TestStoreStatsReshape:
         store.create_node(
             node_id=e2, kind="extracted", content_path="/tmp/e2.md", derived_from=url_id,
         )
-        # Remove e2's provenance edge -> coverage drops to 50%.
+        s1 = str(uuid.uuid4())
+        store.create_node(node_id=s1, kind="summary", tier="notes", depth=1)
+        store.create_edge(
+            edge_id=str(uuid.uuid4()), type="provenance", relation="derived_from",
+            from_node=s1, to_node=e1,
+        )
+        before = store.get_stats()["derivation_coverage_pct"]
+        assert before == 50.0
+        # e2's extracted->url edge is infrastructure, not a derivation.
         store._con.execute("DELETE FROM edge WHERE from_node = ?", (e2,))
+        assert store.get_stats()["derivation_coverage_pct"] == 50.0
+
+    def test_stats_coverage_counts_legacy_raw_source_l0s(self):
+        """Legacy raw_source L0s count toward the population and derivations."""
+        store = _store()
+        raw1 = str(uuid.uuid4())
+        store.create_node(node_id=raw1, kind="raw_source", tier=None)
+        raw2 = str(uuid.uuid4())
+        store.create_node(node_id=raw2, kind="raw_source", tier=None)
+        s1 = str(uuid.uuid4())
+        store.create_node(node_id=s1, kind="summary", tier="notes", depth=1)
+        store.create_edge(
+            edge_id=str(uuid.uuid4()), type="provenance", relation="derived_from",
+            from_node=s1, to_node=raw1,
+        )
         stats = store.get_stats()
-        assert stats["roots"] == 1
         assert stats["derivation_coverage_pct"] == 50.0
+        # A second derivation on raw2 pushes coverage to 100%.
+        s2 = str(uuid.uuid4())
+        store.create_node(node_id=s2, kind="summary", tier="notes", depth=1)
+        store.create_edge(
+            edge_id=str(uuid.uuid4()), type="provenance", relation="derived_from",
+            from_node=s2, to_node=raw2,
+        )
+        assert store.get_stats()["derivation_coverage_pct"] == 100.0
 
     def test_stats_no_url_roots(self):
         store = _store()

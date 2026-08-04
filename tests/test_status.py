@@ -1,8 +1,5 @@
 """Tests for `memex status` command."""
 import json
-from pathlib import Path
-
-import pytest
 
 
 def test_status_returns_json_with_paths_and_flags_when_initialized(tmp_path, run_memex):

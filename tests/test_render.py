@@ -15,11 +15,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
-import pytest
 import yaml
 
 from memex.store import Store
-from tests.conftest import _run_memex, register_node, WORKTREE
+from tests.conftest import _run_memex, register_node
 
 FAKE_AGENT = "tests.fake_llm_client:FakeAgent"
 
@@ -189,11 +188,9 @@ class TestRenderL0:
     def test_render_l0_body_preserved(self, store):
         """Body content is preserved through a render cycle."""
         data = _ingest(store, "https://example.com/article")
-        node_id = data["id"]
 
         # Read the original body before render
         md_path = _md_path(store, data)
-        original_body = md_path.read_text(encoding="utf-8")
 
         _render(store)
 
@@ -308,8 +305,6 @@ class TestRenderIdempotency:
     def test_render_twice_idempotent(self, store):
         """Re-rendering produces identical frontmatter."""
         data = _ingest(store, "https://example.com/article")
-        node_id = data["id"]
-
         _render(store)
         md_path = _md_path(store, data)
         fm1, body1 = _read_frontmatter(md_path)
@@ -322,9 +317,7 @@ class TestRenderIdempotency:
 
     def test_render_twice_no_new_json_entries(self, store):
         """Re-rendering returns the same JSON output."""
-        data = _ingest(store, "https://example.com/article")
-        node_id = data["id"]
-
+        _ingest(store, "https://example.com/article")
         r1 = _render(store)
         r2 = _render(store)
         assert r1 == r2
@@ -378,10 +371,7 @@ class TestRenderEdgeCases:
     def test_render_preserves_body_on_rerender(self, store):
         """Body content survives multiple render cycles unchanged."""
         data = _ingest(store, "https://example.com/article")
-        node_id = data["id"]
-
         md_path = _md_path(store, data)
-        original_body = md_path.read_text(encoding="utf-8")
 
         _render(store)
         _render(store)

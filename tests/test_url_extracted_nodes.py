@@ -13,7 +13,7 @@ import pytest
 
 from memex.store import Store, StoreError
 
-from tests.conftest import _store, _utcnow
+from tests.conftest import _store
 
 
 def _url_node(store, node_id=None) -> str:
