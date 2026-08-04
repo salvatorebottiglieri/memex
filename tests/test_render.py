@@ -289,8 +289,9 @@ class TestRenderDerivation:
         assert fm["tier"] == "notes"
         assert "tags" in fm
         assert "kind/summary" in fm["tags"]
-        # legacy D5 (notes=1) keeps depth-2 notes derivations in draft
-        assert "trust_state/draft" in fm["tags"]
+        # D5 accepts notes at parent depth + 1 (ticket #103), so the depth-2
+        # notes derivation auto-verifies
+        assert "trust_state/auto-verified" in fm["tags"]
         assert "tier/notes" in fm["tags"]
         # check_failures should be present for derivation nodes
         assert "check_failures" in fm

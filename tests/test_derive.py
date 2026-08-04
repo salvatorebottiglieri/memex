@@ -93,6 +93,33 @@ class TestDerive:
         assert trust_state == "auto-verified"
         assert depth == 1
 
+    def test_derive_from_extracted_root_auto_verifies(self, store):
+        """Notes derived from an extracted root (depth 1) land at depth 2 and
+        auto-verify (D5 accepts parent depth + 1, ticket #103)."""
+        vault = Path(store["vault"])
+        p = register_node(store, vault, "test.md", "https://example.com/article")
+        ingested = json.loads(p.stdout)
+        result = _derive(store, ingested["id"])
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        assert data["status"] == "derived"
+        assert data["trust_state"] == "auto-verified"
+        assert data["check_failures"] == []
+
+        con = sqlite3.connect(store["db"])
+        row = con.execute(
+            "SELECT kind, tier, trust_state, depth FROM node WHERE id = ?",
+            (data["id"],),
+        ).fetchone()
+        con.close()
+
+        assert row is not None
+        kind, tier, trust_state, depth = row
+        assert kind == "summary"
+        assert tier == "notes"
+        assert trust_state == "auto-verified"
+        assert depth == 2
+
     def test_derive_inserts_provenance_edge(self, store):
         vault = Path(store["vault"])
         p = register_node(store, vault, "test.md", "https://example.com/article")
@@ -212,9 +239,8 @@ class TestDeriveAll:
         """derive --all derives the extracted roots of url+extracted pairs.
 
         Summary lands at depth=2 (extracted is depth 1, parent_depth + 1) with
-        a provenance edge back to the extracted node. It stays draft while D5
-        hardcodes tier=notes => depth 1 (ticket #103 owns the D5 fix) — do NOT
-        assert auto-verified here.
+        a provenance edge back to the extracted node. D5 accepts notes at
+        parent depth + 1 (ticket #103), so the derivations auto-verify.
         """
         pairs = self._register_n(store, 3)
         extracted_ids = {p["id"] for p in pairs}
@@ -225,7 +251,8 @@ class TestDeriveAll:
         assert len(data) == 3
         assert all(r["status"] == "derived" for r in data)
         assert {r["l0_node_id"] for r in data} == extracted_ids
-        assert all(r["trust_state"] == "draft" for r in data)
+        assert all(r["trust_state"] == "auto-verified" for r in data)
+        assert all(r["check_failures"] == [] for r in data)
 
         con = sqlite3.connect(store["db"])
         depths = con.execute(

@@ -23,8 +23,8 @@ def _ingest(store, url: str) -> dict:
     ``memex register`` now produces url+extracted pairs; derive + checks
     still process legacy raw_source nodes. The depth-0 L0 shape is what keeps
     the passing-derivation assertions valid (a notes derivation of a depth-0
-    L0 lands at depth 1, so D5's notes=1 check passes and the node
-    auto-verifies). Seed those fixtures directly to exercise that path.
+    L0 lands at depth 1, so D5's parent-depth+1 expectation passes and the
+    node auto-verifies). Seed those fixtures directly to exercise that path.
     """
     filename = url.rsplit("/", 1)[-1].split("?", 1)[0] + ".md"
     md_path = store["vault"] / filename
