@@ -66,3 +66,23 @@ def test_resolve_empty_string(tmp_path):
     assert proc.returncode != 0
     data = json.loads(proc.stderr)
     assert "error" in data
+
+
+# ── ticket #99: youtube resolution ────────────────────────────────
+
+def test_resolve_youtube_watch_url(tmp_path):
+    proc = _run_memex(["resolve", "https://www.youtube.com/watch?v=dQw4w9WgXcQ"])
+    assert proc.returncode == 0, proc.stderr
+    data = json.loads(proc.stdout)
+    assert data["type"] == "youtube"
+    assert data["ingestable"] is True
+    assert data["direct_url"] is None
+
+
+def test_resolve_youtube_shortlink(tmp_path):
+    proc = _run_memex(["resolve", "https://youtu.be/dQw4w9WgXcQ"])
+    assert proc.returncode == 0, proc.stderr
+    data = json.loads(proc.stdout)
+    assert data["type"] == "youtube"
+    assert data["ingestable"] is True
+    assert data["direct_url"] is None

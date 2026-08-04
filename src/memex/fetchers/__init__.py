@@ -7,6 +7,7 @@ type (e.g. ``youtube`` for ticket #99) only needs a key in ``_FETCHERS``.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from memex.resolve.rules import Resolution
@@ -14,9 +15,16 @@ from memex.resolve.rules import Resolution
 
 @dataclass
 class FetchResult:
-    """Text content fetched from a URL, plus an optional page title."""
+    """Text content fetched from a URL, plus an optional page title.
+
+    ``content_path`` (ADR-0013) points at an artifact the fetcher wrote
+    itself (e.g. a cached YouTube transcript in ``$VAULT/.cache/``) and is
+    opt-in: HttpFetcher/PDFFetcher never set it. When set, the CLI uses that
+    file as the extracted node's content instead of writing ``content``.
+    """
 
     content: str
+    content_path: str | None = None
     title: str | None = None
 
 
@@ -33,7 +41,13 @@ class Fetcher:
 
     TYPE: str = ""
 
-    def fetch(self, url: str) -> FetchResult:
+    def fetch(self, url: str, *, cache_dir: Path | None = None) -> FetchResult:
+        """Fetch ``url`` and return a ``FetchResult``.
+
+        ``cache_dir`` lets fetchers that produce an external artifact (e.g.
+        the YouTube transcript cache, ADR-0013) place it in the vault's
+        cache directory. Fetching fetchers ignore it.
+        """
         raise NotImplementedError
 
 
@@ -42,12 +56,14 @@ class Fetcher:
 from memex.fetchers.http import HttpFetcher  # noqa: E402
 from memex.fetchers.pdf import PDFFetcher  # noqa: E402
 from memex.fetchers.wikipedia import WikipediaFetcher  # noqa: E402
+from memex.fetchers.youtube import YouTubeTranscriptFetcher  # noqa: E402
 
 # Extensible registry: resolution.type -> fetcher class. Per-type fetchers
 # (e.g. youtube for ticket #99) add a key here.
 _FETCHERS: dict[str, type[Fetcher]] = {
     "arxiv": PDFFetcher,
     "wikipedia": WikipediaFetcher,
+    "youtube": YouTubeTranscriptFetcher,
 }
 
 
@@ -73,13 +89,15 @@ def get_fetcher(url: str, resolution: Resolution) -> type[Fetcher]:
     return _FETCHERS.get(resolution.type, HttpFetcher)
 
 
-def fetch(url: str, resolution: Resolution) -> FetchResult:
+def fetch(url: str, resolution: Resolution, *, cache_dir: Path | None = None) -> FetchResult:
     """Fetch ``url`` through the fetcher selected by ``resolution``.
 
-    Raises ``FetchError`` when the fetch or extraction fails.
+    ``cache_dir`` is forwarded to the selected fetcher — the YouTube
+    transcript fetcher caches there (ADR-0013). Raises ``FetchError`` when
+    the fetch or extraction fails.
     """
     target = resolution.direct_url or url
-    return get_fetcher(url, resolution)().fetch(target)
+    return get_fetcher(url, resolution)().fetch(target, cache_dir=cache_dir)
 
 
 __all__ = [
@@ -89,6 +107,7 @@ __all__ = [
     "HttpFetcher",
     "PDFFetcher",
     "WikipediaFetcher",
+    "YouTubeTranscriptFetcher",
     "fetch",
     "get_fetcher",
 ]

@@ -27,7 +27,7 @@ from memex.fetchers import (
 )
 from memex.resolve.rules import Resolution
 
-from tests.conftest import _run_memex
+from tests.conftest import _counts, _run_memex
 
 
 # ── helpers ──────────────────────────────────────────────────────────
@@ -144,18 +144,6 @@ def run_extract(store):
         return json.loads(proc.stdout)
 
     return _run
-
-
-def _counts(db_path) -> tuple[int, int, int]:
-    """Return (url_nodes, extracted_nodes, source_rows) in the DB."""
-    con = sqlite3.connect(str(db_path))
-    try:
-        urls = con.execute("SELECT COUNT(*) FROM node WHERE kind = 'url'").fetchone()[0]
-        exts = con.execute("SELECT COUNT(*) FROM node WHERE kind = 'extracted'").fetchone()[0]
-        srcs = con.execute("SELECT COUNT(*) FROM source").fetchone()[0]
-    finally:
-        con.close()
-    return urls, exts, srcs
 
 
 # ── AC1: web page → url+extracted pair ───────────────────────────────
@@ -783,6 +771,27 @@ class TestExtractStoreHelpers:
         node = db_store.get_node(ext_id)
         assert node["fetcher_type"] == "pdf"
         assert node["confidence"] == "high"
+
+    def test_update_extracted_fetcher_updates_content_path(self, db_store):
+        """A re-extract may move the node's file (fetcher cache artifact vs
+        CLI-owned vault/extracted file): the row must track it (ticket #99)."""
+        url_id = "u1"
+        ext_id = "e1"
+        db_store.create_node(node_id=url_id, kind="url")
+        db_store.create_node(
+            node_id=ext_id, kind="extracted", fetcher_type="youtube",
+            content_path="/tmp/e1.md", derived_from=url_id,
+        )
+        db_store.update_extracted_fetcher(
+            ext_id, "youtube", content_path="/vault/.cache/youtube-abc123.md"
+        )
+        node = db_store.get_node(ext_id)
+        assert node["content_path"] == "/vault/.cache/youtube-abc123.md"
+        # Without content_path the existing path is preserved.
+        db_store.update_extracted_fetcher(ext_id, "http")
+        node = db_store.get_node(ext_id)
+        assert node["content_path"] == "/vault/.cache/youtube-abc123.md"
+        assert node["fetcher_type"] == "http"
 
 
 # ── finding 7: dedup filters kind='extracted' ────────────────────────

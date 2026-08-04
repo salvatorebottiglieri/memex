@@ -9,6 +9,7 @@ as readable prose.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from memex.fetchers import FetchError, FetchResult, Fetcher
 from memex.fetchers.http import download_bytes
@@ -19,7 +20,7 @@ class WikipediaFetcher(Fetcher):
 
     TYPE = "wikipedia"
 
-    def fetch(self, url: str) -> FetchResult:
+    def fetch(self, url: str, *, cache_dir: Path | None = None) -> FetchResult:
         raw = download_bytes(url)
         try:
             data = json.loads(raw.decode("utf-8"))
