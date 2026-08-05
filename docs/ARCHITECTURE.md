@@ -40,6 +40,7 @@ This metaphor captures the two key invariants:
 | Canonical-key dedup + ledger | **built** | Store: `lookup_by_canonical_key`, `source.failed` |
 | Derivation (LLM -> notes-tier + provenance edge) | **built** | `memex derive <l0-id>` |
 | Deterministic checks (auto-verify gate) | **built** | `memex.checks.run_checks` |
+| Adversarial validation gate (quality gate) | **built** | `MEMEX_VALIDATOR` + `memex.validators.validate.validate_derivation` |
 | Keyword search over derivations | **built** | `memex search <query>` |
 | Store deep module (CLI is thin) | **built** | `memex.store.Store` |
 | URL resolution (advisory for external agents) | **built** | `memex resolve <url>` |
@@ -98,6 +99,7 @@ flowchart TB
 - [0012](adr/0012-staleness-propagation-via-contested.md) — Staleness propagation via contested state and human review
 - [0013](adr/0013-fetcher-router-per-type-extractors.md) — Fetcher router with per-type content extractors
 - [0014](adr/0014-synthesis-tier-and-trust-cascade.md) — Synthesis tier command and trust state cascade on parent regression
+- [0016](adr/0016-adversarial-validation-gate.md) — Adversarial validation gate for derivation quality
 ## Open questions (deferred)
 
 - **Model choice & cost:** `AnthropicAgent` currently defaults to `claude-opus-4-5`. Switch to Sonnet for bulk derivation once cost matters; keep Opus for higher-tier synthesis. Tune when real volume arrives.
