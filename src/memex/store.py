@@ -24,6 +24,20 @@ class StoreError(Exception):
     """Wraps sqlite3 errors from Store operations."""
 
 
+def min_confidence(confidences: list[str]) -> str:
+    """Conservative min over confidence labels; no signal stays low.
+
+    Single home for the C-rule cascade (low < medium < high): all callers
+    (synthesize, backfill, contradiction propagation) must agree, or the
+    bug that degraded high+high synthesis to low resurfaces.
+    """
+    if not confidences or "low" in confidences:
+        return "low"
+    if "medium" in confidences:
+        return "medium"
+    return "high"
+
+
 _SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
 
@@ -422,12 +436,7 @@ class Store:
             ).fetchall()
             if parents:
                 confidences = [p["confidence"] for p in parents if p["confidence"]]
-                if "low" in confidences:
-                    min_c = "low"
-                elif "medium" in confidences:
-                    min_c = "medium"
-                else:
-                    min_c = "high"
+                min_c = min_confidence(confidences)
             else:
                 min_c = "low"
             self._con.execute(
@@ -702,12 +711,7 @@ class Store:
                     if not parents:
                         continue
                     confidences = [p["confidence"] for p in parents if p["confidence"]]
-                    if "low" in confidences:
-                        new_conf = "low"
-                    elif "medium" in confidences:
-                        new_conf = "medium"
-                    else:
-                        new_conf = "high" if confidences else "low"
+                    new_conf = min_confidence(confidences)
                     # Update if different
                     cur = self._con.execute(
                         "UPDATE node SET confidence = ? WHERE id = ? AND confidence != ?",

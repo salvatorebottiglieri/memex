@@ -22,3 +22,6 @@ secrets/
 
 # Dev scratch data (local test vaults, DBs)
 develop/
+
+# pytest-cov
+.coverage

@@ -388,6 +388,31 @@ def extract(db_path: Path, vault_path: Path, force: bool, url: str) -> None:
             }))
             return
 
+        # --- Expected content absence (ADR-0013) ---
+        # A page with no extractable text at all (JS-only, image-only) is not
+        # an infrastructure failure: record the URL node + source, store
+        # nothing. Short-but-real content keeps the existing contract
+        # (stored, D4 size check flags it -> draft).
+        if not result.content.strip() and result.content_path is None:
+            if existing is None:
+                store.create_node(node_id=url_node_id, kind="url", created_at=now)
+                store.attach_source(
+                    node_id=url_node_id,
+                    canonical_key=ckey,
+                    source_url=url,
+                    title=result.title,
+                    fetched_at=now,
+                )
+            else:
+                store.update_source_after_fetch(url_node_id, result.title, now)
+            click.echo(json.dumps({
+                "status": "no_content",
+                "url_node_id": url_node_id,
+                "title": result.title,
+                "note": "page has no extractable text content",
+            }))
+            return
+
         # --- Success: write content, then create/update nodes ---
         # vault/.cache is NOT created eagerly: only per-type fetchers that
         # cache immutable artifacts (YouTube transcripts, ADR-0013) mkdir it

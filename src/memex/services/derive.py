@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from memex.agent import Agent, load_agent
-from memex.schemas import DocumentRef
+from memex.schemas import DocumentRef, coerce_derivation
 from memex.store import Store
 from memex.utils.retry import call_with_retry
 from memex.validators.validate import validate_derivation
@@ -230,6 +230,7 @@ class DeriverService:
                 if use_retry
                 else _agent_derive()
             )
+            coerce_derivation(deriv)
         except Exception as e:
             return DeriveResult(
                 id=l0_node_id,

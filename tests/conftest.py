@@ -53,6 +53,17 @@ def _counts(db_path) -> tuple[int, int, int]:
     return urls, exts, srcs
 
 
+def _q(store: dict, sql: str, params: tuple = ()) -> list:
+    """Run a query against a ``store`` fixture dict; commits after writes."""
+    con = sqlite3.connect(str(store["db"]))
+    try:
+        rows = con.execute(sql, params).fetchall()
+        con.commit()
+        return rows
+    finally:
+        con.close()
+
+
 def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
 

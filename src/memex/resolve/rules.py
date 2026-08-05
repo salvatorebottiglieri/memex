@@ -153,6 +153,39 @@ class MediaRule(ResolutionRule):
         return None
 
 
+class LinkedInSafetyRule(ResolutionRule):
+    """Unwraps LinkedIn ``/safety/go/`` redirect wrappers (issue #113).
+
+    WhatsApp captures ``linkedin.com/safety/go/?url=<encoded>&urlhash=…`` —
+    the wrapper itself 404s and leaves a failed source with no content.
+    Resolving to the inner URL gives fetch() a real target; the inner page
+    may still be login-walled, which the fetcher reports as a graceful
+    failure instead of a dead 404.
+    """
+
+    _PATTERN = re.compile(
+        r"^https?://(?:www\.)?linkedin\.com/safety/go/\?.*\burl=([^&#]+)"
+    )
+
+    def match(self, url: str) -> Resolution | None:
+        m = self._PATTERN.match(url)
+        if m:
+            from urllib.parse import unquote
+
+            inner = unquote(m.group(1))
+            # Only unwrap http(s) targets — a javascript:/file: payload must
+            # never become a fetchable direct_url.
+            if not inner.startswith(("http://", "https://")):
+                return None
+            return Resolution(
+                url=url,
+                type="web",
+                ingestable=True,
+                direct_url=inner,
+            )
+        return None
+
+
 class YouTubeRule(ResolutionRule):
     """Matches YouTube watch pages and resolves to the transcript fetcher.
 
@@ -196,6 +229,7 @@ _default_rules: list[ResolutionRule] = [
     GitHubBlobRule(),
     WikipediaRule(),
     MediaRule(),
+    LinkedInSafetyRule(),
     YouTubeRule(),
     DefaultRule(),
 ]
