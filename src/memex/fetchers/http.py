@@ -22,6 +22,11 @@ _CHUNK_SIZE = 64 * 1024
 
 _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 _TAG_RE = re.compile(r"<[^>]+>")
+# Script/style blocks are executable or presentational payload, never page
+# text: a JS bundle or stylesheet must not survive tag stripping as "content"
+# (stress campaign — issues #111/#112 + the stored CSS/JS junk in the vault).
+_SCRIPT_RE = re.compile(r"<\s*script\b[^>]*>.*?<\s*/\s*script\s*>", re.IGNORECASE | re.DOTALL)
+_STYLE_RE = re.compile(r"<\s*style\b[^>]*>.*?<\s*/\s*style\s*>", re.IGNORECASE | re.DOTALL)
 
 
 def download_bytes(url: str) -> bytes:
@@ -79,6 +84,10 @@ class HttpFetcher(Fetcher):
         raw = download_bytes(url)
         html = raw.decode("utf-8", errors="replace")
 
+        # Junk never becomes content: drop script/style bodies first.
+        html = _SCRIPT_RE.sub(" ", html)
+        html = _STYLE_RE.sub(" ", html)
+
         title: str | None = None
         m = _TITLE_RE.search(html)
         if m:
@@ -87,4 +96,9 @@ class HttpFetcher(Fetcher):
         text = _TAG_RE.sub(" ", html)
         text = re.sub(r"[ \t\r\f\v]+", " ", text)
         text = re.sub(r"\n\s*\n+", "\n\n", text)
-        return FetchResult(content=text.strip(), title=title)
+        text = text.strip()
+        if not text:
+            raise FetchError(
+                f"no meaningful text content (page is script/style only): {url}"
+            )
+        return FetchResult(content=text, title=title)

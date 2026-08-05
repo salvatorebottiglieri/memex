@@ -230,6 +230,10 @@ class DeriverService:
                 if use_retry
                 else _agent_derive()
             )
+            if not isinstance(getattr(deriv, "prose", None), str):
+                raise TypeError(
+                    f"agent returned unexpected response type: {type(deriv).__name__}"
+                )
         except Exception as e:
             return DeriveResult(
                 id=l0_node_id,

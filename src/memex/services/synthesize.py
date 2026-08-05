@@ -101,6 +101,10 @@ class SynthesizerService:
 
         try:
             deriv = call_with_retry(_agent_derive)
+            if not isinstance(getattr(deriv, "prose", None), str):
+                raise TypeError(
+                    f"agent returned unexpected response type: {type(deriv).__name__}"
+                )
         except Exception as e:
             return {
                 "status": "error",
@@ -163,18 +167,19 @@ class SynthesizerService:
                 written_by="llm",
             )
 
-        # Synthesis: confidence = min(parents' confidence)
+        # Synthesis: confidence = min(parents' confidence); no signal stays
+        # conservative (low), all-high parents stay high.
         confidences: list[str] = []
         for pid in parent_ids:
             p = self._store.get_node(pid)
             if p and p.get("confidence"):
                 confidences.append(p["confidence"])
-        if "low" in confidences:
+        if not confidences or "low" in confidences:
             synth_conf = "low"
         elif "medium" in confidences:
             synth_conf = "medium"
         else:
-            synth_conf = "low"
+            synth_conf = "high"
         self._store._con.execute(
             "UPDATE node SET confidence = ? WHERE id = ?",
             (synth_conf, deriv_id),
