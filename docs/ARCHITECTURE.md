@@ -100,6 +100,7 @@ flowchart TB
 - [0013](adr/0013-fetcher-router-per-type-extractors.md) — Fetcher router with per-type content extractors
 - [0014](adr/0014-synthesis-tier-and-trust-cascade.md) — Synthesis tier command and trust state cascade on parent regression
 - [0016](adr/0016-adversarial-validation-gate.md) — Adversarial validation gate for derivation quality
+- [0017](adr/0017-agent-rpc-service.md) — Agent as a long-lived RPC service
 ## Open questions (deferred)
 
 - **Model choice & cost:** `AnthropicAgent` currently defaults to `claude-opus-4-5`. Switch to Sonnet for bulk derivation once cost matters; keep Opus for higher-tier synthesis. Tune when real volume arrives.

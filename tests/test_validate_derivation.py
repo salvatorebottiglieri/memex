@@ -102,13 +102,13 @@ class TestValidateReaderMode:
     """Reader validators get a reference block and read-enabled calls."""
 
     def test_reader_validator_receives_reference_block(self):
-        from memex.derivers.pi import OMPAgent
+        from memex.derivers.pi import OMPRpcAgent
         from memex.schemas import DerivationResult, DocumentRef
         from memex.validators.validate import validate_derivation
 
         captured = {}
 
-        class ReaderValidator(OMPAgent):
+        class ReaderValidator(OMPRpcAgent):
             def call_llm(self, prompt, *, allow_read=False):
                 captured["allow_read"] = allow_read
                 captured["has_path"] = "/tmp/parent.md" in prompt

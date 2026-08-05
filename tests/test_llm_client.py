@@ -379,27 +379,20 @@ class TestExtractIdeas:
 
 
 class TestCliAgents:
-    """PiAgent / OMPAgent — instantiation and review() contract."""
+    """OMPRpcAgent — instantiation and review() contract."""
 
-    def test_omp_agent_loads(self):
-        """OMPAgent instantiates via MEMEX_AGENT module:Class path (regression: abstract review())."""
-        from memex.derivers.pi import OMPAgent  # noqa: PLC0415
+    def test_omp_rpc_agent_loads(self):
+        """OMPRpcAgent instantiates via MEMEX_AGENT module:Class path (regression: abstract review())."""
+        from memex.derivers.pi import OMPRpcAgent  # noqa: PLC0415
 
-        client = load_agent("memex.derivers.pi:OMPAgent")
-        assert isinstance(client, OMPAgent)
-
-    def test_pi_agent_loads(self):
-        """PiAgent instantiates via MEMEX_AGENT module:Class path."""
-        from memex.derivers.pi import PiAgent  # noqa: PLC0415
-
-        client = load_agent("memex.derivers.pi:PiAgent")
-        assert isinstance(client, PiAgent)
+        client = load_agent("memex.derivers.pi:OMPRpcAgent")
+        assert isinstance(client, OMPRpcAgent)
 
     def test_review_parses_fenced_json(self):
-        """OMPAgent.review parses a fenced JSON response from call_llm."""
-        from memex.derivers.pi import OMPAgent  # noqa: PLC0415
+        """OMPRpcAgent.review parses a fenced JSON response from call_llm."""
+        from memex.derivers.pi import OMPRpcAgent  # noqa: PLC0415
 
-        client = OMPAgent()
+        client = OMPRpcAgent()
         raw = (
             '```json\n{"affected_node_ids": ["n1", "n2"], '
             '"damage_boundary_node_id": "n2", '
@@ -416,10 +409,10 @@ class TestCliAgents:
         assert rp.confidence == "medium"
 
     def test_review_fallback_on_bad_json(self):
-        """OMPAgent.review degrades gracefully when call_llm returns non-JSON."""
-        from memex.derivers.pi import OMPAgent  # noqa: PLC0415
+        """OMPRpcAgent.review degrades gracefully when call_llm returns non-JSON."""
+        from memex.derivers.pi import OMPRpcAgent  # noqa: PLC0415
 
-        client = OMPAgent()
+        client = OMPRpcAgent()
         with patch.object(client, "call_llm", return_value="I cannot analyze this.") as mock_call:
             rp = client.review("target", "asserting", {})
 
@@ -437,10 +430,10 @@ class TestReaderModePrompts:
     def test_derive_with_reference_enables_read_and_lists_path(self):
         from unittest.mock import patch
 
-        from memex.derivers.pi import OMPAgent
+        from memex.derivers.pi import OMPRpcAgent
         from memex.schemas import DocumentRef
 
-        agent = OMPAgent()
+        agent = OMPRpcAgent()
         ref = DocumentRef(
             node_id="n1", content_path="/tmp/doc.md",
             title="Doc", source_url="https://x.example/d",
@@ -457,9 +450,9 @@ class TestReaderModePrompts:
     def test_derive_with_content_disables_read(self):
         from unittest.mock import patch
 
-        from memex.derivers.pi import OMPAgent
+        from memex.derivers.pi import OMPRpcAgent
 
-        agent = OMPAgent()
+        agent = OMPRpcAgent()
         with patch.object(agent, "call_llm", return_value='{"prose":"# T\\nBody.","synthesis_statements":[]}') as mock:
             agent.derive(content="some inline content")
 
@@ -471,10 +464,10 @@ class TestReaderModePrompts:
     def test_derive_with_reference_list_formats_each_document(self):
         from unittest.mock import patch
 
-        from memex.derivers.pi import OMPAgent
+        from memex.derivers.pi import OMPRpcAgent
         from memex.schemas import DocumentRef
 
-        agent = OMPAgent()
+        agent = OMPRpcAgent()
         refs = [
             DocumentRef(node_id="n1", content_path="/tmp/a.md", size_bytes=1),
             DocumentRef(node_id="n2", content_path="/tmp/b.md", size_bytes=2),

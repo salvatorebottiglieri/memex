@@ -1,7 +1,25 @@
-"""Derivers backed by Pi / OMP CLI tools."""
+"""Agent backed by the omp CLI in RPC mode.
 
+``omp --mode rpc`` is the protocol the omp SDK documents for non-Node hosts:
+a long-lived process exchanging newline-delimited JSON over stdio. One process
+is spawned per memex invocation (lazily, on the first call), reused across the
+whole batch, and disposed at exit — the engine boots once instead of once per
+call (ADR-0017).
+
+Reader mode: the agent reads source documents itself via the read tool, so
+``derive``/``extract_ideas`` receive a :class:`DocumentRef` instead of inlined
+content — sources of any length fit without a prompt cap.
+"""
+
+import atexit
+import itertools
 import json as _json
+import os
 import re as _re
+import subprocess
+import threading
+import weakref
+from dataclasses import dataclass, field
 
 from memex.agent import Agent
 from memex.schemas import DerivationResult, DocumentRef, ReviewProposal
@@ -94,84 +112,110 @@ def _extract_json_object(raw: str) -> dict | None:
         return None
 
 
-class PiAgent(Agent):
-    """Agent powered by Pi (``@earendil-works/pi-coding-agent``).
+# Stop reasons that mean "the turn produced a complete answer". Providers
+# differ (deepseek: "stop", anthropic: "end_turn"); anything else — aborted,
+# error, max_tokens, … — must surface as a failure, never a partial success.
+_CLEAN_STOP_REASONS = frozenset({"stop", "end_turn"})
 
-    Uses the ``pi`` CLI under the hood (``pi -p --mode json --no-session``).
 
-    Reader mode: the agent reads source documents itself via the read tool
-    (``--tools=read``), so ``derive``/``extract_ideas`` receive a
-    :class:`DocumentRef` instead of inlined content — sources of any length
-    fit without a prompt cap.
+@dataclass
+class _Turn:
+    """State of one in-flight RPC prompt."""
 
-    Requires ``pi`` to be installed and available on PATH.
-    Supports any provider/model configured in ``pi`` (e.g. Claude, GPT, Gemini, DeepSeek).
+    id: str
+    done: threading.Event = field(default_factory=threading.Event)
+    text_parts: list[str] = field(default_factory=list)
+    stop_reason: str | None = None
+    error: str | None = None
+
+
+class OMPRpcAgent(Agent):
+    """Agent powered by OMP (Oh My Pi — ``@nicedoc/oh-my-pi``) over RPC mode.
+
+    Spawns ``omp --mode rpc --no-session --tools=read`` lazily on the first call
+    and reuses it for the lifetime of this object (one process per memex
+    invocation — the engine boots once per batch, not once per node).
+
+    Supports any provider/model configured in ``omp`` (e.g. Claude, GPT, Gemini,
+    DeepSeek). Requires ``omp`` to be installed and available on PATH.
+
+    Usage: ``MEMEX_AGENT=memex.derivers.pi:OMPRpcAgent``
     """
 
-    _cli_cmd = "pi"
+    _cli_cmd = "omp"
     can_read_files = True
 
-    def _cli_tool_flag(self, allow_read: bool) -> list[str]:
-        return ["--tools=read"] if allow_read else ["--no-tools"]
+    _DEFAULT_TIMEOUT = 600
+    _DEFAULT_STARTUP_TIMEOUT = 30
+    _ABORT_GRACE = 10
+    _MAX_SPAWNS = 2  # initial spawn + one respawn per instance
+
+    def __init__(
+        self,
+        *,
+        timeout: int | None = None,
+        startup_timeout: int | None = None,
+        abort_grace: int | None = None,
+    ) -> None:
+        self._timeout = timeout or int(
+            os.environ.get("MEMEX_OMP_TIMEOUT", str(self._DEFAULT_TIMEOUT))
+        )
+        self._startup_timeout = startup_timeout or int(
+            os.environ.get("MEMEX_OMP_STARTUP_TIMEOUT", str(self._DEFAULT_STARTUP_TIMEOUT))
+        )
+        self._abort_grace = (
+            abort_grace if abort_grace is not None else self._ABORT_GRACE
+        )
+        self._proc: subprocess.Popen | None = None
+        self._current_turn: _Turn | None = None
+        self._last_stop_reason: str | None = None
+        self._ready = threading.Event()
+        self._write_lock = threading.Lock()
+        self._call_lock = threading.Lock()
+        self._seq = itertools.count(1)
+        self._spawn_count = 0
+        self._stderr_tail: list[str] = []
+        _LIVE.add(self)
+
+    # ------------------------------------------------------------------
+    # Agent seam
+    # ------------------------------------------------------------------
 
     def call_llm(self, prompt: str, *, allow_read: bool = False) -> str:
-        import subprocess as _sp
+        """Run one turn against the RPC process; return the assembled text.
 
-        try:
-            proc = _sp.run(
-                [self._cli_cmd, "-p", "--mode", "json", "--no-session"]
-                + self._cli_tool_flag(allow_read),
-                input=prompt,
-                capture_output=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=300,
-            )
-        except FileNotFoundError:
-            raise RuntimeError(
-                f"{type(self).__name__} requires the '{self._cli_cmd}' CLI. "
-                f"Install it from https://{self._cli_cmd}.dev"
-            ) from None
-        except _sp.TimeoutExpired:
-            raise RuntimeError(f"{type(self).__name__} call timed out after 300s") from None
+        The process always runs with the read tool (reader mode), so
+        ``allow_read`` is accepted for signature compatibility with the seam
+        but does not change process flags. Serializes turns: the wire carries
+        one prompt at a time.
 
-        if proc.returncode != 0:
-            raise RuntimeError(f"{type(self).__name__} call failed: {proc.stderr.strip()}")
-
-        # Parse JSON lines output — extract text from the last message_end
-        last_text = ""
-        for line in proc.stdout.splitlines():
-            line = line.strip()
-            if not line:
-                continue
+        Raises RuntimeError on timeout, crash, or any stop reason other than a
+        clean ``end_turn`` — never returns a partial turn.
+        """
+        with self._call_lock:
+            self._ensure_process()
+            turn = _Turn(id=f"p{next(self._seq)}")
+            self._current_turn = turn
             try:
-                event = _json.loads(line)
-            except _json.JSONDecodeError:
-                continue
-            if event.get("type") == "message_end":
-                msg = event.get("message", {})
-                content = msg.get("content", [])
-                for part in content:
-                    if part.get("type") == "text":
-                        last_text = part.get("text", "")
-        return last_text
+                self._write({"id": turn.id, "type": "prompt", "message": prompt})
+            except Exception as e:  # noqa: BLE001 — re-raised as RuntimeError
+                self._current_turn = None
+                raise RuntimeError(f"omp RPC write failed: {e}") from e
 
-    @staticmethod
-    def _format_reference(reference) -> str:
-        docs = reference if isinstance(reference, list) else [reference]
-        blocks = []
-        for i, ref in enumerate(docs, start=1):
-            blocks.append(
-                f"Document {i}:\n"
-                + _DERIVE_READER_USER_TEMPLATE.format(
-                    node_id=ref.node_id,
-                    title=ref.title or "(no title)",
-                    source_url=ref.source_url or "(none)",
-                    content_path=ref.content_path,
-                    size_bytes=ref.size_bytes,
+            if not turn.done.wait(self._timeout):
+                self._abort(turn)
+                if turn.error is None:
+                    turn.error = "omp turn timed out"
+
+            self._current_turn = None
+
+            if turn.error:
+                raise RuntimeError(turn.error)
+            if turn.stop_reason not in _CLEAN_STOP_REASONS:
+                raise RuntimeError(
+                    f"omp turn ended with stop reason: {turn.stop_reason}"
                 )
-            )
-        return "\n\n".join(blocks)
+            return "".join(turn.text_parts)
 
     def derive(
         self,
@@ -204,8 +248,6 @@ class PiAgent(Agent):
         reference: DocumentRef | None = None,
     ) -> list[str]:
         """Extract 3-5 key ideas, reading the source in reader mode when possible."""
-        import json as _json
-
         if reference is not None:
             prompt = _READER_IDEAS_PROMPT.format(
                 node_id=reference.node_id,
@@ -267,60 +309,228 @@ class PiAgent(Agent):
             confidence=confidence,
         )
 
+    @staticmethod
+    def _format_reference(reference) -> str:
+        docs = reference if isinstance(reference, list) else [reference]
+        blocks = []
+        for i, ref in enumerate(docs, start=1):
+            blocks.append(
+                f"Document {i}:\n"
+                + _DERIVE_READER_USER_TEMPLATE.format(
+                    node_id=ref.node_id,
+                    title=ref.title or "(no title)",
+                    source_url=ref.source_url or "(none)",
+                    content_path=ref.content_path,
+                    size_bytes=ref.size_bytes,
+                )
+            )
+        return "\n\n".join(blocks)
 
-class OMPAgent(PiAgent):
-    """Agent powered by OMP (Oh My Pi — ``@nicedoc/oh-my-pi``).
+    # ------------------------------------------------------------------
+    # RPC process lifecycle
+    # ------------------------------------------------------------------
 
-    Uses the ``omp`` CLI under the hood (same interface as Pi).
+    def _ensure_process(self) -> None:
+        proc = self._proc
+        if proc is not None and proc.poll() is None:
+            return
+        if self._spawn_count >= self._MAX_SPAWNS:
+            raise RuntimeError(
+                "omp RPC process crashed repeatedly; giving up "
+                f"(last stderr: {' | '.join(self._stderr_tail[-3:]) or 'empty'})"
+            )
+        self._spawn()
 
-    Requires ``omp`` to be installed and available on PATH.
-    Supports any provider/model configured in ``omp`` (e.g. Claude, GPT, Gemini, DeepSeek).
-
-    Usage: ``MEMEX_AGENT=memex.derivers.pi:OMPAgent``
-    """
-
-    _cli_cmd = "omp"
-
-    def call_llm(self, prompt: str, *, allow_read: bool = False) -> str:
-        import subprocess as _sp
-
+    def _spawn(self) -> None:
+        if self._proc is not None:
+            self._kill()
         try:
-            proc = _sp.run(
-                [self._cli_cmd, "-p", "--mode", "json", "--no-session"]
-                + self._cli_tool_flag(allow_read),
-                input=prompt,
-                capture_output=True,
+            proc = subprocess.Popen(
+                [self._cli_cmd, "--mode", "rpc", "--no-session", "--tools=read"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 encoding="utf-8",
                 errors="replace",
-                timeout=300,
+                bufsize=1,
             )
         except FileNotFoundError:
             raise RuntimeError(
                 f"{type(self).__name__} requires the '{self._cli_cmd}' CLI. "
-                f"Install it from https://ohmy-pi.dev"
+                "Install it from https://ohmy-pi.dev"
             ) from None
-        except _sp.TimeoutExpired:
-            raise RuntimeError(f"{type(self).__name__} call timed out after 300s") from None
+        self._proc = proc
+        self._spawn_count += 1
+        self._stderr_tail = []
+        self._ready.clear()
+        threading.Thread(
+            target=self._stderr_reader, args=(proc,), daemon=True, name="omp-rpc-stderr"
+        ).start()
+        threading.Thread(
+            target=self._reader, args=(proc,), daemon=True, name="omp-rpc-reader"
+        ).start()
+        if not self._ready.wait(self._startup_timeout):
+            tail = self._stderr_tail[-3:]
+            self._kill()
+            raise RuntimeError(
+                "omp RPC did not become ready"
+                + (f" (stderr: {' | '.join(tail)})" if tail else "")
+            )
 
-        if proc.returncode != 0:
-            raise RuntimeError(f"{type(self).__name__} call failed: {proc.stderr.strip()}")
-        # Parse JSON lines output — extract text from the last message_end
-        last_text = ""
-        for line in proc.stdout.splitlines():
-            line = line.strip()
-            if not line:
-                continue
+    def _kill(self) -> None:
+        proc = self._proc
+        if proc is None:
+            return
+        # Detach before killing so the reader thread's EOF handling never
+        # clobbers a respawned session's state. stdout is left open: closing
+        # it while the reader thread is mid-iteration raises ValueError in
+        # the thread; the pipe EOFs naturally once the process dies.
+        self._proc = None
+        try:
+            if proc.stdin is not None:
+                proc.stdin.close()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            proc.terminate()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
             try:
-                event = _json.loads(line)
-            except _json.JSONDecodeError:
-                continue
-            if event.get("type") == "message_end":
-                msg = event.get("message", {})
-                content = msg.get("content", [])
-                if isinstance(content, str):
-                    last_text = content
-                elif isinstance(content, list):
-                    for part in content:
-                        if isinstance(part, dict) and part.get("type") == "text":
-                            last_text = part.get("text", "")
-        return last_text
+                proc.kill()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                proc.wait(timeout=5)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def dispose(self) -> None:
+        """Terminate the RPC process if running. Idempotent."""
+        self._kill()
+        self._current_turn = None
+
+    # ------------------------------------------------------------------
+    # Wire plumbing
+    # ------------------------------------------------------------------
+
+    def _write(self, obj: dict) -> None:
+        proc = self._proc
+        if proc is None or proc.stdin is None or proc.poll() is not None:
+            raise RuntimeError("omp RPC process is not running")
+        with self._write_lock:
+            proc.stdin.write(_json.dumps(obj) + "\n")
+            proc.stdin.flush()
+
+    def _abort(self, turn: _Turn) -> None:
+        try:
+            self._write({"id": f"a{next(self._seq)}", "type": "abort"})
+        except Exception:  # noqa: BLE001
+            pass
+        if not turn.done.wait(self._abort_grace):
+            self._kill()
+            turn.error = "omp turn timed out (abort ignored; process killed)"
+            turn.done.set()
+
+    def _stderr_reader(self, proc: subprocess.Popen) -> None:
+        try:
+            for line in proc.stderr:
+                self._stderr_tail.append(line.rstrip("\n"))
+                if len(self._stderr_tail) > 50:
+                    self._stderr_tail.pop(0)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _reader(self, proc: subprocess.Popen) -> None:
+        try:
+            try:
+                for line in proc.stdout:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        ev = _json.loads(line)
+                    except _json.JSONDecodeError:
+                        continue
+                    self._handle(ev)
+            except (OSError, ValueError):
+                # Pipe closed under us (dispose/respawn) — treat as EOF.
+                pass
+        finally:
+            # EOF: the process died. Only touch shared state if this reader
+            # still owns the active process (identity check guards respawns).
+            if self._proc is proc:
+                turn = self._current_turn
+                if turn is not None and not turn.done.is_set():
+                    tail = " | ".join(self._stderr_tail[-3:])
+                    turn.error = (
+                        "omp RPC process exited mid-turn"
+                        + (f" (stderr: {tail})" if tail else "")
+                    )
+                    turn.done.set()
+
+    def _handle(self, ev: dict) -> None:
+        t = ev.get("type")
+        if t == "ready":
+            self._ready.set()
+        elif t == "response":
+            if not ev.get("success", True):
+                turn = self._current_turn
+                if (
+                    turn is not None
+                    and ev.get("id") == turn.id
+                    and not turn.done.is_set()
+                ):
+                    turn.error = (
+                        "omp RPC command failed: "
+                        f"{ev.get('command')} {ev.get('error') or ''}".strip()
+                    )
+                    turn.done.set()
+        elif t == "message_update":
+            ame = ev.get("assistantMessageEvent") or {}
+            if ame.get("type") == "text_delta":
+                turn = self._current_turn
+                if turn is not None:
+                    turn.text_parts.append(ame.get("delta") or "")
+        elif t in ("message_end", "turn_end"):
+            # The real wire carries the stop reason on the message envelope,
+            # not on agent_end (observed 2026-08-05 on omp 17.2.9).
+            msg = ev.get("message") or {}
+            reason = msg.get("stopReason") or ev.get("stopReason")
+            if reason:
+                self._last_stop_reason = reason
+        elif t == "agent_end":
+            turn = self._current_turn
+            if turn is not None:
+                turn.stop_reason = ev.get("stopReason") or self._last_stop_reason
+                turn.done.set()
+        elif t == "extension_ui_request":
+            # Headless policy: widget frames are fire-and-forget; everything
+            # else (selector/confirm/input/open_url) is answered cancelled.
+            # Auth must pre-exist in ~/.omp.
+            if ev.get("method") != "setWidget":
+                try:
+                    self._write(
+                        {
+                            "type": "extension_ui_response",
+                            "id": ev.get("id"),
+                            "cancelled": True,
+                        }
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+        # tool_execution_*, available_commands_update, auto_compaction_*,
+        # auto_retry_*, thinking_level_changed — observed, not needed.
+
+
+_LIVE: weakref.WeakSet = weakref.WeakSet()
+
+
+def _dispose_all() -> None:
+    for agent in list(_LIVE):
+        agent.dispose()
+
+
+atexit.register(_dispose_all)
