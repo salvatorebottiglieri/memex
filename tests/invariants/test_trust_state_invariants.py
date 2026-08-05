@@ -15,24 +15,15 @@ leaves it draft and records the failures.
 from __future__ import annotations
 
 import json
-import sqlite3
 
 import pytest
 
 from memex.store import StoreError
-from tests.conftest import _run_memex, register_node
+from tests.conftest import _q, _run_memex, register_node
 
 FAKE_AGENT = "tests.fake_llm_client:FakeAgent"
 FAKE_FAILING_AGENT = "tests.fake_llm_client_failing:FakeLLMClientFailing"
 FAKE_THROWS_AGENT = "tests.fake_llm_client_throws:FakeLLMClientThrows"
-
-
-def _q(store, sql: str, params: tuple = ()) -> list:
-    con = sqlite3.connect(str(store["db"]))
-    try:
-        return con.execute(sql, params).fetchall()
-    finally:
-        con.close()
 
 
 def _derive(store, node_id: str, agent: str = FAKE_AGENT):

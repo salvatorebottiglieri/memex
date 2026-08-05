@@ -173,6 +173,10 @@ class LinkedInSafetyRule(ResolutionRule):
             from urllib.parse import unquote
 
             inner = unquote(m.group(1))
+            # Only unwrap http(s) targets — a javascript:/file: payload must
+            # never become a fetchable direct_url.
+            if not inner.startswith(("http://", "https://")):
+                return None
             return Resolution(
                 url=url,
                 type="web",

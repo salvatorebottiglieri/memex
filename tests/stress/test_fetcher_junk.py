@@ -3,14 +3,14 @@
 Invariant J1: HttpFetcher output is real page text. Script and style bodies
 (JS bundles, CSS) are never part of the extracted content.
 
-Invariant J2: a page that yields no meaningful text after stripping raises
-FetchError — nothing junk-worthy is ever returned to the store.
+Invariant J2: a page with no extractable text yields empty content — an
+expected content absence (ADR-0013), not a FetchError; the extract CLI
+stores nothing in that case.
 
 Regression corpus: real junk found stored in the production vault
 (issues #111, #112, plus the YouTube/Amazon CSS/JS cases): samples live in
-tests/fixtures/junk/. These tests are RED on the current implementation
-(tag stripping keeps script/style bodies) — the fix is Phase 4 of the
-stress campaign.
+tests/fixtures/junk/. The junk invariant was violated on the pre-campaign
+fetcher (tag stripping kept script/style bodies) — fixed in the campaign.
 """
 from __future__ import annotations
 
@@ -18,7 +18,6 @@ from pathlib import Path
 
 import pytest
 
-from memex.fetchers import FetchError
 from memex.fetchers.http import HttpFetcher
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures" / "junk"
@@ -33,12 +32,15 @@ JUNK_CASES = [
 
 
 def _fetch(monkeypatch, html: str) -> str:
+    return _fetch_result(monkeypatch, html).content
+
+
+def _fetch_result(monkeypatch, html: str):
     monkeypatch.setattr(
         "memex.fetchers.http.download_bytes",
         lambda url: html.encode("utf-8"),
     )
-    result = HttpFetcher().fetch("https://example.com/page")
-    return result.content
+    return HttpFetcher().fetch("https://example.com/page")
 
 
 def _wrap(junk: str, *, body: str = "<p>Actual readable text.</p>") -> str:
@@ -80,43 +82,24 @@ class TestJunkNeverBecomesContent:
         assert "Visible" in content
 
 
-class TestLinkedInSafetyWrapper:
-    """Issue #113 — the safety/go wrapper 404s; resolution unwraps it."""
+class TestJunkOnlyPageYieldsNoContent:
+    """J2 — a page with no extractable text yields empty content (ADR-0013:
+    expected content absence is not an infrastructure failure); the extract
+    CLI then stores nothing instead of a junk or empty node."""
 
-    def test_real_corpus_wrapper_resolves_to_inner_url(self):
-        from memex.resolve.rules import resolve_url
-
-        url = (
-            "https://www.linkedin.com/safety/go/"
-            "?url=https%3A%2F%2Flnkd%2Ein%2Fd3_ZEHTf&urlhash=9h0n&trk=flagship"
-        )
-        res = resolve_url(url)
-        assert res.ingestable is True
-        assert res.direct_url == "https://lnkd.in/d3_ZEHTf"
-
-    def test_plain_linkedin_url_not_rewritten(self):
-        from memex.resolve.rules import resolve_url
-
-        res = resolve_url("https://www.linkedin.com/posts/some-post-123")
-        assert res.type == "web"
-        assert res.direct_url is None
-
-
-class TestJunkOnlyPageRejected:
-    def test_js_only_page_raises_fetch_error(self, monkeypatch):
+    def test_js_only_page_returns_empty_content(self, monkeypatch):
         html = "<html><head><script>window.WIZ_global_data={}</script></head><body></body></html>"
-        with pytest.raises(FetchError):
-            _fetch(monkeypatch, html)
+        result = _fetch_result(monkeypatch, html)
+        assert result.content == ""
+        assert result.title is None
 
-    def test_css_only_page_raises_fetch_error(self, monkeypatch):
+    def test_css_only_page_returns_empty_content(self, monkeypatch):
         html = "<html><head><style>:root{--fds-black:#000000}</style></head><body></body></html>"
-        with pytest.raises(FetchError):
-            _fetch(monkeypatch, html)
+        assert _fetch(monkeypatch, html) == ""
 
-    def test_real_corpus_js_only_pages_raise(self, monkeypatch):
+    def test_real_corpus_js_only_pages_yield_empty_content(self, monkeypatch):
         for fixture in ("google-slides-js.txt", "youtube-wiz-js.txt"):
             junk = (FIXTURES / fixture).read_text(encoding="utf-8")
             # The real pages were JS bundles with no meaningful text body.
             html = f"<html><head><script>{junk}</script></head><body></body></html>"
-            with pytest.raises(FetchError):
-                _fetch(monkeypatch, html)
+            assert _fetch(monkeypatch, html) == ""

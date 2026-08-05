@@ -11,24 +11,13 @@ F5  synthesize confidence: min of parents' confidence; high+high must not
 from __future__ import annotations
 
 import json
-import sqlite3
 
-from tests.conftest import _run_memex, register_node
+from tests.conftest import _q, _run_memex, register_node
 
 FAKE_AGENT = "tests.fake_llm_client:FakeAgent"
 FAKE_THROWS_AGENT = "tests.fake_llm_client_throws:FakeLLMClientThrows"
 FAKE_MALFORMED_AGENT = "tests.fake_llm_client_malformed:FakeLLMClientMalformed"
 FAKE_FLAKY_AGENT = "tests.fake_llm_client_flaky:FakeLLMClientFlaky"
-
-
-def _q(store, sql: str, params: tuple = ()) -> list:
-    con = sqlite3.connect(str(store["db"]))
-    try:
-        rows = con.execute(sql, params).fetchall()
-        con.commit()  # writes from stress tests must persist for later reads
-        return rows
-    finally:
-        con.close()
 
 
 def _derive(store, node_id: str, agent: str = FAKE_AGENT):
@@ -93,8 +82,9 @@ class TestSynthesisConfidence:
     def test_synthesis_confidence_is_min_of_parents(self, store):
         """F5 — campaign finding: high+high parents must stay high.
 
-        Current code degrades all-high parents to 'low' (the else branch of
-        the min() chain). This test is RED until Phase 4.
+        The pre-campaign code degraded all-high parents to 'low' (the else
+        branch of the min() chain). Fixed via store.min_confidence; this test
+        pins the corrected behavior.
         """
         a = json.loads(register_node(store, store["vault"], "a.md", "https://example.com/a").stdout)
         b = json.loads(register_node(store, store["vault"], "b.md", "https://example.com/b").stdout)

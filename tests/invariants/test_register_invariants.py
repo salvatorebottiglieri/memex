@@ -24,15 +24,7 @@ import sqlite3
 
 from memex.canonical_key import canonical_key
 from memex.store import Store
-from tests.conftest import _counts, _run_memex, register_node
-
-
-def _query(store, sql: str, params: tuple = ()) -> list:
-    con = sqlite3.connect(str(store["db"]))
-    try:
-        return con.execute(sql, params).fetchall()
-    finally:
-        con.close()
+from tests.conftest import _counts, _q, _run_memex, register_node
 
 
 class TestRegistrationPair:
@@ -46,7 +38,7 @@ class TestRegistrationPair:
         assert (urls, exts, srcs) == (1, 1, 1)
 
         # R2 — url node shape
-        (url_id, depth, conf, content_path, kind) = _query(
+        (url_id, depth, conf, content_path, kind) = _q(
             store, "SELECT id, depth, confidence, content_path, kind FROM node WHERE kind='url'"
         )[0]
         assert depth == 0
@@ -55,14 +47,14 @@ class TestRegistrationPair:
         assert url_id == data["url_node_id"]
 
         # R3 — extracted node shape
-        (ext_id, ext_depth, ext_kind) = _query(
+        (ext_id, ext_depth, ext_kind) = _q(
             store, "SELECT id, depth, kind FROM node WHERE kind='extracted'"
         )[0]
         assert ext_depth == 1
         assert ext_id == data["extracted_node_id"]
 
         # R3 — provenance edge extracted -> url
-        edges = _query(
+        edges = _q(
             store,
             "SELECT from_node, to_node, type, relation FROM edge WHERE relation='derived_from'",
         )
@@ -70,7 +62,7 @@ class TestRegistrationPair:
 
     def test_extracted_node_has_content_path_and_fetcher_confidence(self, store):
         register_node(store, store["vault"], "a.md", "https://example.com/a")
-        (content_path, confidence, fetcher) = _query(
+        (content_path, confidence, fetcher) = _q(
             store,
             "SELECT n.content_path, n.confidence, n.fetcher_type FROM node n "
             "WHERE n.kind='extracted'",
@@ -84,7 +76,7 @@ class TestRegistrationPair:
         con = sqlite3.connect(str(store["db"]))
         try:
             st = Store(con)
-            (node_id,) = _query(store, "SELECT id FROM node WHERE kind='extracted'")[0]
+            (node_id,) = _q(store, "SELECT id FROM node WHERE kind='extracted'")[0]
             st.update_extracted_fetcher(node_id, "http", content_path)
             assert st.compute_node_confidence(node_id) == "medium"
         finally:
@@ -92,13 +84,13 @@ class TestRegistrationPair:
 
     def test_source_row_binds_to_url_node_only(self, store):
         register_node(store, store["vault"], "a.md", "https://example.com/a")
-        rows = _query(
+        rows = _q(
             store,
             "SELECT s.node_id, s.canonical_key, s.source_url FROM source s",
         )
         assert len(rows) == 1
         (src_node_id, ckey, src_url) = rows[0]
-        (url_id,) = _query(store, "SELECT id FROM node WHERE kind='url'")[0]
+        (url_id,) = _q(store, "SELECT id FROM node WHERE kind='url'")[0]
         assert src_node_id == url_id
         assert src_url == "https://example.com/a"
         assert ckey == "https://example.com/a"
@@ -118,7 +110,7 @@ class TestRegistrationIdempotence:
 
         # R5 — no new rows, canonical key unchanged
         assert _counts(store["db"]) == (1, 1, 1)
-        (ckey,) = _query(store, "SELECT canonical_key FROM source")[0]
+        (ckey,) = _q(store, "SELECT canonical_key FROM source")[0]
         assert ckey == "https://example.com/a"
 
     def test_register_tracking_variant_is_same_url(self, store):

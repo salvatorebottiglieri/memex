@@ -200,6 +200,27 @@ def test_extract_web_page_creates_url_and_extracted_pair(store, local_server, ru
     assert src["canonical_key"] == "http://127.0.0.1:%d/article" % local_server.httpd.server_address[1]
 
 
+# ── AC1b: JS-only page → no_content (ADR-0013 absence) ───────────────
+
+def test_extract_js_only_page_stores_nothing(store, local_server, run_extract):
+    """A page with no extractable text is an expected absence (ADR-0013):
+    the URL node + source are recorded, no extracted node and no .md file."""
+    local_server.route(
+        "/slides",
+        "<html><head><script>window['ppConfig']={productName:'x'}</script></head>"
+        "<body></body></html>",
+    )
+    url = local_server.base_url + "/slides"
+    data = run_extract(url)
+
+    assert data["status"] == "no_content"
+    assert "extracted_node_id" not in data
+
+    # url node + source recorded; no extracted node, no content file
+    assert _counts(store["db"]) == (1, 0, 1)
+    assert not list(Path(store["vault"]).glob("extracted/*.md"))
+
+
 # ── AC2: PDF URL → PDF fetcher, confidence=high ──────────────────────
 
 def test_extract_pdf_routes_to_pdf_fetcher(store, local_server, run_extract):

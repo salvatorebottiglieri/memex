@@ -70,6 +70,37 @@ def test_resolve_empty_string(tmp_path):
 
 # ── ticket #99: youtube resolution ────────────────────────────────
 
+def test_resolve_linkedin_safety_wrapper(tmp_path):
+    """Issue #113 — the safety/go wrapper 404s; resolution unwraps the inner URL."""
+    proc = _run_memex([
+        "resolve",
+        "https://www.linkedin.com/safety/go/?url=https%3A%2F%2Flnkd%2Ein%2Fd3_ZEHTf&urlhash=9h0n&trk=flagship",
+    ])
+    assert proc.returncode == 0, proc.stderr
+    data = json.loads(proc.stdout)
+    assert data["type"] == "web"
+    assert data["ingestable"] is True
+    assert data["direct_url"] == "https://lnkd.in/d3_ZEHTf"
+
+
+def test_resolve_plain_linkedin_not_rewritten(tmp_path):
+    proc = _run_memex(["resolve", "https://www.linkedin.com/posts/some-post-123"])
+    assert proc.returncode == 0, proc.stderr
+    data = json.loads(proc.stdout)
+    assert data["type"] == "web"
+    assert data["direct_url"] is None
+
+
+def test_resolve_linkedin_wrapper_non_http_payload_not_unwrapped(tmp_path):
+    proc = _run_memex([
+        "resolve",
+        "https://www.linkedin.com/safety/go/?url=javascript%3Aalert(1)&urlhash=x",
+    ])
+    assert proc.returncode == 0, proc.stderr
+    data = json.loads(proc.stdout)
+    assert data["direct_url"] is None
+
+
 def test_resolve_youtube_watch_url(tmp_path):
     proc = _run_memex(["resolve", "https://www.youtube.com/watch?v=dQw4w9WgXcQ"])
     assert proc.returncode == 0, proc.stderr

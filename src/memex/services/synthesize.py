@@ -13,8 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from memex.agent import Agent, load_agent
-from memex.schemas import DocumentRef
-from memex.store import Store
+from memex.schemas import DocumentRef, coerce_derivation
+from memex.store import Store, min_confidence
 from memex.utils.retry import call_with_retry
 from memex.validators.validate import validate_derivation
 
@@ -101,10 +101,7 @@ class SynthesizerService:
 
         try:
             deriv = call_with_retry(_agent_derive)
-            if not isinstance(getattr(deriv, "prose", None), str):
-                raise TypeError(
-                    f"agent returned unexpected response type: {type(deriv).__name__}"
-                )
+            coerce_derivation(deriv)
         except Exception as e:
             return {
                 "status": "error",
@@ -167,19 +164,14 @@ class SynthesizerService:
                 written_by="llm",
             )
 
-        # Synthesis: confidence = min(parents' confidence); no signal stays
-        # conservative (low), all-high parents stay high.
+        # Synthesis: confidence = min(parents' confidence) — single source
+        # of truth in store.min_confidence (all-high stays high).
         confidences: list[str] = []
         for pid in parent_ids:
             p = self._store.get_node(pid)
             if p and p.get("confidence"):
                 confidences.append(p["confidence"])
-        if not confidences or "low" in confidences:
-            synth_conf = "low"
-        elif "medium" in confidences:
-            synth_conf = "medium"
-        else:
-            synth_conf = "high"
+        synth_conf = min_confidence(confidences)
         self._store._con.execute(
             "UPDATE node SET confidence = ? WHERE id = ?",
             (synth_conf, deriv_id),

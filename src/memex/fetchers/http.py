@@ -97,8 +97,7 @@ class HttpFetcher(Fetcher):
         text = re.sub(r"[ \t\r\f\v]+", " ", text)
         text = re.sub(r"\n\s*\n+", "\n\n", text)
         text = text.strip()
-        if not text:
-            raise FetchError(
-                f"no meaningful text content (page is script/style only): {url}"
-            )
+        # Expected content absence (ADR-0013): a page with no extractable
+        # text (JS-only, image-only) is not an infrastructure failure — the
+        # caller decides what to store. Return the metadata and empty content.
         return FetchResult(content=text, title=title)

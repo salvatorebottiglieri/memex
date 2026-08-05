@@ -16,20 +16,11 @@ through the CLI (register -> derive -> synthesize) with the fake agent.
 from __future__ import annotations
 
 import json
-import sqlite3
 from collections import deque
 
-from tests.conftest import _run_memex, register_node
+from tests.conftest import _q, _run_memex, register_node
 
 FAKE_AGENT = "tests.fake_llm_client:FakeAgent"
-
-
-def _q(store, sql: str, params: tuple = ()) -> list:
-    con = sqlite3.connect(str(store["db"]))
-    try:
-        return con.execute(sql, params).fetchall()
-    finally:
-        con.close()
 
 
 def _derive(store, node_id: str):

@@ -23,6 +23,20 @@ class DerivationResult:
     synthesis_statements: list[str] = field(default_factory=list)
 
 
+def coerce_derivation(deriv: object) -> DerivationResult:
+    """Validate an agent's derive() response before its fields are touched.
+
+    Agents are plugins (MEMEX_AGENT): a misbehaving implementation can
+    return anything. Failing fast with a TypeError here keeps the response
+    shape contract in one place — callers treat it like any agent failure.
+    """
+    if not isinstance(getattr(deriv, "prose", None), str):
+        raise TypeError(
+            f"agent returned unexpected response type: {type(deriv).__name__}"
+        )
+    return deriv  # type: ignore[return-value]
+
+
 @dataclass
 class DocumentRef:
     """A reference to a source document, handed to agents that can read files.

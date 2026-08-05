@@ -10,9 +10,7 @@ already covered by tests/test_extract_command.py — not duplicated here.
 """
 from __future__ import annotations
 
-import pytest
 
-from memex.fetchers import FetchError
 from memex.fetchers.http import HttpFetcher
 
 
@@ -52,13 +50,11 @@ class TestLoginWallAndCssHeavy:
         assert "var a=1" not in content
         assert "Visible" in content
 
-    def test_empty_page_raises(self, monkeypatch):
-        with pytest.raises(FetchError):
-            _fetch(monkeypatch, "<html><head></head><body></body></html>")
+    def test_empty_page_yields_empty_content(self, monkeypatch):
+        assert _fetch(monkeypatch, "<html><head></head><body></body></html>") == ""
 
-    def test_whitespace_only_page_raises(self, monkeypatch):
-        with pytest.raises(FetchError):
-            _fetch(monkeypatch, "<html><body>   \n\t  </body></html>")
+    def test_whitespace_only_page_yields_empty_content(self, monkeypatch):
+        assert _fetch(monkeypatch, "<html><body>   \n\t  </body></html>") == ""
 
 
 class TestTitleSurvivesStripping:
