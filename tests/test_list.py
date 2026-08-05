@@ -59,3 +59,16 @@ def test_list_does_not_write_to_db(store):
     _run_memex(["list", "--db", str(store["db"]), "--vault", str(store["vault"])])
     mtime_after = os.path.getmtime(store["db"])
     assert mtime_before == mtime_after
+
+
+def test_list_confidence_unset(store):
+    """Manually registered nodes have NULL confidence — reachable via --confidence unset."""
+    register_node(store, store["vault"], "article.md", "https://example.com/article")
+    result = _run_memex(
+        ["list", "--db", str(store["db"]), "--vault", str(store["vault"]),
+         "--confidence", "unset"]
+    )
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert len(data) == 1  # the extracted node (URL-node hidden by default)
+    assert data[0]["confidence"] is None

@@ -600,7 +600,7 @@ def cookies_export(domain: str, output: str | None) -> None:
 @click.option("--kind", default=None, help="Filter by node kind (url, extracted, summary). URL nodes are hidden unless --kind url is given.")
 @click.option("--tier", default=None, help="Filter by node tier (e.g. notes, synthesis, extracted).")
 @click.option("--trust-state", "trust_state", default=None, help="Filter by trust state (draft, auto-verified, human-approved, stale).")
-@click.option("--confidence", default=None, help="Filter by confidence (high, medium, low).")
+@click.option("--confidence", default=None, help="Filter by confidence (high, medium, low, unset).")
 @click.option(
     "--synthesis-statement",
     "synthesis_statement",
@@ -846,57 +846,85 @@ def search(db_path: Path, vault_path: Path, query: str) -> None:
 
 @cli.command("extract-ideas")
 @_db_options
-@click.argument("node_id")
-def extract_ideas(db_path: Path, vault_path: Path, node_id: str) -> None:
-    """Extract key ideas from a node. Uses LLM agent. Idempotent — re-run replaces ideas."""
+@click.argument("node_id", required=False)
+@click.option("--all", "extract_all", is_flag=True, default=False, help="Extract ideas from all content-bearing L0 nodes (skips nodes that already have ideas).")
+@click.option("--limit", "limit", default=None, type=int, help="Max nodes per run (default: unlimited).")
+def extract_ideas(db_path: Path, vault_path: Path, node_id: str | None,
+                  extract_all: bool, limit: int | None) -> None:
+    """Extract key ideas from a node. Uses LLM agent. Idempotent — re-run replaces ideas.
+
+    Single node:  memex extract-ideas --db DB --vault V <node-id>
+    Batch:        memex extract-ideas --db DB --vault V --all [--limit N]
+    """
     from memex.agent import load_agent
     from memex.store import Store
 
-    
     agent = load_agent(os.environ.get("MEMEX_AGENT"))
 
     with Store.open(db_path) as store:
-        node = store.get_node(node_id)
-        if node is None:
-            click.echo(json.dumps({"error": "not_found"}))
+        if not extract_all:
+            if not node_id:
+                _fail("missing_node_id", detail="Provide a node_id or use --all for batch mode.")
+            click.echo(json.dumps(_extract_ideas_one(store, agent, vault_path, node_id)))
             return
 
-        # Load content from vault file
-        if not node.get("content_path") or not Path(node["content_path"]).exists():
-            click.echo(json.dumps({"error": "no_content", "detail": "Content file not found in vault; place the file and re-register."}))
-            return
+        results: list[dict] = []
+        count = 0
+        for node in store.list_nodes():
+            if node.get("kind") not in ("raw_source", "extracted"):
+                continue
+            if store.get_node_ideas(node["id"]):
+                results.append({"node_id": node["id"], "status": "already_extracted"})
+                continue
+            if limit is not None and limit > 0 and count >= limit:
+                break
+            count += 1
+            results.append(_extract_ideas_one(store, agent, vault_path, node["id"]))
+        click.echo(json.dumps(results))
 
-        content_path = Path(node["content_path"])
-        if getattr(agent, "can_read_files", False):
-            from memex.schemas import DocumentRef
 
-            reference = DocumentRef(
-                node_id=node_id,
-                content_path=str(content_path),
-                title=node.get("title"),
-                source_url=node.get("source_url"),
-                size_bytes=content_path.stat().st_size,
-            )
-            content = None
-        else:
-            reference = None
-            content = content_path.read_text(encoding="utf-8")
-        try:
-            kwargs = {"content": content, "source_url": node.get("source_url")}
-            if reference is not None:
-                kwargs["reference"] = reference
-            ideas = agent.extract_ideas(**kwargs)
-        except Exception as e:
-            click.echo(json.dumps({"error": "agent_failed", "detail": str(e)}))
-            return
-        store.set_node_ideas(node_id, ideas)
+def _extract_ideas_one(store, agent, vault_path: Path, node_id: str) -> dict:
+    """Extract and persist ideas for a single node. Never raises — returns a
+    result/error dict (batch mode relies on this)."""
+    from memex.schemas import DocumentRef
 
-    click.echo(json.dumps({
+    node = store.get_node(node_id)
+    if node is None:
+        return {"node_id": node_id, "error": "not_found"}
+
+    # Load content from vault file
+    if not node.get("content_path") or not Path(node["content_path"]).exists():
+        return {"node_id": node_id, "error": "no_content",
+                "detail": "Content file not found in vault; place the file and re-register."}
+
+    content_path = Path(node["content_path"])
+    if getattr(agent, "can_read_files", False):
+        reference = DocumentRef(
+            node_id=node_id,
+            content_path=str(content_path),
+            title=node.get("title"),
+            source_url=node.get("source_url"),
+            size_bytes=content_path.stat().st_size,
+        )
+        content = None
+    else:
+        reference = None
+        content = content_path.read_text(encoding="utf-8")
+    try:
+        kwargs = {"content": content, "source_url": node.get("source_url")}
+        if reference is not None:
+            kwargs["reference"] = reference
+        ideas = agent.extract_ideas(**kwargs)
+    except Exception as e:
+        return {"node_id": node_id, "error": "agent_failed", "detail": str(e)}
+    store.set_node_ideas(node_id, ideas)
+
+    return {
         "node_id": node_id,
         "status": "extracted",
         "ideas": ideas,
         "ideas_count": len(ideas),
-    }))
+    }
 
 
 @cli.command()

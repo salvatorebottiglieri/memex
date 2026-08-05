@@ -245,3 +245,45 @@ class TestStatsCommand:
         assert "by_tier" in data
         assert "by_trust_state" in data
         assert "by_confidence" in data
+
+
+# ── ExtractIdeas batch (--all) ───────────────────────────────────────
+
+
+class TestExtractIdeasBatch:
+    def test_extract_all_batch_and_skip(self, store):
+        _ingest(store, "https://example.com/batch-a")
+        _ingest(store, "https://example.com/batch-b")
+        p = _run_memex(
+            ["extract-ideas", "--all", "--db", str(store["db"]), "--vault", str(store["vault"])],
+            env={"MEMEX_AGENT": FAKE_AGENT},
+        )
+        assert p.returncode == 0, p.stderr
+        results = json.loads(p.stdout)
+        assert [r["status"] for r in results].count("extracted") == 2
+        # Re-run: nodes that already have ideas are skipped, not re-called.
+        p2 = _run_memex(
+            ["extract-ideas", "--all", "--db", str(store["db"]), "--vault", str(store["vault"])],
+            env={"MEMEX_AGENT": FAKE_AGENT},
+        )
+        assert p2.returncode == 0, p2.stderr
+        assert all(r["status"] == "already_extracted" for r in json.loads(p2.stdout))
+
+    def test_extract_all_limit(self, store):
+        _ingest(store, "https://example.com/batch-1")
+        _ingest(store, "https://example.com/batch-2")
+        p = _run_memex(
+            ["extract-ideas", "--all", "--limit", "1",
+             "--db", str(store["db"]), "--vault", str(store["vault"])],
+            env={"MEMEX_AGENT": FAKE_AGENT},
+        )
+        assert p.returncode == 0, p.stderr
+        results = json.loads(p.stdout)
+        assert [r["status"] for r in results].count("extracted") == 1
+
+    def test_extract_without_node_id_or_all_fails(self, store):
+        p = _run_memex(
+            ["extract-ideas", "--db", str(store["db"]), "--vault", str(store["vault"])],
+            env={"MEMEX_AGENT": FAKE_AGENT},
+        )
+        assert p.returncode != 0

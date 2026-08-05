@@ -538,8 +538,11 @@ class Store:
             clauses.append("n.trust_state = ?")
             params.append(trust_state)
         if confidence is not None:
-            clauses.append("n.confidence = ?")
-            params.append(confidence)
+            if confidence == "unset":
+                clauses.append("n.confidence IS NULL")
+            else:
+                clauses.append("n.confidence = ?")
+                params.append(confidence)
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         sql = f"""
             SELECT

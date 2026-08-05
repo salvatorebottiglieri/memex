@@ -478,3 +478,26 @@ class TestReaderModePrompts:
         args, _ = mock.call_args
         assert "Document 1" in args[0] and "/tmp/a.md" in args[0]
         assert "Document 2" in args[0] and "/tmp/b.md" in args[0]
+
+    def test_extract_ideas_reader_mode_formats_prompt(self):
+        """Reader-mode extract_ideas formats _READER_IDEAS_PROMPT without
+        tripping over the submit_ideas instruction braces (regression: the
+        unescaped {ideas: ...} raised KeyError('ideas'))."""
+        from unittest.mock import patch
+
+        from memex.derivers.pi import OMPRpcAgent
+        from memex.schemas import DocumentRef
+
+        agent = OMPRpcAgent()
+        ref = DocumentRef(
+            node_id="n1", content_path="/tmp/doc.md",
+            title="Doc", source_url="https://x.example/d", size_bytes=42,
+        )
+        with patch.object(agent, "call_llm", return_value='["Idea 1", "Idea 2"]') as mock:
+            ideas = agent.extract_ideas(reference=ref)
+
+        assert ideas == ["Idea 1", "Idea 2"]
+        args, kwargs = mock.call_args
+        assert kwargs["allow_read"] is True
+        assert "/tmp/doc.md" in args[0]
+        assert "submit_ideas" in args[0]

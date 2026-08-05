@@ -87,7 +87,7 @@ _READER_IDEAS_PROMPT = (
     "READ IT YOURSELF with the read tool (multiple passes, offset/limit) — never "
     "other files or tools — then extract 3-5 key ideas.\n\n"
     "Submit the result by calling the submit_ideas tool with "
-    "{ideas: <array of strings>}. If the submit_ideas tool is unavailable, "
+    "{{ideas: <array of strings>}}. If the submit_ideas tool is unavailable, "
     "return ONLY a JSON array of strings, no other text.\n\n"
     "# Source document\n\n"
     "- id: {node_id}\n"
@@ -122,6 +122,13 @@ def _extract_json_object(raw: str) -> dict | None:
         return _json.loads(stripped)
     except _json.JSONDecodeError:
         return None
+
+
+def _clean_json_escapes(text: str) -> str:
+    """Undo JSON string escapes a model may have emitted inside a host-tool
+    payload (observed: apostrophes as ``\\'``). Only the escapes that cannot be
+    intentional prose are unescaped; ``\\n``/``\\t`` are left alone."""
+    return text.replace("\\'", "'")
 
 
 # Stop reasons that mean "the turn produced a complete answer". Providers
@@ -330,10 +337,14 @@ class OMPRpcAgent(Agent):
             and isinstance(payload.get("prose"), str)
             and isinstance(payload.get("synthesis_statements"), list)
         ):
-            return DerivationResult(
-                prose=payload["prose"],
-                synthesis_statements=[str(s) for s in payload["synthesis_statements"]],
-            )
+            # The tool path does not pass through json.loads (unlike the text
+            # path), so JSON escapes the model emits (observed: apostrophes as
+            # \') would land verbatim in the file and drift from the DB column,
+            # tripping the D2 synthesis-marker check. Unescape identically on
+            # prose and statements so DB and file always agree.
+            prose = _clean_json_escapes(payload["prose"])
+            statements = [_clean_json_escapes(str(s)) for s in payload["synthesis_statements"]]
+            return DerivationResult(prose=prose, synthesis_statements=statements)
         prose, statements = parse_derive_response(raw)
         return DerivationResult(prose=prose, synthesis_statements=statements)
 

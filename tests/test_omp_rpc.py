@@ -163,6 +163,27 @@ class TestHostTools:
         finally:
             agent.dispose()
 
+    def test_derive_unescapes_json_escapes_in_payload(self, fake_omp):
+        """Tool-payload prose with JSON-escaped apostrophes (\\') must be
+        unescaped identically on prose and statements so DB/file never drift
+        (regression: D2 synthesis-marker check tripped on the raw escapes)."""
+        fake_omp["set_env"](
+            FAKE_OMP_TOOL="submit_derivation",
+            FAKE_OMP_TOOL_ARGS=json.dumps(
+                {
+                    "prose": "Handbook\\'s claim and Ronacher\\'s reply.",
+                    "synthesis_statements": ["Handbook\\'s claim"],
+                }
+            ),
+        )
+        agent = OMPRpcAgent()
+        try:
+            dr = agent.derive(content="source")
+            assert dr.prose == "Handbook's claim and Ronacher's reply."
+            assert dr.synthesis_statements == ["Handbook's claim"]
+        finally:
+            agent.dispose()
+
     def test_review_uses_structured_payload(self, fake_omp):
         fake_omp["set_env"](
             FAKE_OMP_TOOL="submit_review",
