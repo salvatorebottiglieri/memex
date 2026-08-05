@@ -36,7 +36,11 @@ _DERIVE_SYSTEM_PROMPT = (
     "each of the form \"> Synthesis: <inference>\". There MUST be at least one "
     "such statement. The exact prefix '> Synthesis:' is required.\n"
     "4. Return your response as a JSON object with keys: 'prose' (the full markdown), "
-    "'synthesis_statements' (list of strings, each without the '> Synthesis:' prefix)."
+    "'synthesis_statements' (list of strings, each without the '> Synthesis:' prefix).\n"
+    "5. Submit the result by calling the submit_derivation tool with "
+    "{prose: <the full markdown>, synthesis_statements: <the list>}. The tool call "
+    "is the answer — do not print the payload as plain text. If the "
+    "submit_derivation tool is unavailable, return the JSON object from rule 4 instead."
 )
 
 _DERIVE_USER_TEMPLATE = "# Source material\n\n{content}\n"
@@ -62,7 +66,11 @@ _DERIVE_READER_SYSTEM_PROMPT = (
     "each of the form \"> Synthesis: <inference>\". There MUST be at least one "
     "such statement. The exact prefix '> Synthesis:' is required.\n"
     "7. Return your response as a JSON object with keys: 'prose' (the full markdown), "
-    "'synthesis_statements' (list of strings, each without the '> Synthesis:' prefix)."
+    "'synthesis_statements' (list of strings, each without the '> Synthesis:' prefix).\n"
+    "8. Submit the result by calling the submit_derivation tool with "
+    "{prose: <the full markdown>, synthesis_statements: <the list>}. The tool call "
+    "is the answer — do not print the payload as plain text. If the "
+    "submit_derivation tool is unavailable, return the JSON object from rule 7 instead."
 )
 
 _DERIVE_READER_USER_TEMPLATE = (
@@ -78,7 +86,9 @@ _READER_IDEAS_PROMPT = (
     "You are an ideas extractor. A source document is available at the path below. "
     "READ IT YOURSELF with the read tool (multiple passes, offset/limit) — never "
     "other files or tools — then extract 3-5 key ideas.\n\n"
-    "Return ONLY a JSON array of strings, no other text.\n\n"
+    "Submit the result by calling the submit_ideas tool with "
+    "{ideas: <array of strings>}. If the submit_ideas tool is unavailable, "
+    "return ONLY a JSON array of strings, no other text.\n\n"
     "# Source document\n\n"
     "- id: {node_id}\n"
     "- title: {title}\n"
@@ -97,8 +107,10 @@ _REVIEW_SYSTEM_PROMPT = (
     '  "rationale_md": string — markdown explaining your reasoning\n'
     '  "confidence": string — one of "high", "medium", or "low"\n'
     "\n"
-    "Respond with ONLY the JSON object itself — no markdown code fences, no commentary, "
-    "and never attempt tool calls. If you cannot determine affected nodes, return "
+    "Submit the result by calling the submit_review tool with the four fields. "
+    "If the submit_review tool is unavailable, respond with ONLY the JSON object "
+    "itself — no markdown code fences, no commentary, and no other tool calls. "
+    "If you cannot determine affected nodes, use "
     '{"affected_node_ids": [], "damage_boundary_node_id": null, "rationale_md": "<explanation>", "confidence": "low"}.\n'
 )
 
@@ -117,6 +129,75 @@ def _extract_json_object(raw: str) -> dict | None:
 # error, max_tokens, … — must surface as a failure, never a partial success.
 _CLEAN_STOP_REASONS = frozenset({"stop", "end_turn"})
 
+# Host tools registered via set_host_tools (phase 2, ADR-0017). The agent calls
+# them with structured arguments; the host replies host_tool_result. A captured
+# payload wins over text parsing — the result arrives typed, no JSON-in-text.
+# `parameters` is a JSON Schema object (the RPC wire takes it verbatim).
+_HOST_TOOLS: list[dict] = [
+    {
+        "name": "submit_derivation",
+        "label": "Submit Derivation",
+        "description": (
+            "Submit the final structured derivation: the full markdown prose "
+            "plus the list of synthesis statements. This is the authoritative "
+            "answer — do not also print the payload as plain text."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "prose": {"type": "string"},
+                "synthesis_statements": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["prose", "synthesis_statements"],
+        },
+    },
+    {
+        "name": "submit_ideas",
+        "label": "Submit Ideas",
+        "description": "Submit the extracted 3-5 key ideas as a list of strings.",
+        "parameters": {
+            "type": "object",
+            "properties": {"ideas": {"type": "array", "items": {"type": "string"}}},
+            "required": ["ideas"],
+        },
+    },
+    {
+        "name": "submit_review",
+        "label": "Submit Review",
+        "description": (
+            "Submit the review proposal: affected node ids, deepest affected "
+            "node (or null), markdown rationale, and a confidence of "
+            "high|medium|low."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "affected_node_ids": {"type": "array", "items": {"type": "string"}},
+                "damage_boundary_node_id": {"type": ["string", "null"]},
+                "rationale_md": {"type": "string"},
+                "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+            },
+            "required": ["affected_node_ids", "rationale_md", "confidence"],
+        },
+    },
+    {
+        "name": "submit_validation",
+        "label": "Submit Validation",
+        "description": (
+            "Submit the adversarial validation verdict: whether the derivation "
+            "genuinely re-elaborates its source, plus an optional reason."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "passes": {"type": "boolean"},
+                "reason": {"type": "string"},
+            },
+            "required": ["passes"],
+        },
+    },
+]
+
 
 @dataclass
 class _Turn:
@@ -127,6 +208,7 @@ class _Turn:
     text_parts: list[str] = field(default_factory=list)
     stop_reason: str | None = None
     error: str | None = None
+    tool_payloads: dict[str, dict] = field(default_factory=dict)
 
 
 class OMPRpcAgent(Agent):
@@ -169,7 +251,11 @@ class OMPRpcAgent(Agent):
         self._proc: subprocess.Popen | None = None
         self._current_turn: _Turn | None = None
         self._last_stop_reason: str | None = None
+        self._last_tool_payloads: dict[str, dict] = {}
         self._ready = threading.Event()
+        self._resp_events: dict[str, threading.Event] = {}
+        self._resp_errors: dict[str, str] = {}
+        self._tools_registered = False
         self._write_lock = threading.Lock()
         self._call_lock = threading.Lock()
         self._seq = itertools.count(1)
@@ -215,6 +301,7 @@ class OMPRpcAgent(Agent):
                 raise RuntimeError(
                     f"omp turn ended with stop reason: {turn.stop_reason}"
                 )
+            self._last_tool_payloads = turn.tool_payloads
             return "".join(turn.text_parts)
 
     def derive(
@@ -237,6 +324,16 @@ class OMPRpcAgent(Agent):
                 + _DERIVE_USER_TEMPLATE.format(content=content or "")
             )
             raw = self.call_llm(prompt)
+        payload = self.last_tool_payload("submit_derivation")
+        if (
+            isinstance(payload, dict)
+            and isinstance(payload.get("prose"), str)
+            and isinstance(payload.get("synthesis_statements"), list)
+        ):
+            return DerivationResult(
+                prose=payload["prose"],
+                synthesis_statements=[str(s) for s in payload["synthesis_statements"]],
+            )
         prose, statements = parse_derive_response(raw)
         return DerivationResult(prose=prose, synthesis_statements=statements)
 
@@ -262,8 +359,13 @@ class OMPRpcAgent(Agent):
                 return []
             raw = self.call_llm(
                 "Extract 3-5 key ideas from this content. "
-                "Return ONLY a JSON array of strings.\n\n" + content
+                "Call the submit_ideas tool with {ideas: <array of strings>}. "
+                "If the submit_ideas tool is unavailable, return ONLY a JSON "
+                "array of strings.\n\n" + content
             )
+        payload = self.last_tool_payload("submit_ideas")
+        if isinstance(payload, dict) and isinstance(payload.get("ideas"), list):
+            return [str(i) for i in payload["ideas"]]
         try:
             ideas = _json.loads(raw)
             if isinstance(ideas, list):
@@ -291,6 +393,16 @@ class OMPRpcAgent(Agent):
             + edge_context
         )
         raw = self.call_llm(prompt)
+        payload = self.last_tool_payload("submit_review")
+        if isinstance(payload, dict) and isinstance(
+            payload.get("affected_node_ids"), list
+        ):
+            return ReviewProposal(
+                affected_node_ids=[str(i) for i in payload["affected_node_ids"]],
+                damage_boundary_node_id=payload.get("damage_boundary_node_id"),
+                rationale_md=payload.get("rationale_md") or raw,
+                confidence=payload.get("confidence") or "low",
+            )
         data = _extract_json_object(raw)
         if data is not None:
             affected_node_ids = data.get("affected_node_ids", [])
@@ -363,6 +475,7 @@ class OMPRpcAgent(Agent):
         self._spawn_count += 1
         self._stderr_tail = []
         self._ready.clear()
+        self._tools_registered = False  # per-process: the new process needs its own set_host_tools
         threading.Thread(
             target=self._stderr_reader, args=(proc,), daemon=True, name="omp-rpc-stderr"
         ).start()
@@ -376,6 +489,7 @@ class OMPRpcAgent(Agent):
                 "omp RPC did not become ready"
                 + (f" (stderr: {' | '.join(tail)})" if tail else "")
             )
+        self._register_host_tools()
 
     def _kill(self) -> None:
         proc = self._proc
@@ -406,6 +520,32 @@ class OMPRpcAgent(Agent):
                 proc.wait(timeout=5)
             except Exception:  # noqa: BLE001
                 pass
+
+    def _register_host_tools(self) -> None:
+        """Send set_host_tools and await the ack before the first prompt.
+
+        Registration failure is non-fatal: text-parse fallback still works,
+        and the error is recorded for diagnostics.
+        """
+        if not _HOST_TOOLS or self._tools_registered:
+            return
+        rid = f"h{next(self._seq)}"
+        ev = threading.Event()
+        self._resp_events[rid] = ev
+        try:
+            self._write({"id": rid, "type": "set_host_tools", "tools": _HOST_TOOLS})
+        except Exception:  # noqa: BLE001
+            self._resp_events.pop(rid, None)
+            return
+        if ev.wait(self._startup_timeout):
+            self._tools_registered = True
+        self._resp_events.pop(rid, None)
+
+    def last_tool_payload(self, name: str) -> dict | None:
+        """Return the structured payload the agent submitted via host tool ``name``
+        on the most recently completed turn, or None. Agents without host tools
+        return None — callers fall back to text parsing."""
+        return self._last_tool_payloads.get(name)
 
     def dispose(self) -> None:
         """Terminate the RPC process if running. Idempotent."""
@@ -471,23 +611,55 @@ class OMPRpcAgent(Agent):
                     )
                     turn.done.set()
 
+    def _handle_host_tool_call(self, ev: dict) -> None:
+        """Capture a host-tool call and answer it.
+
+        The payload is stored on the current turn keyed by tool name; the
+        reply is a plain success result — the agent already produced the
+        payload, there is nothing to execute host-side.
+        """
+        name = ev.get("toolName")
+        args = ev.get("arguments") or {}
+        if isinstance(name, str) and isinstance(args, dict):
+            turn = self._current_turn
+            if turn is not None:
+                turn.tool_payloads[name] = args
+        result = {
+            "type": "host_tool_result",
+            "id": ev.get("id"),
+            "result": {"content": [{"type": "text", "text": "ok"}]},
+        }
+        try:
+            self._write(result)
+        except Exception:  # noqa: BLE001
+            pass
+
     def _handle(self, ev: dict) -> None:
         t = ev.get("type")
         if t == "ready":
             self._ready.set()
         elif t == "response":
+            rid = ev.get("id")
             if not ev.get("success", True):
-                turn = self._current_turn
-                if (
-                    turn is not None
-                    and ev.get("id") == turn.id
-                    and not turn.done.is_set()
-                ):
-                    turn.error = (
-                        "omp RPC command failed: "
-                        f"{ev.get('command')} {ev.get('error') or ''}".strip()
-                    )
-                    turn.done.set()
+                err = (
+                    f"omp RPC command failed: "
+                    f"{ev.get('command')} {ev.get('error') or ''}".strip()
+                )
+                if rid in self._resp_events:
+                    self._resp_errors[rid] = err
+                else:
+                    turn = self._current_turn
+                    if (
+                        turn is not None
+                        and rid == turn.id
+                        and not turn.done.is_set()
+                    ):
+                        turn.error = err
+                        turn.done.set()
+            if rid in self._resp_events:
+                self._resp_events[rid].set()
+        elif t == "host_tool_call":
+            self._handle_host_tool_call(ev)
         elif t == "message_update":
             ame = ev.get("assistantMessageEvent") or {}
             if ame.get("type") == "text_delta":

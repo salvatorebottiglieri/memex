@@ -55,6 +55,7 @@ disposed at process exit.
   per call). Cleaned up via `atexit`; a hard kill of memex can orphan it.
 - **Risk**: the RPC wire is versioned (`protocolVersion` in `ready`); a breaking omp
   upgrade surfaces as a clear startup error, not silent misbehavior.
-- **Future**: `set_host_tools` enables typed host tools (`submit_derivation`,
-  `submit_validation`…) that eliminate text parsing of results entirely — phase 2 of
-  the PRD, not part of this decision's initial surface.
+- **Done (2026-08-05)**: `set_host_tools` with typed host tools (`submit_derivation`,
+  `submit_ideas`, `submit_review`, `submit_validation`) — structured results with
+  text parsing demoted to fallback; the validator's parse-failure downgrade is gone.
+  Verified live on the real wire and pinned by the fake-omp test suite.

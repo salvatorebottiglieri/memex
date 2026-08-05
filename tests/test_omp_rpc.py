@@ -53,7 +53,9 @@ def fake_omp(tmp_path, monkeypatch):
 
 
 def _spawn_count(marker: Path) -> int:
-    return len(marker.read_text().splitlines()) if marker.exists() else 0
+    if not marker.exists():
+        return 0
+    return sum(1 for line in marker.read_text().splitlines() if line == "start")
 
 
 class TestRpcTurn:
@@ -126,6 +128,109 @@ class TestRpcFailure:
             with pytest.raises(RuntimeError, match="crashed repeatedly"):
                 agent.call_llm("three")
             assert _spawn_count(fake_omp["marker"]) == 2
+        finally:
+            agent.dispose()
+
+
+class TestHostTools:
+    """Phase 2: structured results via set_host_tools / host_tool_call."""
+
+    def test_tools_registered_on_spawn(self, fake_omp):
+        agent = OMPRpcAgent()
+        try:
+            agent.call_llm("ping")
+            assert "tools" in fake_omp["marker"].read_text().splitlines()
+        finally:
+            agent.dispose()
+
+    def test_derive_uses_structured_payload(self, fake_omp):
+        fake_omp["set_env"](
+            FAKE_OMP_TOOL="submit_derivation",
+            FAKE_OMP_TOOL_ARGS=json.dumps(
+                {
+                    "prose": "# Title\nReal prose.",
+                    "synthesis_statements": ["S1", "S2"],
+                }
+            ),
+            # Unparseable text on purpose: the payload must win.
+            FAKE_OMP_TEXT="this text is NOT valid json and must be ignored",
+        )
+        agent = OMPRpcAgent()
+        try:
+            dr = agent.derive(content="source")
+            assert dr.prose == "# Title\nReal prose."
+            assert dr.synthesis_statements == ["S1", "S2"]
+        finally:
+            agent.dispose()
+
+    def test_review_uses_structured_payload(self, fake_omp):
+        fake_omp["set_env"](
+            FAKE_OMP_TOOL="submit_review",
+            FAKE_OMP_TOOL_ARGS=json.dumps(
+                {
+                    "affected_node_ids": ["n1", "n2"],
+                    "damage_boundary_node_id": "n2",
+                    "rationale_md": "Both depend on the claim.",
+                    "confidence": "medium",
+                }
+            ),
+        )
+        agent = OMPRpcAgent()
+        try:
+            rp = agent.review("target", "asserting", {})
+            assert rp.affected_node_ids == ["n1", "n2"]
+            assert rp.damage_boundary_node_id == "n2"
+            assert rp.confidence == "medium"
+        finally:
+            agent.dispose()
+
+    def test_extract_ideas_uses_structured_payload(self, fake_omp):
+        fake_omp["set_env"](
+            FAKE_OMP_TOOL="submit_ideas",
+            FAKE_OMP_TOOL_ARGS=json.dumps({"ideas": ["Idea 1", "Idea 2"]}),
+        )
+        agent = OMPRpcAgent()
+        try:
+            assert agent.extract_ideas(content="src") == ["Idea 1", "Idea 2"]
+        finally:
+            agent.dispose()
+
+    def test_validate_uses_structured_payload(self, fake_omp):
+        from memex.schemas import DerivationResult
+        from memex.validators.validate import validate_derivation
+
+        fake_omp["set_env"](
+            FAKE_OMP_TOOL="submit_validation",
+            FAKE_OMP_TOOL_ARGS=json.dumps({"passes": False, "reason": "boilerplate"}),
+        )
+        agent = OMPRpcAgent()
+        try:
+            ok, warn = validate_derivation(
+                agent,
+                "parent content",
+                DerivationResult(prose="# X", synthesis_statements=["s"]),
+            )
+            assert ok is False and warn is None
+        finally:
+            agent.dispose()
+
+    def test_fallback_to_text_when_no_tool_call(self, fake_omp):
+        # No FAKE_OMP_TOOL: the fake returns plain text; derive parses it.
+        fake_omp["set_env"](
+            FAKE_OMP_TEXT=json.dumps(
+                {
+                    "prose": (
+                        "This article discusses the topic at hand.\n\n"
+                        "> Synthesis: S"
+                    ),
+                    "synthesis_statements": ["S"],
+                }
+            )
+        )
+        agent = OMPRpcAgent()
+        try:
+            dr = agent.derive(content="source")
+            assert dr.synthesis_statements == ["S"]
         finally:
             agent.dispose()
 

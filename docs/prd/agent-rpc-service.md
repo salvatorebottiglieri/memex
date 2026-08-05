@@ -39,10 +39,12 @@ per memex invocation, speaking the official protocol.
   mode (`can_read_files=True`) preserved — the process runs with the read tool.
 - **Turn timeout** (default 600s): `abort` command, then SIGTERM, then SIGKILL; the call
   fails with `error`, never hangs.
-- **Phase 2 — host tools** (`set_host_tools`): typed `submit_derivation` /
-  `submit_ideas` / `submit_review` / `submit_validation` tools. The agent calls them with
-  structured args; the host replies `host_tool_result`; at `agent_end` the structured
-  payload wins, text parsing becomes fallback only. Eliminates the parse-failure class.
+- **Phase 2 — host tools** (**implemented 2026-08-05**): typed `submit_derivation` /
+  `submit_ideas` / `submit_review` / `submit_validation` tools via `set_host_tools`. The
+  agent calls them with structured args (JSON Schema); the host replies `host_tool_result`;
+  at `agent_end` the structured payload wins, text parsing becomes fallback only. The
+  validator's "response parse failed → pass-with-warning" downgrade is gone: the verdict
+  arrives as a typed `passes` boolean or the fallback JSON text is parsed as before.
 - **Ratified**: one-shot `OMPAgent`/`PiAgent` are **removed** — no second convention.
   No schema changes, no new DB state (pre-persistence plumbing).
 
@@ -193,7 +195,7 @@ None. The agent service is pre-persistence plumbing: no new columns, tables, or 
 | `call_llm` returns the full turn text or raises — never a partial/empty success | call returns text while the turn is still streaming | `tests/test_omp_rpc.py` |
 | A crashed session never serves a call: the in-flight call fails, the session respawns | call returns text from a dead process | `tests/test_omp_rpc.py` |
 | Turn timeout always terminates the call (abort → kill) | call blocks past `MEMEX_OMP_TIMEOUT` | `tests/test_omp_rpc.py` |
-| Structured tool payload wins over text parse when both present | both available → parsed text used | `tests/test_omp_rpc.py` (phase 2) |
+| Structured tool payload wins over text parse when both present | both available → parsed text used | `tests/test_omp_rpc.py` |
 | One process serves the whole batch | spawn count > 1 for a `derive --all` run | `tests/test_derive_all.py` |
 
 ### Architecture notes

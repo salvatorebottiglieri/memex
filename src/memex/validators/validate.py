@@ -23,7 +23,10 @@ The derivation's synthesis statements are listed below. Evaluate each one:
 3. Is the statement specific enough to be useful?
    (Yes = good; "this is important" is too vague)
 
-Return ONLY a JSON object with key "passes" (boolean) and optionally a "reason" string.
+Submit your verdict by calling the submit_validation tool with the fields
+passes (boolean) and reason (optional string). If the submit_validation tool
+is unavailable, return ONLY a JSON object with key "passes" (boolean) and
+optionally a "reason" string.
 
 Parent content:
 {parent_content}
@@ -92,6 +95,15 @@ def validate_derivation(
             raw = call(prompt)
     except Exception:
         return True, "Validator LLM call failed, validation skipped"
+
+    # Structured path: agents with host tools submit the verdict via the
+    # submit_validation tool — no text parsing. Fall back to JSON-in-text.
+    payload = None
+    getter = getattr(agent, "last_tool_payload", None)
+    if callable(getter):
+        payload = getter("submit_validation")
+    if isinstance(payload, dict) and isinstance(payload.get("passes"), bool):
+        return payload["passes"], None
 
     import json as _json
 
