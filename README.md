@@ -59,6 +59,10 @@ uv run memex init --db /tmp/memex.db --vault /tmp/vault  # quick smoke test
 uv run pytest                                                 # run the unit suite
 uv run python tests/smoke_test.py                             # aggressive end-to-end smoke tests (real subprocess, ~176 checks)
 
+### Releasing
+
+Semver (`MAJOR.MINOR.PATCH`): bump `version` in `pyproject.toml` and move `CHANGELOG.md` entries out of `[Unreleased]` into `[X.Y.Z] — <date>`, merge via PR, then tag the merged commit (`git tag vX.Y.Z && git push origin vX.Y.Z`). `memex version` reads the installed package metadata — no other copy. See `AGENTS.md` → Releasing.
+
 All output is JSON (AXI standard) — pipe to `jq` or your agent's tools.
 
 ## Test injection (env vars)
