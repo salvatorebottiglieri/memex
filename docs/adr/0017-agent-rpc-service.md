@@ -59,3 +59,12 @@ disposed at process exit.
   `submit_ideas`, `submit_review`, `submit_validation`) — structured results with
   text parsing demoted to fallback; the validator's parse-failure downgrade is gone.
   Verified live on the real wire and pinned by the fake-omp test suite.
+- **Done (2026-08-06)**: the long-lived lifecycle is now a shared component —
+  `SubprocessClient` (`memex.derivers.subprocess`) owns lazy spawn, batch reuse,
+  timeout, respawn-once, stderr tail, turn serialization, and atexit dispose,
+  plus `call_llm` and the shared parse/reference helpers. `OMPRpcAgent` and the
+  new `ClaudeCodeAgent` (`memex.derivers.claude_code`) compose it with their
+  wire hooks; `Agent` stays the only interface (tickets #121/#122/#123). The
+  stream-json wire has no abort command — a turn timeout terminates the process
+  (SIGTERM → SIGKILL) — and no host tools, so derive/review/ideas parse the
+  text response (`parse_derive_response` fallback).
