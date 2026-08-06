@@ -12,35 +12,72 @@ Inspired by Andrej Karpathy's personal-wiki approach and by `iusztinpaul/ai-rese
 
 memex exposes a JSON-only CLI (one command per operation, all output is structured).
 
+#### Setup
+
 | Command | Description |
 |---------|-------------|
 | `memex init` | Create SQLite DB and vault directory (idempotent) |
 | `memex status` | Check if paths exist |
+
+#### Ingestion
+
+| Command | Description |
+|---------|-------------|
 | `memex register <file> [--source-url <url>]` | Register a local markdown file (source_url in frontmatter) as URL-node + extracted-node pair |
 | `memex extract <url>` | Fetch a URL and store it as URL-node + extracted-node (idempotent; `--force` re-extracts in place) |
+| `memex extract-ideas <node-id>` | Extract 3-5 key ideas from a node (lightweight, no full derive) |
+
+#### Esplorazione
+
+| Command | Description |
+|---------|-------------|
 | `memex list [--kind --tier --trust-state --confidence --limit --offset]` | List nodes with optional filters (URL-nodes hidden unless `--kind url`) |
 | `memex show <node-id>` | Show node details: URL-node = metadata only; extracted/derivation = content + trust state + check failures |
-| `memex extract-ideas <node-id>` | Extract 3-5 key ideas from a node (lightweight, no full derive) |
+| `memex search <query>` | Keyword search over derivations AND L0 metadata (title/URL/key) |
 | `memex ideas [query]` | Search across extracted ideas (empty query = all ideas) |
+
+#### Derivazione
+
+| Command | Description |
+|---------|-------------|
 | `memex derive <node-id>` | Generate a notes-tier derivation from an extracted/L0 node (agent via `MEMEX_AGENT`) |
 | `memex derive --all [--limit N]` | Batch-derive all un-derived L0 nodes (default: all; `--limit 0` also means no cap) |
-| `memex search <query>` | Keyword search over derivations AND L0 metadata (title/URL/key) |
+| `memex synthesize <node-id> [<node-id> ...]` | Generate a synthesis-tier derivation from one or more nodes |
+
+#### URL resolution
+
+| Command | Description |
+|---------|-------------|
 | `memex resolve [url]` | Resolve a URL through resolution rules (arXiv, GitHub, Wikipedia) |
 | `memex resolve-agent <url>` | Resolve a URL using an external agent (Pi/Claude) with a browser |
 | `memex cookies-export <domain>` | Export cookies for a domain (e.g. x.com) to use with resolve-agent |
-| `memex synthesize <node-id> [<node-id> ...]` | Generate a synthesis-tier derivation from one or more nodes |
+
+#### Contested & review
+
+| Command | Description |
+|---------|-------------|
+| `memex contradict <target-id>` | Write a contradicts edge targeting a node, triggering contested propagation |
+| `memex relate <source-id> <target-id>` | Write an associative edge (related\|refines) between two nodes |
+| `memex review` | Batch-generate review proposals for all pending contestation events |
+| `memex review list` | Show the review queue (pending events + proposals) |
+| `memex review accept/reject/dismiss <proposal-id>` | Adjudicate a review proposal |
+
+#### Vault & sync
+
+| Command | Description |
+|---------|-------------|
 | `memex delete <node-id> [--cascade]` | Remove a node (logical delete, no file removal). Cascade removes descendants |
 | `memex stats` | Vault statistics dashboard (counts by kind/tier/trust/confidence, coverage) |
 | `memex render` | Project SQLite graph -> YAML frontmatter + wikilinks on markdown files |
 | `memex list --synthesis-statement "<substring>"` | Substring match against derivation synthesis statements |
 | `memex backfill-synthesis [--dry-run]` | One-shot migration: parse `> Synthesis:` markers from existing derivation files into the structured column |
-| `memex review` | Batch-generate review proposals for all pending contestation events |
-| `memex review list` | Show the review queue (pending events + proposals) |
-| `memex review accept/reject/dismiss <proposal-id>` | Adjudicate a review proposal |
-| `memex contradict <target-id>` | Write a contradicts edge targeting a node, triggering contested propagation |
-| `memex relate <source-id> <target-id>` | Write an associative edge (related\|refines) between two nodes |
 | `memex ontology [--check]` | Generate docs/ONTOLOGY.md from the Rule registry |
 | `memex sync [--no-push] [--install-hooks]` | Commit vault state: render → git add → commit → push in one shot. `--install-hooks` writes a git post-merge hook that auto-renders after pull |
+
+#### Diagnostica
+
+| Command | Description |
+|---------|-------------|
 | `memex version` | Show the installed memex version (semver) |
 
 All data commands accept `--db <path>` and `--vault <path>` (or set `MEMEX_DB` / `MEMEX_VAULT` env vars; CLI flags take precedence). Auto-detected defaults: Obsidian vault via `~/.obsidian`, DB at `<vault>/.memex/memex.db`.
