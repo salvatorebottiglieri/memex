@@ -66,10 +66,10 @@ Tests inject fake collaborators without touching network or paying for LLM calls
 
 | Env var | Where | Effect |
 |---|---|---|
-| `MEMEX_AGENT` | `memex derive`, `extract-ideas`, `synthesize`, `review` | Replaces the default `DemoAgent` with a module:Class string (e.g. `tests.fake_llm_client:FakeAgent`, or `memex.derivers.pi:OMPRpcAgent`). Omit to use `DemoAgent` (no API key needed, hardcoded output). |
+| `MEMEX_AGENT` | `memex derive`, `extract-ideas`, `synthesize`, `review` | Replaces the default `DemoAgent` with a module:Class string (e.g. `tests.fake_llm_client:FakeAgent`, `memex.derivers.pi:OMPRpcAgent`, or `memex.derivers.claude_code:ClaudeCodeAgent`). Omit to use `DemoAgent` (no API key needed, hardcoded output). |
 | `MEMEX_VALIDATOR` | `memex derive`, `synthesize` | Loads a separate agent for adversarial quality validation. If unset, validation skipped (backwards compatible). Same module:Class convention. |
 
-All three follow the `module:Class` import-string convention so the seam is a one-line change with no monkeypatching.
+All follow the `module:Class` import-string convention so the seam is a one-line change with no monkeypatching.
 
 ## Sharing between devices
 
