@@ -5,6 +5,7 @@ All output is JSON (AXI standard: structured, token-frugal, machine-readable).
 from __future__ import annotations
 
 import dataclasses
+import importlib.metadata
 import json
 import os
 import shutil
@@ -18,6 +19,11 @@ import click
 from memex.canonical_key import canonical_key
 
 import functools
+
+try:
+    _PKG_VERSION = importlib.metadata.version("memex")
+except importlib.metadata.PackageNotFoundError:
+    _PKG_VERSION = "unknown"
 
 def _slugify(text: str, max_length: int = 80) -> str:
     """Convert text to a filesystem-safe slug (lowercase, hyphens only)."""
@@ -88,8 +94,15 @@ def _require_db(db_path: Path) -> None:
         _fail("db_not_found", path=str(db_path))
 
 @click.group()
+@click.version_option(version=_PKG_VERSION, prog_name="memex", message="%(prog)s %(version)s")
 def cli() -> None:
     """memex — personal second-brain CLI."""
+
+
+@cli.command()
+def version() -> None:
+    """Return the installed memex version as JSON (semver, from package metadata)."""
+    click.echo(json.dumps({"version": _PKG_VERSION}))
 
 
 def _db_options(fn):
