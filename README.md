@@ -43,13 +43,13 @@ memex exposes a JSON-only CLI (one command per operation, all output is structur
 | `memex sync [--no-push] [--install-hooks]` | Commit vault state: render → git add → commit → push in one shot. `--install-hooks` writes a git post-merge hook that auto-renders after pull |
 | `memex version` | Show the installed memex version (semver) |
 
-All commands accept `--db <path>` and `--vault <path>` (or set `MEMEX_DB` / `MEMEX_VAULT` env vars; CLI flags take precedence). Auto-detected defaults: Obsidian vault via `~/.obsidian`, DB at `<vault>/.memex/memex.db`.
+All data commands accept `--db <path>` and `--vault <path>` (or set `MEMEX_DB` / `MEMEX_VAULT` env vars; CLI flags take precedence). Auto-detected defaults: Obsidian vault via `~/.obsidian`, DB at `<vault>/.memex/memex.db`.
 
 ## Design
 
 - **[CONTEXT.md](CONTEXT.md)** — the glossary (ubiquitous language).
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — vision, architecture map, open questions, non-goals.
-- **[docs/adr/](docs/adr/)** — the architectural decisions (0001–0015) and *why* each was made.
+- **[docs/adr/](docs/adr/)** — the architectural decisions (0001–0017) and *why* each was made.
 
 ## Develop
 
@@ -57,7 +57,8 @@ All commands accept `--db <path>` and `--vault <path>` (or set `MEMEX_DB` / `MEM
 uv sync                       # install dependencies
 uv run memex init --db /tmp/memex.db --vault /tmp/vault  # quick smoke test
 uv run pytest                                                 # run the unit suite
-uv run python tests/smoke_test.py                             # aggressive end-to-end smoke tests (real subprocess, ~176 checks)
+uv run python tests/smoke_test.py                             # aggressive end-to-end smoke tests (real subprocess, ~160 checks)
+```
 
 ### Releasing
 
