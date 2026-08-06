@@ -41,6 +41,7 @@ memex exposes a JSON-only CLI (one command per operation, all output is structur
 | `memex relate <source-id> <target-id>` | Write an associative edge (related\|refines) between two nodes |
 | `memex ontology [--check]` | Generate docs/ONTOLOGY.md from the Rule registry |
 | `memex sync [--no-push] [--install-hooks]` | Commit vault state: render → git add → commit → push in one shot. `--install-hooks` writes a git post-merge hook that auto-renders after pull |
+| `memex version` | Show the installed memex version (semver) |
 
 All commands accept `--db <path>` and `--vault <path>` (or set `MEMEX_DB` / `MEMEX_VAULT` env vars; CLI flags take precedence). Auto-detected defaults: Obsidian vault via `~/.obsidian`, DB at `<vault>/.memex/memex.db`.
 
