@@ -34,7 +34,7 @@ class FakeTelegramSource(TelegramSource):
             ]
 
     def capture(self, cursor: int | None = None) -> list[CapturedMessage]:
-        """Return only messages with id > cursor (simulates Telethon offset_id)."""
+        """Return only messages with id > cursor (simulates Telethon min_id)."""
         if cursor is None:
             return self.messages
         return [m for m in self.messages if m.id is not None and m.id > cursor]

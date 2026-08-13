@@ -1,8 +1,9 @@
 """TelegramSource protocol and source loader for memex capture.
 
-Tests inject FakeTelegramSource via MEMEX_TELEGRAM_SOURCE env var.
-
-Slice 2: protocol + fake only. The real Telethon integration comes in slice 3.
+Defines the TelegramSource protocol plus the URL-splitting helper, and
+loads an implementation: tests inject a fake via MEMEX_TELEGRAM_SOURCE,
+while production builds the real Telethon-backed RealTelegramSource from
+the MEMEX_TELEGRAM_API_ID / MEMEX_TELEGRAM_API_HASH environment variables.
 """
 from __future__ import annotations
 
@@ -49,7 +50,11 @@ class TelegramSource(Protocol):
 def _split_urls_and_note(text: str) -> tuple[list[str], str]:
     """Extract URLs and produce a note (text with URLs stripped)."""
     import re
-    urls = re.findall(r"https?://\S+", text)
+    # Strip only sentence punctuation that the greedy \S+ would otherwise
+    # swallow ("see https://x.com/a." -> "https://x.com/a"). Brackets are
+    # left alone: balanced-paren URLs like Wikipedia's
+    # "Function_(mathematics)" are legitimate.
+    urls = [url.rstrip(".,;:!?") for url in re.findall(r"https?://\S+", text)]
     note = re.sub(r"https?://\S+\s*", "", text).strip()
     return urls, note
 
@@ -116,7 +121,13 @@ class RealTelegramSource:
             client = TelegramClient(session, self.api_id, self.api_hash)
             try:
                 await client.start()
-                msgs = await client.get_messages("me", limit=100, offset_id=cursor or 0)
+                # min_id is a lower bound (exclusive): only messages with
+                # id > cursor are returned, so the next run starts right
+                # after the last captured message. Telethon's offset_id
+                # means "older than" — passing the cursor there would
+                # re-fetch the already-captured window, duplicate messages
+                # into the append-only inbox, and regress the cursor.
+                msgs = await client.get_messages("me", limit=100, min_id=cursor or 0)
             except AuthError as e:
                 raise AuthFailedError(f"Telegram authentication failed: {e}") from e
             except RPCError as e:

@@ -6,6 +6,8 @@ No real Telegram credentials needed.
 from __future__ import annotations
 
 import inspect
+import sys
+import types
 
 import pytest
 
@@ -48,6 +50,19 @@ class TestSplitUrlsAndNote:
         urls, note = _split_urls_and_note("http://plain.example/one")
         assert urls == ["http://plain.example/one"]
         assert note == ""
+
+    @pytest.mark.parametrize("punctuation", [".", ",", ";", ":", "!", "?"])
+    def test_strips_safe_trailing_punctuation(self, punctuation):
+        text = f"see https://x.com/a{punctuation}"
+        urls, note = _split_urls_and_note(text)
+        assert urls == ["https://x.com/a"]
+        assert note == "see"
+
+    def test_does_not_strip_closing_paren(self):
+        text = "see https://en.wikipedia.org/wiki/Function_(mathematics)"
+        urls, note = _split_urls_and_note(text)
+        assert urls == ["https://en.wikipedia.org/wiki/Function_(mathematics)"]
+        assert note == "see"
 
 
 class TestLoadTelegramSource:
@@ -127,3 +142,67 @@ class TestRealTelegramSourceReadOnly:
         assert issubclass(CredentialsError, Exception)
         assert issubclass(AuthFailedError, Exception)
         assert issubclass(NetworkError, Exception)
+
+
+class TestRealTelegramSourceCaptureCursor:
+    """Pins RealTelegramSource.capture cursor semantics without real Telegram.
+
+    Telethon's ``offset_id`` means "older than" (exclusive); passing the
+    cursor there would re-fetch the already-captured window, duplicate
+    messages in the inbox, and regress the cursor. The source must use
+    ``min_id`` (a lower bound) instead.
+    """
+
+    @staticmethod
+    def _stub_telethon(monkeypatch, calls):
+        """Inject a fake telethon module recording get_messages calls."""
+
+        class FakeTelegramClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def start(self):
+                pass
+
+            async def get_messages(self, *args, **kwargs):
+                calls.append((args, kwargs))
+                return []
+
+            async def disconnect(self):
+                pass
+
+        class FakeAuthError(Exception):
+            pass
+
+        class FakeRPCError(Exception):
+            pass
+
+        telethon = types.ModuleType("telethon")
+        telethon_errors = types.ModuleType("telethon.errors")
+        telethon_errors.AuthError = FakeAuthError
+        telethon_errors.RPCError = FakeRPCError
+        telethon.TelegramClient = FakeTelegramClient
+        telethon.errors = telethon_errors
+        monkeypatch.setitem(sys.modules, "telethon", telethon)
+        monkeypatch.setitem(sys.modules, "telethon.errors", telethon_errors)
+
+    def test_capture_uses_min_id_not_offset_id(self, monkeypatch, tmp_path):
+        calls = []
+        self._stub_telethon(monkeypatch, calls)
+        source = RealTelegramSource(
+            api_id=123,
+            api_hash="hash",
+            session_path=str(tmp_path / "telegram.session"),
+        )
+
+        source.capture(cursor=42)
+        args, kwargs = calls[0]
+        assert args == ("me",)
+        assert kwargs == {"limit": 100, "min_id": 42}
+        assert "offset_id" not in kwargs
+
+        source.capture(cursor=None)
+        args, kwargs = calls[1]
+        assert args == ("me",)
+        assert kwargs == {"limit": 100, "min_id": 0}
+        assert "offset_id" not in kwargs
