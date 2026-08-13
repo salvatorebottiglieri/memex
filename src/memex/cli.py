@@ -302,6 +302,227 @@ def resolve(url: str | None) -> None:
     click.echo(json.dumps(dataclasses.asdict(result)))
 
 
+def _extract_url(store, vault_path: Path, url: str, *, force: bool = False) -> dict:
+    """Run the shared per-URL ingestion core (``extract`` and ``ingest --from-inbox``).
+
+    Resolve → per-type fetch (fetchers may cache immutable artifacts under
+    ``vault/.cache``) → url+extracted node pair → deterministic checks →
+    trust state. Returns a result dict with a ``status`` key, one of
+    ``extracted`` / ``re_extracted`` / ``already_exists`` /
+    ``already_registered`` / ``not_ingestable`` / ``fetch_failed`` /
+    ``no_content``. Never raises for per-URL outcomes. ``store`` must be an
+    open ``Store``; it is unused on the ``not_ingestable`` advisory path
+    (so callers can report that status without touching the DB).
+    """
+    from memex.checks import run_checks
+    from memex.fetchers import FetchError, fetch, get_fetcher
+    from memex.resolve.rules import resolve_url
+
+    resolution = resolve_url(url)
+    if not resolution.ingestable:
+        return {
+            "status": "not_ingestable",
+            "url": url,
+            "type": resolution.type,
+            "ingestable": resolution.ingestable,
+            "direct_url": resolution.direct_url,
+            "note": resolution.note,
+        }
+
+    ckey = canonical_key(url)
+    now = datetime.now(timezone.utc).isoformat()
+
+    existing = store.lookup_by_canonical_key(ckey)
+    url_node_id = existing["node_id"] if existing else str(uuid.uuid4())
+
+    # The ledger key may belong to a non-url node (e.g. an L0 .md
+    # registered with the same source_url). Extraction can only parent
+    # from a URL node, so report it cleanly instead of rewriting that
+    # node's source row and crashing in create_node downstream.
+    if existing is not None:
+        existing_node = store.get_node(existing["node_id"])
+        if existing_node is None or existing_node["kind"] != "url":
+            return {
+                "status": "already_registered",
+                "node_id": existing["node_id"],
+                "canonical_key": ckey,
+            }
+
+    # Dedup: a URL node with an extracted child is already extracted
+    # (unless --force asks for regeneration). The lookup filters
+    # kind='extracted' so an unrelated derivation child can never be
+    # mistaken for the extracted node.
+    extracted_node = (
+        store.find_extracted_child(url_node_id) if existing is not None else None
+    )
+    if extracted_node is not None and not force:
+        return {
+            "status": "already_exists",
+            "url_node_id": url_node_id,
+            "extracted_node_id": extracted_node["id"],
+        }
+
+    # --- Fetch through the resolution-selected fetcher ---
+    # The vault-level cache dir (vault/.cache, ADR-0013) lets per-type
+    # fetchers cache immutable artifacts (YouTube transcripts).
+    try:
+        result = fetch(url, resolution, cache_dir=vault_path / ".cache")
+    except FetchError as exc:
+        if existing is None:
+            store.create_node(node_id=url_node_id, kind="url", created_at=now)
+            store.attach_source(
+                node_id=url_node_id,
+                canonical_key=ckey,
+                source_url=url,
+                fetched_at=now,
+                failed=True,
+            )
+        else:
+            store.mark_source_failed(url_node_id, now)
+        return {
+            "status": "fetch_failed",
+            "url_node_id": url_node_id,
+            "error": exc.message,
+        }
+
+    # --- Expected content absence (ADR-0013) ---
+    # A page with no extractable text at all (JS-only, image-only) is not
+    # an infrastructure failure: record the URL node + source, store
+    # nothing. Short-but-real content keeps the existing contract
+    # (stored, D4 size check flags it -> draft).
+    if not result.content.strip() and result.content_path is None:
+        if existing is None:
+            store.create_node(node_id=url_node_id, kind="url", created_at=now)
+            store.attach_source(
+                node_id=url_node_id,
+                canonical_key=ckey,
+                source_url=url,
+                title=result.title,
+                fetched_at=now,
+            )
+        else:
+            store.update_source_after_fetch(url_node_id, result.title, now)
+        return {
+            "status": "no_content",
+            "url_node_id": url_node_id,
+            "title": result.title,
+            "note": "page has no extractable text content",
+        }
+
+    # --- Success: write content, then create/update nodes ---
+    # vault/.cache is NOT created eagerly: only per-type fetchers that
+    # cache immutable artifacts (YouTube transcripts, ADR-0013) mkdir it
+    # lazily, so http/pdf/wikipedia extracts never leave an empty dir.
+    vault_path.mkdir(parents=True, exist_ok=True)
+    extracted_dir = vault_path / "extracted"
+    extracted_dir.mkdir(parents=True, exist_ok=True)
+
+    fetcher_type = get_fetcher(url, resolution).TYPE
+    if extracted_node is not None:
+        # --force: regenerate in place, same node id (mutability per #76).
+        # When the fetch writes no artifact, the content ALWAYS lands on a
+        # fresh CLI-owned file under vault/extracted/<node_id>.md — never
+        # the DB's previous content_path, which may be a fetcher cache
+        # artifact (vault/.cache/youtube-<id>.md). Overwriting a cache
+        # file with metadata-only content would poison the immutable
+        # cache-first branch forever (ticket #99, finding 3).
+        extracted_node_id = extracted_node["id"]
+        md_path = extracted_dir / f"{extracted_node_id}.md"
+        status = "re_extracted"
+    else:
+        extracted_node_id = str(uuid.uuid4())
+        md_path = extracted_dir / f"{extracted_node_id}.md"
+        status = "extracted"
+
+    # The .md file and the DB rows are one unit. When the fetcher wrote
+    # its own artifact (YouTube transcript cache, ADR-0013) the file is
+    # already on disk and immutable — checks run against it in place and
+    # the temp/rename dance is skipped. Otherwise new content is written
+    # to a temp file next to the final path first; the checks run against
+    # that temp file, and it is atomically renamed onto the final path
+    # ONLY after update_trust_state has succeeded — the overwrite is the
+    # last step before the Store transaction commits, so the file on disk
+    # can never be newer than the DB state. On any failure the temp file
+    # is discarded (fresh and --force alike): a fresh extract leaves no
+    # orphan, a re-extract leaves the previous file untouched.
+    fetcher_wrote_file = result.content_path is not None
+    if fetcher_wrote_file:
+        md_path = Path(result.content_path)
+    tmp_path = (
+        None
+        if fetcher_wrote_file
+        else md_path.with_name(f"{md_path.name}.{uuid.uuid4().hex}.tmp")
+    )
+    check_path = md_path if fetcher_wrote_file else tmp_path
+    try:
+        if not fetcher_wrote_file:
+            tmp_path.write_text(result.content, encoding="utf-8")
+
+        if existing is None:
+            store.create_node(node_id=url_node_id, kind="url", created_at=now)
+            store.attach_source(
+                node_id=url_node_id,
+                canonical_key=ckey,
+                source_url=url,
+                title=result.title,
+                fetched_at=now,
+            )
+        else:
+            store.update_source_after_fetch(url_node_id, result.title, now)
+
+        if extracted_node is None:
+            store.create_node(
+                node_id=extracted_node_id,
+                kind="extracted",
+                content_path=str(md_path),
+                fetcher_type=fetcher_type,
+                derived_from=url_node_id,
+                created_at=now,
+            )
+        else:
+            # --force: refresh fetcher metadata from the new fetch — a
+            # different fetcher must not leave stale values behind, and
+            # the node row must track the resolved content file (which
+            # may have moved between a fetcher cache artifact and a
+            # CLI-owned vault/extracted file, ticket #99 finding 2).
+            store.update_extracted_fetcher(
+                extracted_node_id, fetcher_type, content_path=str(md_path)
+            )
+
+        # --- Checks -> trust (draft → auto-verified when checks pass) ---
+        check_result = run_checks(store._con, extracted_node_id, check_path)
+        trust_state = "auto-verified" if check_result.passed else "draft"
+        store.update_trust_state(
+            node_id=extracted_node_id,
+            trust_state=trust_state,
+            check_failures=check_result.failures,
+        )
+
+        if not fetcher_wrote_file:
+            # Final step before commit: atomically move the temp file
+            # into place so the on-disk content always matches the DB
+            # state. Fetcher-written artifacts (cache files) are already
+            # in place and must stay untouched.
+            os.replace(tmp_path, md_path)
+    except BaseException:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
+        raise
+
+    confidence = store.get_node(extracted_node_id)["confidence"]
+
+    return {
+        "status": status,
+        "url_node_id": url_node_id,
+        "extracted_node_id": extracted_node_id,
+        "fetcher_type": fetcher_type,
+        "confidence": confidence,
+        "trust_state": trust_state,
+        "content_path": str(md_path),
+        "title": result.title,
+    }
+
+
 @cli.command()
 @_db_options
 @click.option(
@@ -323,221 +544,131 @@ def extract(db_path: Path, vault_path: Path, force: bool, url: str) -> None:
     ``already_exists``; ``--force`` re-fetches and overwrites the extracted
     content in place (mutability per map #76).
     """
-    from memex.checks import run_checks
-    from memex.fetchers import FetchError, fetch, get_fetcher
     from memex.resolve.rules import resolve_url
     from memex.store import Store
 
-    resolution = resolve_url(url)
-    if not resolution.ingestable:
-        click.echo(json.dumps({
-            "status": "not_ingestable",
-            "url": url,
-            "type": resolution.type,
-            "ingestable": resolution.ingestable,
-            "direct_url": resolution.direct_url,
-            "note": resolution.note,
-        }))
+    # Non-ingestable URLs are advisory-only and never touch the DB — a
+    # missing DB must not fail them (ticket #96 contract).
+    if not resolve_url(url).ingestable:
+        click.echo(json.dumps(_extract_url(store=None, vault_path=vault_path, url=url)))
         return
 
     _require_db(db_path)
-    ckey = canonical_key(url)
-    now = datetime.now(timezone.utc).isoformat()
-
     with Store.open(db_path) as store:
-        existing = store.lookup_by_canonical_key(ckey)
-        url_node_id = existing["node_id"] if existing else str(uuid.uuid4())
+        result = _extract_url(store, vault_path, url, force=force)
+    click.echo(json.dumps(result))
 
-        # The ledger key may belong to a non-url node (e.g. an L0 .md
-        # registered with the same source_url). Extraction can only parent
-        # from a URL node, so report it cleanly instead of rewriting that
-        # node's source row and crashing in create_node downstream.
-        if existing is not None:
-            existing_node = store.get_node(existing["node_id"])
-            if existing_node is None or existing_node["kind"] != "url":
-                click.echo(json.dumps({
-                    "status": "already_registered",
-                    "node_id": existing["node_id"],
-                    "canonical_key": ckey,
-                }))
-                return
 
-        # Dedup: a URL node with an extracted child is already extracted
-        # (unless --force asks for regeneration). The lookup filters
-        # kind='extracted' so an unrelated derivation child can never be
-        # mistaken for the extracted node.
-        extracted_node = (
-            store.find_extracted_child(url_node_id) if existing is not None else None
-        )
-        if extracted_node is not None and not force:
-            click.echo(json.dumps({
-                "status": "already_exists",
-                "url_node_id": url_node_id,
-                "extracted_node_id": extracted_node["id"],
-            }))
-            return
+@cli.command()
+@_db_options
+@click.option(
+    "--from-inbox",
+    "from_inbox",
+    is_flag=True,
+    default=False,
+    help="Ingest all pending inbox items (captured but not yet in the ledger).",
+)
+def ingest(db_path: Path, vault_path: Path, from_inbox: bool) -> None:
+    """Ingest captured inbox items through the shared extract path.
 
-        # --- Fetch through the resolution-selected fetcher ---
-        # The vault-level cache dir (vault/.cache, ADR-0013) lets per-type
-        # fetchers cache immutable artifacts (YouTube transcripts).
+    Reads every inbox row (append-only — rows are never deleted) and runs
+    the same per-URL ingestion core as ``memex extract <url>``. Dedup is
+    the canonical-key ledger: re-running returns ``already_exists`` for
+    already-ingested URLs. A failed fetch leaves the row pending so the
+    next run retries it. Progress ``[i/N] status url`` goes to stderr; the
+    JSON result array goes to stdout.
+    """
+    from memex.store import Store
+
+    if not from_inbox:
+        raise click.UsageError("Use --from-inbox to ingest captured inbox items.")
+
+    _require_db(db_path)
+    with Store.open(db_path) as store:
+        inbox_items = list(store.list_inbox())
+        total = len(inbox_items)
+        results = []
+        for i, item in enumerate(inbox_items, start=1):
+            result = _extract_url(store, vault_path, item["url"])
+            results.append(result)
+            click.echo(f"[{i}/{total}] {result.get('status', '?')} {item['url']}", err=True)
+    click.echo(json.dumps(results))
+
+
+@cli.command()
+@_db_options
+@click.option(
+    "--source",
+    "source_module",
+    default=None,
+    help="Telegram source as module:Class (default: MEMEX_TELEGRAM_SOURCE env, then the real Telethon source).",
+)
+def capture(db_path: Path, vault_path: Path, source_module: str | None) -> None:
+    """Poll Telegram Saved Messages and persist new captures to the inbox.
+
+    Reads new messages from the configured Telegram source
+    (MEMEX_TELEGRAM_API_ID + MEMEX_TELEGRAM_API_HASH, or
+    MEMEX_TELEGRAM_SOURCE / --source), writes one inbox row per URL, and
+    advances the per-source cursor to the highest Telegram message id seen.
+    Read-only on Telegram; re-running only processes messages after the
+    last cursor position (cursor-monotonic).
+
+    First run: Telethon will prompt for phone number + 2FA code
+    interactively. Subsequent runs reuse the session file (default:
+    ~/.memex/telegram.session, override via MEMEX_TELEGRAM_SESSION).
+    """
+    import os
+
+    from memex.store import Store
+    from memex.telegram_source import (
+        AuthFailedError,
+        CredentialsError,
+        NetworkError,
+        load_telegram_source,
+    )
+
+    source_module = source_module or os.environ.get("MEMEX_TELEGRAM_SOURCE")
+    try:
+        source = load_telegram_source(source_module)
+    except CredentialsError as e:
+        _fail("missing_credentials", detail=str(e))
+    except (ImportError, AttributeError) as e:
+        _fail("source_not_found", detail=str(e))
+
+    source_name = "telegram:saved_messages"
+
+    _require_db(db_path)
+    with Store.open(db_path) as store:
+        cursor_str = store.get_cursor(source_name)
+        cursor = int(cursor_str) if cursor_str is not None else None
+
         try:
-            result = fetch(url, resolution, cache_dir=vault_path / ".cache")
-        except FetchError as exc:
-            if existing is None:
-                store.create_node(node_id=url_node_id, kind="url", created_at=now)
-                store.attach_source(
-                    node_id=url_node_id,
-                    canonical_key=ckey,
-                    source_url=url,
-                    fetched_at=now,
-                    failed=True,
-                )
-            else:
-                store.mark_source_failed(url_node_id, now)
-            click.echo(json.dumps({
-                "status": "fetch_failed",
-                "url_node_id": url_node_id,
-                "error": exc.message,
-            }))
-            return
+            messages = source.capture(cursor=cursor)
+        except AuthFailedError as e:
+            _fail("auth_failed", detail=str(e))
+        except NetworkError as e:
+            _fail("network_error", detail=str(e))
 
-        # --- Expected content absence (ADR-0013) ---
-        # A page with no extractable text at all (JS-only, image-only) is not
-        # an infrastructure failure: record the URL node + source, store
-        # nothing. Short-but-real content keeps the existing contract
-        # (stored, D4 size check flags it -> draft).
-        if not result.content.strip() and result.content_path is None:
-            if existing is None:
-                store.create_node(node_id=url_node_id, kind="url", created_at=now)
-                store.attach_source(
-                    node_id=url_node_id,
-                    canonical_key=ckey,
-                    source_url=url,
-                    title=result.title,
-                    fetched_at=now,
-                )
-            else:
-                store.update_source_after_fetch(url_node_id, result.title, now)
-            click.echo(json.dumps({
-                "status": "no_content",
-                "url_node_id": url_node_id,
-                "title": result.title,
-                "note": "page has no extractable text content",
-            }))
-            return
-
-        # --- Success: write content, then create/update nodes ---
-        # vault/.cache is NOT created eagerly: only per-type fetchers that
-        # cache immutable artifacts (YouTube transcripts, ADR-0013) mkdir it
-        # lazily, so http/pdf/wikipedia extracts never leave an empty dir.
-        vault_path.mkdir(parents=True, exist_ok=True)
-        extracted_dir = vault_path / "extracted"
-        extracted_dir.mkdir(parents=True, exist_ok=True)
-
-        fetcher_type = get_fetcher(url, resolution).TYPE
-        if extracted_node is not None:
-            # --force: regenerate in place, same node id (mutability per #76).
-            # When the fetch writes no artifact, the content ALWAYS lands on a
-            # fresh CLI-owned file under vault/extracted/<node_id>.md — never
-            # the DB's previous content_path, which may be a fetcher cache
-            # artifact (vault/.cache/youtube-<id>.md). Overwriting a cache
-            # file with metadata-only content would poison the immutable
-            # cache-first branch forever (ticket #99, finding 3).
-            extracted_node_id = extracted_node["id"]
-            md_path = extracted_dir / f"{extracted_node_id}.md"
-            status = "re_extracted"
-        else:
-            extracted_node_id = str(uuid.uuid4())
-            md_path = extracted_dir / f"{extracted_node_id}.md"
-            status = "extracted"
-
-        # The .md file and the DB rows are one unit. When the fetcher wrote
-        # its own artifact (YouTube transcript cache, ADR-0013) the file is
-        # already on disk and immutable — checks run against it in place and
-        # the temp/rename dance is skipped. Otherwise new content is written
-        # to a temp file next to the final path first; the checks run against
-        # that temp file, and it is atomically renamed onto the final path
-        # ONLY after update_trust_state has succeeded — the overwrite is the
-        # last step before the Store transaction commits, so the file on disk
-        # can never be newer than the DB state. On any failure the temp file
-        # is discarded (fresh and --force alike): a fresh extract leaves no
-        # orphan, a re-extract leaves the previous file untouched.
-        fetcher_wrote_file = result.content_path is not None
-        if fetcher_wrote_file:
-            md_path = Path(result.content_path)
-        tmp_path = (
-            None
-            if fetcher_wrote_file
-            else md_path.with_name(f"{md_path.name}.{uuid.uuid4().hex}.tmp")
-        )
-        check_path = md_path if fetcher_wrote_file else tmp_path
-        try:
-            if not fetcher_wrote_file:
-                tmp_path.write_text(result.content, encoding="utf-8")
-
-            if existing is None:
-                store.create_node(node_id=url_node_id, kind="url", created_at=now)
-                store.attach_source(
-                    node_id=url_node_id,
-                    canonical_key=ckey,
-                    source_url=url,
-                    title=result.title,
-                    fetched_at=now,
-                )
-            else:
-                store.update_source_after_fetch(url_node_id, result.title, now)
-
-            if extracted_node is None:
-                store.create_node(
-                    node_id=extracted_node_id,
-                    kind="extracted",
-                    content_path=str(md_path),
-                    fetcher_type=fetcher_type,
-                    derived_from=url_node_id,
-                    created_at=now,
-                )
-            else:
-                # --force: refresh fetcher metadata from the new fetch — a
-                # different fetcher must not leave stale values behind, and
-                # the node row must track the resolved content file (which
-                # may have moved between a fetcher cache artifact and a
-                # CLI-owned vault/extracted file, ticket #99 finding 2).
-                store.update_extracted_fetcher(
-                    extracted_node_id, fetcher_type, content_path=str(md_path)
-                )
-
-            # --- Checks -> trust (draft → auto-verified when checks pass) ---
-            check_result = run_checks(store._con, extracted_node_id, check_path)
-            trust_state = "auto-verified" if check_result.passed else "draft"
-            store.update_trust_state(
-                node_id=extracted_node_id,
-                trust_state=trust_state,
-                check_failures=check_result.failures,
+        now = datetime.now(timezone.utc).isoformat()
+        results = []
+        for msg in messages:
+            store.add_inbox_item(
+                source_name=source_name,
+                url=msg.url,
+                timestamp=msg.timestamp,
+                note=msg.note,
+                captured_at=now,
             )
+            results.append({"url": msg.url, "timestamp": msg.timestamp, "note": msg.note})
 
-            if not fetcher_wrote_file:
-                # Final step before commit: atomically move the temp file
-                # into place so the on-disk content always matches the DB
-                # state. Fetcher-written artifacts (cache files) are already
-                # in place and must stay untouched.
-                os.replace(tmp_path, md_path)
-        except BaseException:
-            if tmp_path is not None:
-                tmp_path.unlink(missing_ok=True)
-            raise
+        # Advance the cursor only as a capture watermark: the highest
+        # Telegram message id seen. Messages without an id cannot advance
+        # the watermark and are skipped.
+        ids = [msg.id for msg in messages if msg.id is not None]
+        if ids:
+            store.set_cursor(source_name, str(max(ids)))
 
-        confidence = store.get_node(extracted_node_id)["confidence"]
-
-    click.echo(json.dumps({
-        "status": status,
-        "url_node_id": url_node_id,
-        "extracted_node_id": extracted_node_id,
-        "fetcher_type": fetcher_type,
-        "confidence": confidence,
-        "trust_state": trust_state,
-        "content_path": str(md_path),
-        "title": result.title,
-    }))
+    click.echo(json.dumps(results))
 
 
 @cli.command()
