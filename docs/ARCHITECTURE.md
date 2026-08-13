@@ -51,6 +51,7 @@ This metaphor captures the two key invariants:
 | `memex list --synthesis-statement` filter | **built** | Substring match against the structured column |
 | `memex backfill-synthesis` migration | **built** | One-shot CLI for legacy vaults |
 | Cross-device vault sharing (git + env vars) | **built** | `MEMEX_VAULT` / `MEMEX_DB` env vars (ADR-0015) |
+| Telegram capture + inbox ingest (ADR-0006/0007) | **built** | `memex capture` / `memex ingest --from-inbox` |
 
 ## Map (as built)
 
