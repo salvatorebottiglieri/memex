@@ -26,6 +26,8 @@ memex exposes a JSON-only CLI (one command per operation, all output is structur
 | `memex register <file> [--source-url <url>]` | Register a local markdown file (source_url in frontmatter) as URL-node + extracted-node pair |
 | `memex extract <url>` | Fetch a URL and store it as URL-node + extracted-node (idempotent; `--force` re-extracts in place) |
 | `memex extract-ideas <node-id>` | Extract 3-5 key ideas from a node (lightweight, no full derive) |
+| `memex capture` | Poll Telegram Saved Messages → inbox (read-only; per-source cursor — re-runs only fetch new messages; real source via `MEMEX_TELEGRAM_API_ID`/`MEMEX_TELEGRAM_API_HASH`, override with `--source`/`MEMEX_TELEGRAM_SOURCE`) |
+| `memex ingest --from-inbox` | Ingest captured inbox items through the shared extract path (idempotent via canonical-key ledger; failed fetches stay pending and retry) |
 
 #### Esplorazione
 
@@ -111,8 +113,12 @@ Tests inject fake collaborators without touching network or paying for LLM calls
 |---|---|---|
 | `MEMEX_AGENT` | `memex derive`, `extract-ideas`, `synthesize`, `review` | Replaces the default `DemoAgent` with a module:Class string (e.g. `tests.fake_llm_client:FakeAgent`, `memex.derivers.pi:OMPRpcAgent`, or `memex.derivers.claude_code:ClaudeCodeAgent`). Omit to use `DemoAgent` (no API key needed, hardcoded output). |
 | `MEMEX_VALIDATOR` | `memex derive`, `synthesize` | Loads a separate agent for adversarial quality validation. If unset, validation skipped (backwards compatible). Same module:Class convention. |
+| `MEMEX_TELEGRAM_API_ID` | `memex capture` | Required Telegram API id for the real Telethon source |
+| `MEMEX_TELEGRAM_API_HASH` | `memex capture` | Required Telegram API hash for the real Telethon source |
+| `MEMEX_TELEGRAM_SESSION` | `memex capture` | Telethon session file (default `~/.memex/telegram.session`) |
+| `MEMEX_TELEGRAM_SOURCE` | `memex capture` | Telegram source as module:Class override (e.g. `tests.fake_telegram_source:FakeTelegramSource`); falls back to the real Telethon source |
 
-All follow the `module:Class` import-string convention so the seam is a one-line change with no monkeypatching.
+All agent, validator, and source overrides follow the `module:Class` import-string convention so the seam is a one-line change with no monkeypatching.
 
 ## Sharing between devices
 

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Telegram capture: `memex capture` polls Telegram Saved Messages (Telethon) and appends one inbox row per URL, advancing a per-source cursor (ADR-0006) so re-runs only fetch new messages. Backed by new cursor/inbox store tables (open-time migration).
+- Inbox ingest: `memex ingest --from-inbox` runs pending inbox items through the shared extract path; canonical-key dedup makes it idempotent and non-destructive (ADR-0007), with failed fetches left pending for retry.
+
 ## [0.1.0] — 2026-08-06
 
 ### Added

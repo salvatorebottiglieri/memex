@@ -108,3 +108,9 @@ The ``memex resolve <url>`` CLI command that classifies a URL and tells the exte
 
 **Resolution rule**:
 A deterministic, code-registered pattern mapping a URL class (prefix, host pattern, or page structure) to a type and suggested fetching strategy (e.g. ``arxiv.org/abs/`` → PDF, ``github.com/blob`` → raw content). No LLM needed.
+
+### Capture and ingest
+
+**Inbox**:
+The capture buffer that decouples *capture* from *ingest*: an append-only row per captured item (`url + timestamp + optional note`), never deleted. Each source keeps a **per-source cursor** (e.g. the last Telegram message id) so re-captures only fetch what's new; items already ingested are tracked in the canonical-key ledger, so re-running ingestion over the same inbox rows is idempotent and non-destructive.
+_Avoid_: queue, pending list
