@@ -69,6 +69,20 @@ CREATE TABLE IF NOT EXISTS edge (
     to_node   TEXT NOT NULL REFERENCES node(id)
 );
 
+CREATE TABLE IF NOT EXISTS cursor (
+    source_name TEXT PRIMARY KEY,
+    value       TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS inbox (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_name TEXT NOT NULL,
+    url         TEXT NOT NULL,
+    timestamp   TEXT,
+    note        TEXT,
+    captured_at TEXT NOT NULL
+);
+
 
 CREATE TABLE IF NOT EXISTS event_queue (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -152,11 +166,13 @@ class Store:
         """Apply pending schema migrations when the DB exists but is behind.
 
         Fresh/empty DBs (no ``node`` table) are left alone — ``memex init``
-        owns schema creation. Existing DBs missing the post-#95
-        ``fetcher_type`` column are migrated in place (idempotent and
-        transactional via ``init_schema``). Without this, a pre-#95 DB that
-        arrives via git sync (ADR-0015) crashes every read command with
-        ``no such column: n.fetcher_type``.
+        owns schema creation. Existing DBs are migrated in place (idempotent
+        and transactional via ``init_schema``) when they are missing the
+        post-#95 ``fetcher_type`` column or the #135 ``cursor``/``inbox``
+        tables. Without this, a pre-#95 DB that arrives via git sync
+        (ADR-0015) crashes every read command with ``no such column:
+        n.fetcher_type``, and a pre-#135 DB crashes ``capture``/``ingest``
+        with ``no such table: cursor``.
         """
         row = self._con.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'node'"
@@ -164,7 +180,13 @@ class Store:
         if row is None:
             return
         cols = {r[1] for r in self._con.execute("PRAGMA table_info(node)")}
-        if "fetcher_type" not in cols:
+        tables = {
+            r[0]
+            for r in self._con.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        if "fetcher_type" not in cols or "cursor" not in tables or "inbox" not in tables:
             self.init_schema()
 
     # ── Schema ────────────────────────────────────────────────────
@@ -1242,6 +1264,51 @@ class Store:
             )
         except sqlite3.Error as e:
             raise StoreError(str(e)) from e
+
+    # ── Cursors + inbox ────────────────────────────────────────────
+
+    def get_cursor(self, source_name: str) -> str | None:
+        """Return the stored capture watermark for a source, or None when unset."""
+        row = self._con.execute(
+            "SELECT value FROM cursor WHERE source_name = ?", (source_name,)
+        ).fetchone()
+        return row["value"] if row else None
+
+    def set_cursor(self, source_name: str, value: str) -> None:
+        """Persist (or overwrite) the capture watermark for a source."""
+        try:
+            self._con.execute(
+                "INSERT OR REPLACE INTO cursor (source_name, value) VALUES (?, ?)",
+                (source_name, value),
+            )
+        except sqlite3.Error as e:
+            raise StoreError(str(e)) from e
+
+    def add_inbox_item(
+        self,
+        *,
+        source_name: str,
+        url: str,
+        timestamp: str | None,
+        note: str | None,
+        captured_at: str,
+    ) -> None:
+        """Persist a captured item to the inbox table (append-only)."""
+        try:
+            self._con.execute(
+                "INSERT INTO inbox (source_name, url, timestamp, note, captured_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (source_name, url, timestamp, note, captured_at),
+            )
+        except sqlite3.Error as e:
+            raise StoreError(str(e)) from e
+
+    def list_inbox(self) -> list[dict]:
+        """All inbox rows, oldest first (append order)."""
+        rows = self._con.execute(
+            "SELECT id, source_name, url, timestamp, note, captured_at FROM inbox ORDER BY id"
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     # ── Ideas ─────────────────────────────────────────────────────
 

@@ -26,7 +26,7 @@ class TestSchema:
             "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
         ).fetchall()
         names = {r[0] for r in tables if not r[0].startswith("sqlite_")}
-        assert names == {"node", "source", "edge", "event_queue", "event_node_link", "review_proposal", "node_idea"}
+        assert names == {"node", "source", "edge", "event_queue", "event_node_link", "review_proposal", "node_idea", "cursor", "inbox"}
 
     def test_init_schema_is_idempotent(self):
         store = _store()
@@ -35,7 +35,7 @@ class TestSchema:
             "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
         ).fetchall()
         names = {r[0] for r in tables if not r[0].startswith("sqlite_")}
-        assert names == {"node", "source", "edge", "event_queue", "event_node_link", "review_proposal", "node_idea"}
+        assert names == {"node", "source", "edge", "event_queue", "event_node_link", "review_proposal", "node_idea", "cursor", "inbox"}
 
     def test_init_schema_adds_new_columns(self):
         """Verify is_contested, contested_at on node and written_by on edge exist."""
@@ -49,6 +49,125 @@ class TestSchema:
             r[1] for r in store._con.execute("PRAGMA table_info(edge)").fetchall()
         }
         assert "written_by" in cols_edge
+
+
+class TestCursor:
+    """Per-source capture watermarks (cursor table)."""
+
+    def test_get_cursor_returns_none_when_unset(self, db_store):
+        assert db_store.get_cursor("telegram:saved_messages") is None
+
+    def test_set_cursor_then_get_cursor(self, db_store):
+        db_store.set_cursor("telegram:saved_messages", "42")
+        assert db_store.get_cursor("telegram:saved_messages") == "42"
+
+    def test_set_cursor_overwrites(self, db_store):
+        db_store.set_cursor("telegram:saved_messages", "10")
+        db_store.set_cursor("telegram:saved_messages", "99")
+        assert db_store.get_cursor("telegram:saved_messages") == "99"
+
+    def test_cursors_are_per_source(self, db_store):
+        db_store.set_cursor("telegram:saved_messages", "1")
+        db_store.set_cursor("whatsapp:export.txt", "7")
+        assert db_store.get_cursor("telegram:saved_messages") == "1"
+        assert db_store.get_cursor("whatsapp:export.txt") == "7"
+        assert db_store.get_cursor("other:source") is None
+
+
+class TestInbox:
+    """Append-only capture queue (inbox table)."""
+
+    def test_add_inbox_item_roundtrip(self, db_store):
+        db_store.add_inbox_item(
+            source_name="telegram:saved_messages",
+            url="https://example.com/article",
+            timestamp="2024-06-01T09:00:00",
+            note="interesting read",
+            captured_at="2024-06-01T09:00:01",
+        )
+        rows = db_store.list_inbox()
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["source_name"] == "telegram:saved_messages"
+        assert row["url"] == "https://example.com/article"
+        assert row["timestamp"] == "2024-06-01T09:00:00"
+        assert row["note"] == "interesting read"
+        assert row["captured_at"] == "2024-06-01T09:00:01"
+
+    def test_add_inbox_item_allows_null_timestamp_and_note(self, db_store):
+        db_store.add_inbox_item(
+            source_name="telegram:saved_messages",
+            url="https://example.com/article",
+            timestamp=None,
+            note=None,
+            captured_at="2024-06-01T09:00:01",
+        )
+        row = db_store.list_inbox()[0]
+        assert row["timestamp"] is None
+        assert row["note"] is None
+
+    def test_list_inbox_ordered_by_id(self, db_store):
+        for i in range(3):
+            db_store.add_inbox_item(
+                source_name="telegram:saved_messages",
+                url=f"https://example.com/{i}",
+                timestamp=None,
+                note=None,
+                captured_at="2024-06-01T09:00:01",
+            )
+        urls = [r["url"] for r in db_store.list_inbox()]
+        assert urls == ["https://example.com/0", "https://example.com/1", "https://example.com/2"]
+        ids = [r["id"] for r in db_store.list_inbox()]
+        assert ids == sorted(ids)
+
+
+class TestMigration:
+    """_migrate_if_needed brings pre-cursor/inbox DBs up to date on open."""
+
+    def test_open_migrates_db_missing_cursor_and_inbox(self, tmp_path):
+        db_path = tmp_path / "memex.db"
+        with Store.open(db_path) as store:
+            store.init_schema()
+        # Simulate a DB created before the cursor/inbox tables existed.
+        con = sqlite3.connect(str(db_path))
+        con.execute("DROP TABLE cursor")
+        con.execute("DROP TABLE inbox")
+        con.commit()
+        con.close()
+
+        with Store.open(db_path) as store:
+            tables = {
+                r[0]
+                for r in store._con.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+        assert "cursor" in tables
+        assert "inbox" in tables
+
+    def test_open_migrated_db_keeps_existing_data(self, tmp_path):
+        db_path = tmp_path / "memex.db"
+        with Store.open(db_path) as store:
+            store.init_schema()
+            store.create_node(
+                node_id="n1", kind="url", depth=0,
+                created_at=_utcnow(),
+            )
+            store.attach_source(
+                node_id="n1", canonical_key="https://example.com/x",
+                source_url="https://example.com/x", fetched_at=_utcnow(),
+            )
+        con = sqlite3.connect(str(db_path))
+        con.execute("DROP TABLE cursor")
+        con.execute("DROP TABLE inbox")
+        con.commit()
+        con.close()
+
+        with Store.open(db_path) as store:
+            assert store.lookup_by_canonical_key("https://example.com/x")["node_id"] == "n1"
+            # Cursor/inbox usable after migration.
+            store.set_cursor("telegram:saved_messages", "5")
+            assert store.get_cursor("telegram:saved_messages") == "5"
 
 
 class TestContestation:
