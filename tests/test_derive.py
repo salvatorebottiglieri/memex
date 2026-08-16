@@ -60,6 +60,34 @@ def _seed_raw_source(store: dict, filename: str, source_url: str) -> dict:
     return {"id": node_id}
 
 
+def _seed_raw_source_short(store: dict, filename: str, source_url: str) -> dict:
+    """Create a legacy raw_source L0 whose content is below MIN_CHARS.
+
+    Mirrors the real-vault shape (55-byte frontmatter-only files) that used
+    to produce process-description notes (ticket #141).
+    """
+    node_id = str(uuid.uuid4())
+    md_path = Path(store["vault"]) / filename
+    md_path.write_text(
+        f"---\nsource_url: {source_url}\ntitle: Short\n---\n",
+        encoding="utf-8",
+    )
+    assert len(md_path.read_text(encoding="utf-8")) < 100
+    con = sqlite3.connect(store["db"])
+    st = _Store(con)
+    st.create_node(
+        node_id=node_id, kind="raw_source", depth=0,
+        content_path=str(md_path), created_at=datetime.now(timezone.utc).isoformat(),
+    )
+    st.attach_source(
+        node_id=node_id, canonical_key=source_url,
+        source_url=source_url, title="Short", fetched_at=None,
+    )
+    con.commit()
+    con.close()
+    return {"id": node_id}
+
+
 class TestDerive:
     def test_derive_returns_json_with_derivation_id(self, store):
         vault = Path(store["vault"])
@@ -453,6 +481,121 @@ class TestDeriveAll:
         data = json.loads(result.stdout)
         assert data["status"] == "derived"
         assert data["l0_node_id"] == l0s[0]["id"]
+
+
+class TestDeriveNoContentGate:
+    """Ticket #141: L0 content missing or below MIN_CHARS is skipped — the
+    derivation returns status no_content, no summary node, no agent call."""
+
+    def test_derive_short_l0_returns_no_content(self, store):
+        ingested = _seed_raw_source_short(store, "short.md", "https://example.com/short")
+        result = _derive(store, ingested["id"])
+
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        assert data["status"] == "no_content"
+        assert data["l0_node_id"] == ingested["id"]
+
+        con = sqlite3.connect(store["db"])
+        try:
+            summary_count = con.execute(
+                "SELECT COUNT(*) FROM node WHERE kind = 'summary'"
+            ).fetchone()[0]
+        finally:
+            con.close()
+        assert summary_count == 0
+
+    def test_derive_short_l0_does_not_call_agent(self, store):
+        """The agent must never be invoked for a content-less L0."""
+        from tests.fake_llm_client import FakeAgent
+
+        class RecordingFake(FakeAgent):
+            def __init__(self):
+                super().__init__()
+                self.calls = 0
+
+            def derive(self, content):
+                self.calls += 1
+                return super().derive(content)
+
+        ingested = _seed_raw_source_short(store, "short.md", "https://example.com/short")
+        agent = RecordingFake()
+        with _Store.open(store["db"]) as s:
+            from memex.services.derive import DeriverService
+
+            svc = DeriverService(s, Path(store["vault"]), agent)
+            result = svc.derive(ingested["id"])
+
+        assert result.status == "no_content"
+        assert agent.calls == 0
+
+        con = sqlite3.connect(store["db"])
+        try:
+            summary_count = con.execute(
+                "SELECT COUNT(*) FROM node WHERE kind = 'summary'"
+            ).fetchone()[0]
+        finally:
+            con.close()
+        assert summary_count == 0
+
+    def test_derive_short_l0_does_not_block_real_derive(self, store):
+        """A real-content L0 next to a short one derives unchanged."""
+        short = _seed_raw_source_short(store, "short.md", "https://example.com/short")
+        long = _seed_raw_source(store, "long.md", "https://example.com/long")
+        result = _derive(store, long["id"])
+
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        assert data["status"] == "derived"
+        assert data["trust_state"] == "auto-verified"
+        assert data["l0_node_id"] == long["id"]
+
+        # The short L0 was never touched (no derivation on it).
+        con = sqlite3.connect(store["db"])
+        try:
+            count = con.execute(
+                "SELECT COUNT(*) FROM edge WHERE to_node = ? "
+                "AND type = 'provenance' AND relation = 'derived_from'",
+                (short["id"],),
+            ).fetchone()[0]
+        finally:
+            con.close()
+        assert count == 0
+
+
+class TestDeriveAllNoContent:
+    """derive --all reports no_content for content-less L0s instead of
+    deriving process-description notes (ticket #141)."""
+
+    def _derive_all(self, store, limit: int | None = None):
+        args = [
+            "derive", "--db", str(store["db"]),
+            "--vault", str(store["vault"]), "--all",
+        ]
+        if limit is not None:
+            args.extend(["--limit", str(limit)])
+        return _run_memex(args, env={"MEMEX_AGENT": FAKE_AGENT})
+
+    def test_derive_all_reports_no_content_for_short_l0s(self, store):
+        short = _seed_raw_source_short(store, "short.md", "https://example.com/short")
+        long = _seed_raw_source(store, "long.md", "https://example.com/long")
+
+        result = self._derive_all(store)
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+
+        statuses = {r["l0_node_id"]: r["status"] for r in data}
+        assert statuses[short["id"]] == "no_content"
+        assert statuses[long["id"]] == "derived"
+
+        con = sqlite3.connect(store["db"])
+        try:
+            summary_count = con.execute(
+                "SELECT COUNT(*) FROM node WHERE kind = 'summary'"
+            ).fetchone()[0]
+        finally:
+            con.close()
+        assert summary_count == 1  # only the real-content L0 got a summary
 
 
 class TestSearch:

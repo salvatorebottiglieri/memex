@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from memex.agent import Agent, load_agent
+from memex.rules import MIN_CHARS
 from memex.schemas import DocumentRef, coerce_derivation
 from memex.store import Store
 from memex.utils.retry import call_with_retry
@@ -43,7 +44,8 @@ class DeriveResult:
     """Result of a single derive operation."""
 
     id: str
-    status: str  # "derived" | "already_derived" | "quality_failed" | "error"
+    # "derived" | "already_derived" | "quality_failed" | "no_content" | "error"
+    status: str
     l0_node_id: str
     trust_state: str | None = None
     content_path: str | None = None
@@ -115,6 +117,18 @@ class DeriverService:
                 l0_node_id=l0_node_id,
             )
 
+        # --- Real-content gate (ticket #141) ---
+        # An L0 with no content (or content below the MIN_CHARS floor, e.g.
+        # 55-byte frontmatter-only files) carries nothing to summarize: skip
+        # the derivation — no node created, no LLM cost — instead of letting
+        # the agent produce process-description notes.
+        if self._below_min_chars(l0, content):
+            return DeriveResult(
+                id=l0_node_id,
+                status="no_content",
+                l0_node_id=l0_node_id,
+            )
+
         return self._do_derive(
             l0_node_id, content, reference, use_retry=use_retry
         )
@@ -166,6 +180,15 @@ class DeriverService:
 
             try:
                 content, reference = self._agent_inputs(l0)
+                if self._below_min_chars(l0, content):
+                    results.append(
+                        DeriveResult(
+                            id=node["id"],
+                            status="no_content",
+                            l0_node_id=node["id"],
+                        )
+                    )
+                    continue
                 result = self._do_derive(
                     node["id"], content, reference, use_retry=True
                 )
@@ -185,6 +208,21 @@ class DeriverService:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _below_min_chars(self, l0: dict, content: str | None) -> bool:
+        """True when the L0 carries no real content (< MIN_CHARS, #141).
+
+        Reader agents receive a DocumentRef and read the file themselves, so
+        their content length comes from the file; other agents get the
+        inlined content (already NUL-stripped and capped — exact for anything
+        below MIN_CHARS, since the cap only trims far larger inputs).
+        """
+        if content is not None:
+            return len(content) < MIN_CHARS
+        content_path = l0.get("content_path")
+        if not content_path or not Path(content_path).exists():
+            return True
+        return Path(content_path).stat().st_size < MIN_CHARS
 
     def _agent_inputs(self, l0: dict) -> tuple[str | None, DocumentRef | None]:
         """Decide what the agent receives for an L0.
