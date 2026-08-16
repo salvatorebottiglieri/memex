@@ -50,11 +50,10 @@ def fake_cc(tmp_path, monkeypatch):
     monkeypatch.delenv("MEMEX_CC_TIMEOUT", raising=False)
     monkeypatch.delenv("MEMEX_CC_STARTUP_TIMEOUT", raising=False)
     monkeypatch.delenv("MEMEX_CC_PERMISSION_MODE", raising=False)
-    # The CLI subprocess inherits the whole environment: an outer
-    # MEMEX_VALIDATOR pointing at a real agent would spawn a real CLI/LLM
-    # inside a hermetic test. Delete it so validation is skipped, exactly
-    # like the unset case.
-    monkeypatch.delenv("MEMEX_VALIDATOR", raising=False)
+    # Validation is always-on now (no MEMEX_VALIDATOR to unset): the fake
+    # claude shim answers the judge turns deterministically — V1/V2 get the
+    # configured FAKE_CC_TEXT, which fails the structured-verdict parse and
+    # degrades to pass-with-warning, so tests stay hermetic and green.
 
     def set_env(**kw):
         for k, v in kw.items():

@@ -42,12 +42,18 @@ _DERIVE_SYSTEM_PROMPT = (
     "3. End with a ## Synthesis section whose body is one or more bullet points, "
     "each of the form \"> Synthesis: <inference>\". There MUST be at least one "
     "such statement. The exact prefix '> Synthesis:' is required.\n"
-    "4. Return your response as a JSON object with keys: 'prose' (the full markdown), "
+    "4. Factual fidelity: statistics or specific numbers absent from the source "
+    "material MUST be omitted or marked as a synthesis statement — never invented, "
+    "rounded, or approximated from memory. In a synthesis over multiple sources, "
+    "every fact taken from a source MUST be followed by an inline link "
+    "[[filename|alias]] naming the parent it comes from (the # Sources block lists "
+    "the exact link targets); a single-source note needs no links.\n"
+    "5. Return your response as a JSON object with keys: 'prose' (the full markdown), "
     "'synthesis_statements' (list of strings, each without the '> Synthesis:' prefix).\n"
-    "5. Submit the result by calling the submit_derivation tool with "
+    "6. Submit the result by calling the submit_derivation tool with "
     "{prose: <the full markdown>, synthesis_statements: <the list>}. The tool call "
     "is the answer — do not print the payload as plain text. If the "
-    "submit_derivation tool is unavailable, return the JSON object from rule 4 instead."
+    "submit_derivation tool is unavailable, return the JSON object from rule 5 instead."
 )
 
 _DERIVE_USER_TEMPLATE = "# Source material\n\n{content}\n"
@@ -69,15 +75,21 @@ _DERIVE_READER_SYSTEM_PROMPT = (
     "5. Write body prose that summarises the source. Facts restated from the source "
     "are unadorned; any statement that goes beyond what the source says must be "
     "marked as a synthesis statement.\n"
-    "6. End with a ## Synthesis section whose body is one or more bullet points, "
+    "6. Factual fidelity: statistics or specific numbers absent from the source "
+    "material MUST be omitted or marked as a synthesis statement — never invented, "
+    "rounded, or approximated from memory. In a synthesis over multiple sources, "
+    "every fact taken from a source MUST be followed by an inline link "
+    "[[filename|alias]] naming the parent it comes from (the link target is the "
+    "stem of the parent's listed path); a single-source note needs no links.\n"
+    "7. End with a ## Synthesis section whose body is one or more bullet points, "
     "each of the form \"> Synthesis: <inference>\". There MUST be at least one "
     "such statement. The exact prefix '> Synthesis:' is required.\n"
-    "7. Return your response as a JSON object with keys: 'prose' (the full markdown), "
+    "8. Return your response as a JSON object with keys: 'prose' (the full markdown), "
     "'synthesis_statements' (list of strings, each without the '> Synthesis:' prefix).\n"
-    "8. Submit the result by calling the submit_derivation tool with "
+    "9. Submit the result by calling the submit_derivation tool with "
     "{prose: <the full markdown>, synthesis_statements: <the list>}. The tool call "
     "is the answer — do not print the payload as plain text. If the "
-    "submit_derivation tool is unavailable, return the JSON object from rule 7 instead."
+    "submit_derivation tool is unavailable, return the JSON object from rule 8 instead."
 )
 
 _READER_IDEAS_PROMPT = (
@@ -172,19 +184,47 @@ _HOST_TOOLS: list[dict] = [
         },
     },
     {
-        "name": "submit_validation",
-        "label": "Submit Validation",
+        "name": "submit_verdicts",
+        "label": "Submit Validation Verdicts",
         "description": (
-            "Submit the adversarial validation verdict: whether the derivation "
-            "genuinely re-elaborates its source, plus an optional reason."
+            "Submit the adversarial-validation verdicts: V1 evidence checks "
+            "carry a per-claim verdicts array (claim, verdict, evidence_quote "
+            "for SUPPORTED; source_examined + absence_explanation for "
+            "UNSUPPORTED); V2 re-elaboration carries a single passes/reason "
+            "pair. This is the authoritative answer — do not also print the "
+            "payload as plain text."
         ),
         "parameters": {
             "type": "object",
             "properties": {
+                "verdicts": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "claim": {"type": "string"},
+                            "verdict": {
+                                "type": "string",
+                                "enum": ["SUPPORTED", "COMMON_KNOWLEDGE", "UNSUPPORTED"],
+                            },
+                            "evidence_quote": {"type": "string"},
+                            "source_examined": {"type": "string"},
+                            "absence_explanation": {"type": "string"},
+                        },
+                    },
+                },
                 "passes": {"type": "boolean"},
                 "reason": {"type": "string"},
             },
-            "required": ["passes"],
+            # One tool, two payload shapes: V1 carries the per-claim
+            # verdicts array, V2 the single passes/reason pair. Each shape
+            # keeps its own `required` list (like every other host tool) so
+            # an LLM omitting the payload fields is rejected by the schema
+            # instead of degrading to pass-with-warning.
+            "anyOf": [
+                {"required": ["verdicts"]},
+                {"required": ["passes"]},
+            ],
         },
     },
 ]

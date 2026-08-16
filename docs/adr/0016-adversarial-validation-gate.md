@@ -1,5 +1,14 @@
 # ADR-0016: Adversarial validation gate for derivation quality
 
+> **SUPERSEDED by [ADR-0018](0018-validation-family.md)** (issue #145). The
+> separate `MEMEX_VALIDATOR` agent and the pre-persistence
+> `validate_derivation()` gate were removed. The always-on validation family
+> replaced them: `MEMEX_VALIDATION=off` disables only the LLM criteria,
+> `MEMEX_JUDGE` selects the judge (default = the derivation agent), the DAG
+> runs V1 → D7 → V2 post-persistence, and draft + `check_failures`
+> annotations (severity tags) replaced `status: quality_failed`. This ADR is
+> kept for history.
+
 A derivation node (notes-tier or synthesis-tier) can be created without genuinely
 re-elaborating its parent content. The deterministic checks (ADR-0011) verify structure
 (`> Synthesis:` marker, no dangling references) — they cannot verify semantic quality.

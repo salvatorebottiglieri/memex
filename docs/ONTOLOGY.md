@@ -21,7 +21,7 @@ Every rule here has a concrete implementation.
 | `contested_at` | ISO-8601 | null | 0–1 | When first contested |
 | `content_path` | path | 1 | Filesystem path to markdown file |
 | `synthesis_statements` | JSON array | null | 0–1 | Structured list of inferences |
-| `check_failures` | JSON array | null | 0–1 | Deterministic check failures (if any) |
+| `check_failures` | JSON array | null | 0–1 | Deterministic (D1–D6) + adversarial (V1–V2) gate failures (if any) |
 | `created_at` | ISO-8601 | 1 | Creation timestamp |
 
 ### 1.2 Edge
@@ -221,17 +221,32 @@ Implementation: `store.accept_proposal()`, `store.reject_proposal()`, `store.dis
 
 ## 7. Deterministic checks (draft → auto-verified gate)
 
-See `src/memex/rules.py` for the declarative check definitions (D1–D5).
+See `src/memex/rules.py` for the declarative check definitions (D1–D6).
 Constants `MIN_CHARS` and `MAX_CHARS` live in `rules.py`.
 
 ```
-Rule D6 — Auto-verified gate
-  A node passes from 'draft' to 'auto-verified' ONLY if all checks D1–D5 pass.
-  Failures persist as JSON in node.check_failures.
+Rule D0 — Auto-verified gate
+  A node passes from 'draft' to 'auto-verified' ONLY if all checks D1–D6 pass
+  AND the validation DAG passes: V1 (grounding) → D7 (quote
+  verification over V1's verdicts) → V2 (re-elaboration quality,
+  consuming V1's verdicts; skipped when V1 is fatal).
+  MEMEX_VALIDATION=off disables the DAG (deterministic D1–D7 never opt
+  out — D7 runs over V1's verdicts and is vacuous without them).
+  Failures accumulate in node.check_failures, each identifying its
+  criterion (id prefix — 'D7: ', 'V1: ', 'V2: ' — or the
+  consequence label for the D-checks, e.g. 'Link validity check
+  failed'); the gate failures D6, D7, V1 and V2 carry two-level
+  severity tags: fatal (D6, D7, V1-UNSUPPORTED) — one is
+  enough → draft; quality (V2) → draft, human-promotable. The
+  tag is an informational annotation guiding human review: both
+  severities gate to draft (there is no separate quality_failed
+  state) and draft nodes are human-promotable via the existing
+  review flow.
+  Invariant: auto-verified ⇒ every unadorned claim is grounded.
   Trust state is set by the CLI caller (checks.py only reports failures).
 ```
 
-Implementation: `checks.run_checks()` delegates to `CHECK_RULES` in `rules.py`. CLI: `_do_derive()` and `_do_synthesize()` call `update_trust_state()` with `check_failures` list.
+Implementation: `checks.run_checks()` delegates to `CHECK_RULES`; `validators.validate.run_validations()` runs the validation DAG (V1 → D7 → V2) from `VALIDATION_RULES` with the judge agent (`MEMEX_JUDGE`, default = the derive agent). services/derive.py and services/synthesize.py merge both failure lists (`merge_gate_failures`) and call `update_trust_state()`.
 
 ---
 
@@ -265,14 +280,86 @@ Rule S5 — Agent response envelope
   Falling back: if JSON parsing fails, the entire response is treated as prose
   and synthesis statements are recovered by regex: ^>\s*Synthesis:\s+(.+)$
 
-Rule S6 — Adversarial validation
-  IF validator is configured (MEMEX_VALIDATOR):
-    validator checks that the derivation genuinely re-elaborates the source.
-    Generic boilerplate ("the article discusses", "the author covers") fails.
-  IF validator is absent, not callable, or throws: passes with warning.
+Rule S6 — Factual fidelity (prompt contract)
+  Statistics or specific numbers absent from the source MUST be omitted
+  or marked as synthesis statements — never invented, rounded, or
+  approximated from memory.
+  In syntheses, every source-derived fact MUST carry an inline wikilink
+  [[filename|alias]] naming the parent it comes from.
+
+Rule V1 — Evidence support (LLM-judged, DAG root)
+  Every unadorned claim in the body is judged SUPPORTED /
+  COMMON_KNOWLEDGE / UNSUPPORTED against the parent content, with an
+  evidence quote. COMMON_KNOWLEDGE covers generic uncontroversial
+  facts only; quantitative claims about specific entities are NEVER
+  exempt. In syntheses, a source-derived fact WITHOUT a link is
+  UNSUPPORTED (missing declaration); a claim WITH a link is judged
+  against the linked parent only. In notes, every claim is judged
+  against the single parent regardless of any inline links it
+  carries (the notes exemption — a stray wikilink in note prose
+  never redirects the judgment to a parent that does not exist).
+  Negative-verdict contract: every UNSUPPORTED verdict cites the
+  claim, the source examined, and why the source does not contain it
+  (source_examined, absence_explanation). An UNSUPPORTED verdict
+  lacking either field produces a deterministic contract-violation
+  failure (symmetric to D7's SUPPORTED-without-quote failure). A
+  verdict shortfall (a presented claim with no matching verdict,
+  including an empty set) emits a warning — coverage is
+  correlated per presented claim INSTANCE (whitespace-normalized
+  claim text, inline link markers ignored): N identical presented
+  claims need N verdicts, so a single verdict for a duplicated
+  sentence leaves its twin unjudged, and an echo that drops or
+  adds [[...]] markers still resolves to the presented claim.
+  Duplicate verdicts or verdicts whose claim was never presented
+  are coverage gaps, never a clean pass; grounding coverage is
+  then incomplete, never silently clean.
+
+Rule D7 — Evidence-quote verification (deterministic, over V1's output)
+  Every evidence_quote V1 cites for a SUPPORTED verdict must appear
+  in the cited source (linked parent for syntheses, single parent
+  for notes). Matching is a literal substring with a
+  whitespace-collapsed fallback: quote and source are compared with
+  every run of whitespace collapsed to a single space (LLMs re-wrap
+  line breaks; a fabricated quote differs in words, not whitespace).
+  Quote not found → failure D7. This keeps
+  LLM-judged evidence honest: an LLM that hallucinates a claim can
+  hallucinate the supporting quote. COMMON_KNOWLEDGE is backstopped
+  too: a COMMON_KNOWLEDGE verdict on a link-free synthesis claim is
+  a missing declaration (a source-derived fact without an inline
+  link is UNSUPPORTED) and fails deterministically. The cited
+  source (and the COMMON_KNOWLEDGE link check) resolves from the
+  PRESENTED claim text, not the verdict's echo: each verdict is
+  correlated to the presented slice (whitespace-normalized, link
+  markers ignored — LLMs routinely echo/normalize claim text,
+  dropping or adding [[...]] markers); only a verdict matching no
+  slice falls back to the echoed claim.
+
+Rule V2 — Re-elaboration quality (LLM-judged, consumes V1's verdicts)
+  Synthesis statements must be legitimate inferences from the body's
+  facts, specific, and go beyond the source; boilerplate fails.
+  Grounding is V1's job — V2 does not re-verify the facts; its prompt
+  carries V1's per-claim verdicts (the body as V1 saw it).
+
+DAG execution: waves run in ascending registry order (V1 first; D7
+  verifies V1's quotes inside V1's wave; V2 declares
+  depends_on=("V1",) + skip_when_fatal, so it runs after D7 and is
+  SKIPPED when V1 has fatal failures — the node is draft already,
+  re-derive re-runs both). The DAG is declarative: VALIDATION_RULES
+  carries order/depends_on/skip_when_fatal/expects_full_verdicts;
+  adding a criterion never edits run_validations.
+  MEMEX_VALIDATION=off disables the DAG (deterministic checks never
+  opt out). Judge call/parse failures degrade to pass-with-warning;
+  V1 verdict shortfalls warn.
+
+Rule V3 — Registry curation (process, not a criterion)
+  VALIDATION_RULES has an entry/exit process: every new member adds
+  ONE disjoint defect class with a declared scope (what it catches,
+  what it does not), placed in the DAG; members exit when their
+  defect class is subsumed. Without curation the family degrades into
+  N overlapping mini-judges.
 ```
 
-Implementation: `agent._parse_derive_response()` (full function), agent system prompts, `agent.validate_derivation()`.
+Implementation: agent system prompts (factual fidelity), `validators.validate.run_validations()` + `VALIDATION_RULES` in `rules.py` (V1–V2) with D7 quote verification in `validate.py`. Judge = `MEMEX_JUDGE` or the derive agent; `submit_verdicts` host tool (pi.py) carries structured verdicts.
 
 ---
 
@@ -349,6 +436,8 @@ Constraint SC8 — Provenance consistency (FK)
 | X1–X6 | ADR-0012, `store.py` `_propagate_contradiction()` | Architectural + Code |
 | R1–R6 | ADR-0012, `store.py` `accept/reject/dismiss_proposal()`, `_close_contestation_event()` | Architectural + Code |
 | D1–D6 | ADR-0011, `checks.py` `run_checks()` | Architectural + Code |
-| S1–S6 | `agent.py` system prompts, `_parse_derive_response()`, `validate_derivation()` | Code |
+| D7 | `validators/validate.py` (deterministic, over V1's verdicts) | Code |
+| S1–S6 | agent system prompts, `_parse_derive_response()` | Code |
+| V1–V2 | `validators/validate.py` `run_validations()`, `rules.py` `VALIDATION_RULES` (curated: one disjoint defect class per member, see Rule V3) | Code |
 | A1–A3 | ADR-0004, ADR-0001 | Architectural (not yet enforced in code) |
 | SC1–SC8 | `store.py` `init_schema()` | DB |

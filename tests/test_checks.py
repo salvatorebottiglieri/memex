@@ -594,3 +594,245 @@ class TestChecksKindAwareExtracted:
 
         assert result.passed is False
         assert any("long" in f.lower() for f in result.failures)
+
+
+# ---------------------------------------------------------------------------
+# Check 6: Inline wikilink validity in syntheses (D6)
+# ---------------------------------------------------------------------------
+
+class TestLinkValidityCheck:
+    """D6 — syntheses only: every [[filename|alias]] must resolve to a
+    provenance parent (exists + in derived_from, matched by content_path
+    basename, the same resolution the renderer uses)."""
+
+    _SYNTH = (
+        "# Synthesis\n\n"
+        "This synthesis aggregates the topic across both sources.\n\n"
+        "> Synthesis: The combined inference holds.\n\n"
+        "Both source materials cover the subject thoroughly. "
+    )  # > 100 chars, one marker, no links
+
+    def _as_synthesis(self, con, deriv_id, content_path, content: str, parent_name: str | None = None):
+        """Turn the _setup_db derivation into a synthesis; optionally give the
+        L0 parent a content_path so links can resolve to it."""
+        con.execute("UPDATE node SET tier = 'synthesis', depth = 2 WHERE id = ?", (deriv_id,))
+        if parent_name is not None:
+            con.execute(
+                "UPDATE node SET content_path = ? WHERE kind = 'raw_source'",
+                (parent_name,),
+            )
+        content_path.write_text(content, encoding="utf-8")
+        con.commit()
+
+    def test_synthesis_link_to_non_parent_fails(self, tmp_path):
+        """A link naming a node that is NOT a provenance parent → draft."""
+        con, deriv_id, content_path = _setup_db(tmp_path)
+        content = (
+            "# Synthesis\n\n"
+            "This synthesis cites [[ghost|Ghost]] for support.\n\n"
+            "> Synthesis: The combined inference holds.\n\n"
+            "Both source materials cover the subject thoroughly. "
+        )
+        self._as_synthesis(con, deriv_id, content_path, content, parent_name="parent-l0.md")
+
+        result = run_checks(con, deriv_id, content_path)
+        con.close()
+
+        assert result.passed is False
+        assert any("Link validity" in f for f in result.failures)
+        assert any("[[ghost|Ghost]]" in f for f in result.failures)
+
+    def test_synthesis_link_to_parent_passes(self, tmp_path):
+        """A link naming the actual parent (content_path basename) passes D6."""
+        con, deriv_id, content_path = _setup_db(tmp_path)
+        content = (
+            "# Synthesis\n\n"
+            "This synthesis cites [[parent-l0|Parent]] for support.\n\n"
+            "> Synthesis: The combined inference holds.\n\n"
+            "Both source materials cover the subject thoroughly. "
+        )
+        self._as_synthesis(con, deriv_id, content_path, content, parent_name="parent-l0.md")
+
+        result = run_checks(con, deriv_id, content_path)
+        con.close()
+
+        assert result.passed is True
+
+    def test_synthesis_without_links_passes(self, tmp_path):
+        """A link-free synthesis passes D6 (V1 judges missing declarations)."""
+        con, deriv_id, content_path = _setup_db(tmp_path)
+        self._as_synthesis(con, deriv_id, content_path, self._SYNTH, parent_name="parent-l0.md")
+
+        result = run_checks(con, deriv_id, content_path)
+        con.close()
+
+        assert result.passed is True
+        assert not any("Link validity" in f for f in result.failures)
+
+    def test_synthesis_links_inside_fenced_code_are_ignored(self, tmp_path):
+        """F3: fenced code blocks are not link surface — a [[x|y]] inside a
+        ``` block is code, not a declaration (same stripping the V1 slicer
+        applies), so a synthesis with only fenced [[ghost|...]] passes D6."""
+        con, deriv_id, content_path = _setup_db(tmp_path)
+        content = (
+            "# Synthesis\n\n"
+            "This synthesis aggregates the topic across both sources.\n\n"
+            "```python\n"
+            'link = "[[ghost|Ghost]]"\n'
+            "```\n\n"
+            "> Synthesis: The combined inference holds.\n\n"
+            "Both source materials cover the subject thoroughly. "
+        )
+        self._as_synthesis(con, deriv_id, content_path, content, parent_name="parent-l0.md")
+
+        result = run_checks(con, deriv_id, content_path)
+        con.close()
+
+        assert result.passed is True
+        assert not any("Link validity" in f for f in result.failures)
+
+    def test_synthesis_links_inside_indented_code_are_ignored(self, tmp_path):
+        """F3: Markdown 4-space-indented code blocks are not link surface
+        either — a [[ghost|...]] inside an indented code example is code,
+        not a declaration, so a synthesis with only indented [[ghost|...]]
+        and no real links passes D6 (previously the ghost link was parsed
+        as a real wikilink → spurious fatal → draft on legitimate
+        content)."""
+        con, deriv_id, content_path = _setup_db(tmp_path)
+        content = (
+            "# Synthesis\n\n"
+            "This synthesis aggregates the topic across both sources.\n\n"
+            '    link = "[[ghost|Ghost]]"\n'
+            '    more = "[[ghost2|Ghost2]]"\n'
+            "\n"
+            "> Synthesis: The combined inference holds.\n\n"
+            "Both source materials cover the subject thoroughly. "
+        )
+        self._as_synthesis(con, deriv_id, content_path, content, parent_name="parent-l0.md")
+
+        result = run_checks(con, deriv_id, content_path)
+        con.close()
+
+        assert result.passed is True
+        assert not any("Link validity" in f for f in result.failures)
+
+    def test_synthesis_list_line_in_indented_code_is_not_link_surface(self, tmp_path):
+        """F4: a list-formatted line inside an indented code block is code,
+        not a nested list item — a [[ghost|...]] on it must NOT fail D6
+        (previously the nested-list exemption leaked it into the link
+        surface → spurious fatal draft on legitimate content)."""
+        con, deriv_id, content_path = _setup_db(tmp_path)
+        content = (
+            "# Synthesis\n\n"
+            "This synthesis aggregates the topic across both sources.\n\n"
+            '    code = "..."\n'
+            "    - option: [[ghost|Ghost]]\n"
+            "    more = 2\n"
+            "\n"
+            "> Synthesis: The combined inference holds.\n\n"
+            "Both source materials cover the subject thoroughly. "
+        )
+        self._as_synthesis(con, deriv_id, content_path, content, parent_name="parent-l0.md")
+
+        result = run_checks(con, deriv_id, content_path)
+        con.close()
+
+        assert result.passed is True
+        assert not any("Link validity" in f for f in result.failures)
+
+    def test_synthesis_tab_indented_code_is_not_link_surface(self, tmp_path):
+        """F5: a tab-indented line is Markdown indented code (expanded-tab
+        semantics) — a [[ghost|...]] on it must NOT fail D6."""
+        con, deriv_id, content_path = _setup_db(tmp_path)
+        content = (
+            "# Synthesis\n\n"
+            "This synthesis aggregates the topic across both sources.\n\n"
+            '\tlink = "[[ghost|Ghost]]"\n'
+            "\n"
+            "> Synthesis: The combined inference holds.\n\n"
+            "Both source materials cover the subject thoroughly. "
+        )
+        self._as_synthesis(con, deriv_id, content_path, content, parent_name="parent-l0.md")
+
+        result = run_checks(con, deriv_id, content_path)
+        con.close()
+
+        assert result.passed is True
+        assert not any("Link validity" in f for f in result.failures)
+
+    def test_synthesis_nested_list_item_link_is_a_declaration(self, tmp_path):
+        """F6: a 4-space-indented NESTED LIST ITEM is list continuation, not
+        indented code — a [[ghost|...]] on it is a real declaration D6 must
+        flag (previously the shared stripper dropped the line as indented
+        code, hiding the dangling link and passing the synthesis)."""
+        con, deriv_id, content_path = _setup_db(tmp_path)
+        content = (
+            "# Synthesis\n\n"
+            "This synthesis aggregates the topic across both sources.\n\n"
+            "- Level one\n"
+            "    - Nested cites [[ghost|Ghost]]\n\n"
+            "> Synthesis: The combined inference holds.\n\n"
+            "Both source materials cover the subject thoroughly. "
+        )
+        self._as_synthesis(con, deriv_id, content_path, content, parent_name="parent-l0.md")
+
+        result = run_checks(con, deriv_id, content_path)
+        con.close()
+
+        assert result.passed is False
+        assert any(
+            "Link validity" in f and "[[ghost|Ghost]]" in f for f in result.failures
+        )
+
+    def test_real_links_outside_fences_still_checked(self, tmp_path):
+        """F3 sanity: fence stripping removes only fenced regions — a
+        dangling link in real prose (even alongside a fenced one) still
+        fails D6."""
+        con, deriv_id, content_path = _setup_db(tmp_path)
+        content = (
+            "# Synthesis\n\n"
+            "This synthesis cites [[ghost|Ghost]] for support.\n\n"
+            "```python\n"
+            'link = "[[ghost|Ghost]]"\n'
+            "```\n\n"
+            "> Synthesis: The combined inference holds.\n\n"
+            "Both source materials cover the subject thoroughly. "
+        )
+        self._as_synthesis(con, deriv_id, content_path, content, parent_name="parent-l0.md")
+
+        result = run_checks(con, deriv_id, content_path)
+        con.close()
+
+        assert result.passed is False
+        assert any("Link validity" in f and "[[ghost|Ghost]]" in f for f in result.failures)
+
+    def test_notes_with_dangling_link_are_exempt(self, tmp_path):
+        """Notes (single parent) carry no link contract: a dangling link in a
+        notes-tier body is NOT a D6 failure."""
+        con, deriv_id, content_path = _setup_db(tmp_path)
+        content_path.write_text(
+            "# Note\n\n"
+            "This note carries a dangling [[ghost|Ghost]] link without issue.\n\n"
+            "> Synthesis: An inference.\n\n"
+            "The source material covers the subject thoroughly. ",
+            encoding="utf-8",
+        )
+        con.commit()
+
+        result = run_checks(con, deriv_id, content_path)
+        con.close()
+
+        assert result.passed is True
+        assert not any("Link validity" in f for f in result.failures)
+
+    def test_extracted_l0_with_links_is_exempt(self, tmp_path):
+        """Extracted L0s (kind='extracted') skip D6 — raw content is what it is."""
+        con, ext_id, content_path = _setup_extracted(
+            tmp_path,
+            "Extracted raw content with a dangling [[ghost|Ghost]] link. " * 4,
+        )
+        result = run_checks(con, ext_id, content_path)
+        con.close()
+
+        assert result.passed is True
+        assert not any("Link validity" in f for f in result.failures)
