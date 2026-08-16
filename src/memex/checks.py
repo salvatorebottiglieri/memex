@@ -23,7 +23,7 @@ def run_checks(con: sqlite3.Connection, node_id: str, content_path: Path | str) 
     """Run all deterministic checks for the draft -> auto-verified transition.
 
     Evaluates ``CHECK_RULES`` and accumulates all failures.
-    See ``src/memex/rules.py`` for the rule definitions (D1–D5).
+    See ``src/memex/rules.py`` for the rule definitions (D1–D6).
 
     Args:
         con:          Open SQLite connection (foreign_keys may or may not be ON).

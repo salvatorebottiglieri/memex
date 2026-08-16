@@ -40,7 +40,7 @@ This metaphor captures the two key invariants:
 | Canonical-key dedup + ledger | **built** | Store: `lookup_by_canonical_key`, `source.failed` |
 | Derivation (LLM -> notes-tier + provenance edge) | **built** | `memex derive <l0-id>` |
 | Deterministic checks (auto-verify gate) | **built** | `memex.checks.run_checks` |
-| Adversarial validation gate (quality gate) | **built** | `MEMEX_VALIDATOR` + `memex.validators.validate.validate_derivation` |
+| Adversarial validation family (V1–V2, LLM-judged, always-on) | **built** | `memex.validators.validate.run_validations` + `VALIDATION_RULES` (`MEMEX_JUDGE` / `MEMEX_VALIDATION=off`) |
 | Keyword search over derivations | **built** | `memex search <query>` |
 | Store deep module (CLI is thin) | **built** | `memex.store.Store` |
 | URL resolution (advisory for external agents) | **built** | `memex resolve <url>` |

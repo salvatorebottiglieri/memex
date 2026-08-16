@@ -112,7 +112,8 @@ Tests inject fake collaborators without touching network or paying for LLM calls
 | Env var | Where | Effect |
 |---|---|---|
 | `MEMEX_AGENT` | `memex derive`, `extract-ideas`, `synthesize`, `review` | Replaces the default `DemoAgent` with a module:Class string (e.g. `tests.fake_llm_client:FakeAgent`, `memex.derivers.pi:OMPRpcAgent`, or `memex.derivers.claude_code:ClaudeCodeAgent`). Omit to use `DemoAgent` (no API key needed, hardcoded output). |
-| `MEMEX_VALIDATOR` | `memex derive`, `synthesize` | Loads a separate agent for adversarial quality validation. If unset, validation skipped (backwards compatible). Same module:Class convention. |
+| `MEMEX_JUDGE` | `memex derive`, `synthesize` | Judge agent for the always-on LLM validations (V1 evidence support, V2 re-elaboration quality). Defaults to the derive agent; set to a stronger model via `module:Class`. |
+| `MEMEX_VALIDATION` | `memex derive`, `synthesize` | `off` disables only the LLM-judged criteria (V1–V2); the deterministic checks D1–D6 never opt out. |
 | `MEMEX_TELEGRAM_API_ID` | `memex capture` | Required Telegram API id for the real Telethon source |
 | `MEMEX_TELEGRAM_API_HASH` | `memex capture` | Required Telegram API hash for the real Telethon source |
 | `MEMEX_TELEGRAM_SESSION` | `memex capture` | Telethon session file (default `~/.memex/telegram.session`) |

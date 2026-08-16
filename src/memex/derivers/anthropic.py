@@ -16,7 +16,13 @@ _DERIVE_SYSTEM_PROMPT = (
     "3. End with a ## Synthesis section whose body is one or more bullet points, "
     "each of the form \"> Synthesis: <inference>\". There MUST be at least one "
     "such statement. The exact prefix '> Synthesis:' is required.\n"
-    "4. Return your response as a JSON object with keys: 'prose' (the full markdown), "
+    "4. Factual fidelity: statistics or specific numbers absent from the source "
+    "material MUST be omitted or marked as a synthesis statement — never invented, "
+    "rounded, or approximated from memory. In a synthesis over multiple sources, "
+    "every fact taken from a source MUST be followed by an inline link "
+    "[[filename|alias]] naming the parent it comes from (the # Sources block lists "
+    "the exact link targets); a single-source note needs no links.\n"
+    "5. Return your response as a JSON object with keys: 'prose' (the full markdown), "
     "'synthesis_statements' (list of strings, each without the '> Synthesis:' prefix)."
 )
 
@@ -160,3 +166,29 @@ class AnthropicAgent(Agent):
             return _json.loads(raw)
         except (_json.JSONDecodeError, AttributeError, TypeError):
             return []
+
+    def call_llm(self, prompt: str, *, allow_read: bool = False) -> str:
+        """One stateless LLM turn — the validation-judge seam.
+
+        The prompt is sent as the user message; the response text is
+        returned. ``allow_read`` is accepted for the Agent seam contract
+        (the Anthropic agent has no read tool, so content is always inlined
+        by the caller). This is what the always-on validation family
+        (V1/V2) drives, so the built-in real agent is actually judged
+        instead of skipped as a judge without a callable seam.
+        """
+        import anthropic
+
+        client = anthropic.Anthropic()
+        # The V1 wave presents one sentence-level claim per slice; a body of
+        # ordinary length yields 20-40 claims and each SUPPORTED verdict is
+        # ~250 chars, so the verdict JSON can exceed a 2048-token cap and get
+        # truncated mid-JSON (stop_reason="max_tokens"), failing to parse and
+        # degrading the whole gate. The judge seam gets the headroom; the
+        # derive-path calls keep their own caps.
+        message = client.messages.create(
+            model="claude-opus-4-5",
+            max_tokens=8192,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return message.content[0].text

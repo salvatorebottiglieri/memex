@@ -56,7 +56,7 @@ disposed at process exit.
 - **Risk**: the RPC wire is versioned (`protocolVersion` in `ready`); a breaking omp
   upgrade surfaces as a clear startup error, not silent misbehavior.
 - **Done (2026-08-05)**: `set_host_tools` with typed host tools (`submit_derivation`,
-  `submit_ideas`, `submit_review`, `submit_validation`) — structured results with
+  `submit_ideas`, `submit_review`, `submit_verdicts`) — structured results with
   text parsing demoted to fallback; the validator's parse-failure downgrade is gone.
   Verified live on the real wire and pinned by the fake-omp test suite.
 - **Done (2026-08-06)**: the long-lived lifecycle is now a shared component —

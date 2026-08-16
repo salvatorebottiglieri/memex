@@ -740,14 +740,16 @@ class TestSearch:
         assert data[0]["l0_node_id"] == l0_id
 
 
-class TestDeriveQualityGate:
-    """Integration tests for the adversarial validation gate in _do_derive.
+class TestDeriveValidationFamily:
+    """Integration tests for the always-on V1/V2 family in _do_derive.
 
-    Validator is injected via MEMEX_VALIDATOR env var.
+    The family runs WITHOUT MEMEX_VALIDATOR; MEMEX_VALIDATION=off disables
+    only the LLM criteria (D1–D6 never opt out). Judge = derive agent unless
+    MEMEX_JUDGE is set. quality_failed is replaced by status="derived" +
+    trust_state=draft + per-criterion check_failures.
     """
 
-    FAKE_VALIDATOR_FAILS = "tests.fake_validator_fails:FakeValidatorFails"
-    FAKE_VALIDATOR_WARNS = "tests.fake_validator_warns:FakeValidatorWarns"
+    FAKE_JUDGE = "tests.fake_llm_client:FakeJudge"
 
     @staticmethod
     def _ingest(store, url: str) -> dict:
@@ -759,61 +761,140 @@ class TestDeriveQualityGate:
         assert p.returncode == 0, p.stderr
         return json.loads(p.stdout)
 
-    def test_no_validator_proceeds(self, store):
-        """No MEMEX_VALIDATOR set -> derive proceeds normally (no regression)."""
+    def test_always_on_runs_without_memex_validator(self, store):
+        """No MEMEX_VALIDATOR, no MEMEX_VALIDATION: the family still runs.
+        FakeAgent (no call_llm) as judge skips V1/V2 with a warning ->
+        auto-verified on clean checks."""
         ingested = self._ingest(store, "https://example.com/article")
         result = _derive(store, ingested["id"])
         assert result.returncode == 0, result.stderr
         data = json.loads(result.stdout)
         assert data["status"] == "derived"
+        assert data["trust_state"] == "auto-verified"
+        assert data["check_failures"] == []
 
-    def test_fake_agent_validator_skips(self, store):
-        """MEMEX_VALIDATOR=FakeAgent (no call_llm) -> validation skipped, derive proceeds."""
-        ingested = self._ingest(store, "https://example.com/article")
-        result = _run_memex(
-            ["derive", "--db", str(store["db"]), "--vault", str(store["vault"]), ingested["id"]],
-            env={"MEMEX_AGENT": FAKE_AGENT, "MEMEX_VALIDATOR": FAKE_AGENT},
-        )
-        assert result.returncode == 0, result.stderr
-        data = json.loads(result.stdout)
-        assert data["status"] == "derived"
+    def test_unsupported_claim_goes_draft_with_annotation(self, store, monkeypatch):
+        """V1: fake judge marks a claim UNSUPPORTED -> draft + 'V1: ...' per-claim
+        annotation; status stays 'derived' (quality_failed is gone)."""
+        from memex.services.derive import DeriverService
+        from tests.fake_llm_client import FakeAgentDivergent
 
-    def test_failing_validator_rejects(self, store):
-        """Validator rejects -> quality_failed, no node or edge created."""
+        monkeypatch.setenv("MEMEX_JUDGE", self.FAKE_JUDGE)
         ingested = self._ingest(store, "https://example.com/article")
-        result = _run_memex(
-            ["derive", "--db", str(store["db"]), "--vault", str(store["vault"]), ingested["id"]],
-            env={"MEMEX_AGENT": FAKE_AGENT, "MEMEX_VALIDATOR": self.FAKE_VALIDATOR_FAILS},
+        agent = FakeAgentDivergent(
+            prose=(
+                "# Note Title\n\n"
+                "This note states the SENTINEL-UNSUPPORTED figure.\n\n"
+                "> Synthesis: The broader pattern follows.\n\n"
+                "The source material covers the subject thoroughly."
+            ),
+            statements=["The broader pattern follows."],
         )
-        assert result.returncode == 0, result.stderr
-        data = json.loads(result.stdout)
-        assert data["status"] == "quality_failed"
-        assert "Derivation does not meaningfully re-elaborate" in data["reason"]
-        assert data["l0_node_id"] == ingested["id"]
-        # Verify no notes-tier summary node was created
+        with _Store.open(store["db"]) as s:
+            result = DeriverService(s, Path(store["vault"]), agent).derive(
+                ingested["id"]
+            )
+
+        assert result.status == "derived"
+        assert result.trust_state == "draft"
+        assert result.check_failures
+        assert any(f.startswith("V1:") for f in result.check_failures)
+        assert any("SENTINEL-UNSUPPORTED" in f for f in result.check_failures)
+        # The node exists and carries the annotation (no pre-creation rejection).
         conn = sqlite3.connect(store["db"])
         try:
-            count = conn.execute(
-                "SELECT COUNT(*) FROM node WHERE kind = 'summary' AND tier = 'notes'"
-            ).fetchone()[0]
-            assert count == 0, f"Expected 0 summary nodes, got {count}"
+            row = conn.execute(
+                "SELECT trust_state FROM node WHERE id = ?", (result.id,)
+            ).fetchone()
         finally:
             conn.close()
+        assert row is not None
+        assert row[0] == "draft"
 
-    def test_warning_validator_proceeds_with_warning(self, store):
-        """Validator warns -> derive proceeds but warning on stderr."""
+    def test_notes_with_dangling_link_unaffected(self, store):
+        """D6 exempts notes: a single-parent note with a dangling link stays
+        auto-verified (no link contract on the notes tier)."""
+        from memex.services.derive import DeriverService
+        from tests.fake_llm_client import FakeAgentDivergent
+
         ingested = self._ingest(store, "https://example.com/article")
-        result = _run_memex(
-            ["derive", "--db", str(store["db"]), "--vault", str(store["vault"]), ingested["id"]],
-            env={"MEMEX_AGENT": FAKE_AGENT, "MEMEX_VALIDATOR": self.FAKE_VALIDATOR_WARNS},
+        agent = FakeAgentDivergent(
+            prose=(
+                "# Note Title\n\n"
+                "This note carries a dangling [[ghost|Ghost]] link without issue.\n\n"
+                "> Synthesis: The broader pattern follows.\n\n"
+                "The source material covers the subject thoroughly."
+            ),
+            statements=["The broader pattern follows."],
         )
-        assert result.returncode == 0, result.stderr
-        data = json.loads(result.stdout)
-        assert data["status"] == "derived"
-        # Warning should be on stderr
-        warning = json.loads(result.stderr.strip())
-        assert "validator_warning" in warning
-        assert "Validator LLM call failed" in warning["validator_warning"]
+        with _Store.open(store["db"]) as s:
+            result = DeriverService(s, Path(store["vault"]), agent).derive(
+                ingested["id"]
+            )
+
+        assert result.trust_state == "auto-verified"
+        assert not any(
+            "Link validity" in f for f in (result.check_failures or [])
+        )
+
+    def test_notes_dangling_link_autoverifies_with_real_judge(self, store, monkeypatch):
+        """F1: with a judge that HAS call_llm and honestly quotes the single
+        parent, a notes derivation carrying a stray [[non-parent|...]]
+        wikilink still AUTO-VERIFIES — D6's notes-tier exemption is not
+        defeated by D7 (a real judge quoting the single parent must not hit
+        a 'has no cited source' fatal because the stray link names no
+        parent), and the stray link produces no V1 UNSUPPORTED."""
+        from memex.services.derive import DeriverService
+        from tests.fake_llm_client import FakeAgentDivergent
+
+        monkeypatch.setenv(
+            "MEMEX_JUDGE", "tests.fake_llm_client:FakeJudgeNotesHonest"
+        )
+        ingested = self._ingest(store, "https://example.com/article")
+        agent = FakeAgentDivergent(
+            prose=(
+                "# Note Title\n\n"
+                "This note carries a dangling [[ghost|Ghost]] link without issue.\n\n"
+                "> Synthesis: The broader pattern follows.\n\n"
+                "The source material covers the subject thoroughly."
+            ),
+            statements=["The broader pattern follows."],
+        )
+        with _Store.open(store["db"]) as s:
+            result = DeriverService(s, Path(store["vault"]), agent).derive(
+                ingested["id"]
+            )
+
+        assert result.status == "derived"
+        assert result.trust_state == "auto-verified"
+        assert not (result.check_failures or []), result.check_failures
+
+    def test_memex_validation_off_skips_llm_criteria(self, store, monkeypatch):
+        """MEMEX_VALIDATION=off disables V1/V2 only; D1–D6 still run, so a
+        sentinel-laden derivation auto-verifies (no LLM criteria active)."""
+        from memex.services.derive import DeriverService
+        from tests.fake_llm_client import FakeAgentDivergent
+
+        monkeypatch.setenv("MEMEX_JUDGE", self.FAKE_JUDGE)
+        monkeypatch.setenv("MEMEX_VALIDATION", "off")
+        ingested = self._ingest(store, "https://example.com/article")
+        agent = FakeAgentDivergent(
+            prose=(
+                "# Note Title\n\n"
+                "This note states the SENTINEL-UNSUPPORTED figure.\n\n"
+                "> Synthesis: The broader pattern follows.\n\n"
+                "The source material covers the subject thoroughly."
+            ),
+            statements=["The broader pattern follows."],
+        )
+        with _Store.open(store["db"]) as s:
+            result = DeriverService(s, Path(store["vault"]), agent).derive(
+                ingested["id"]
+            )
+
+        assert result.status == "derived"
+        assert result.trust_state == "auto-verified"
+        assert result.check_failures == []
 
 
 class TestParseDeriveResponse:

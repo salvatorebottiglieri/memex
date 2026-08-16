@@ -58,6 +58,48 @@ def _spawn_count(marker: Path) -> int:
     return sum(1 for line in marker.read_text().splitlines() if line == "start")
 
 
+def _mk_validation_node(tmp_path: Path):
+    """Minimal db: one parent node + one derivation node + provenance edge."""
+    import sqlite3
+    import uuid
+    from datetime import datetime, timezone
+
+    from memex.store import Store
+
+    db_path = tmp_path / "validation.db"
+    with Store.open(db_path) as store:
+        store.init_schema()
+        parent_id = str(uuid.uuid4())
+        parent_path = tmp_path / "parent.md"
+        parent_path.write_text("Parent content with facts. " * 6, encoding="utf-8")
+        store.create_node(
+            node_id=parent_id, kind="summary", tier="notes", depth=1,
+            content_path=str(parent_path),
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+        node_id = str(uuid.uuid4())
+        node_path = tmp_path / "node.md"
+        node_path.write_text(
+            "# Note\n\n"
+            "This article discusses the topic with a claim.\n\n"
+            "> Synthesis: The claim is wrong.\n\n"
+            "The source material covers the subject thoroughly.",
+            encoding="utf-8",
+        )
+        store.create_node(
+            node_id=node_id, kind="summary", tier="notes", depth=2,
+            content_path=str(node_path),
+            synthesis_statements=["The claim is wrong."],
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+        store.create_edge(
+            edge_id=str(uuid.uuid4()), type="provenance", relation="derived_from",
+            from_node=node_id, to_node=parent_id,
+        )
+    con = sqlite3.connect(db_path)
+    return con, node_id, node_path
+
+
 class TestRpcTurn:
     def test_assembles_text_from_deltas(self, fake_omp):
         agent = OMPRpcAgent()
@@ -216,24 +258,90 @@ class TestHostTools:
         finally:
             agent.dispose()
 
-    def test_validate_uses_structured_payload(self, fake_omp):
-        from memex.schemas import DerivationResult
-        from memex.validators.validate import validate_derivation
+    def test_validations_use_structured_payload(self, fake_omp, tmp_path):
+        """run_validations consumes the submit_verdicts host-tool payload (V1)."""
+        from memex.validators.validate import run_validations
 
         fake_omp["set_env"](
-            FAKE_OMP_TOOL="submit_validation",
-            FAKE_OMP_TOOL_ARGS=json.dumps({"passes": False, "reason": "boilerplate"}),
+            FAKE_OMP_TOOL="submit_verdicts",
+            FAKE_OMP_TOOL_ARGS=json.dumps(
+                {
+                    "verdicts": [
+                        {
+                            "claim": "The claim is wrong.",
+                            "verdict": "UNSUPPORTED",
+                            "source_examined": "parent",
+                            "absence_explanation": "no supporting content",
+                        }
+                    ]
+                }
+            ),
+            # Unparseable text on purpose: the payload must win.
+            FAKE_OMP_TEXT="this text is NOT valid json and must be ignored",
         )
         agent = OMPRpcAgent()
         try:
-            ok, warn = validate_derivation(
-                agent,
-                "parent content",
-                DerivationResult(prose="# X", synthesis_statements=["s"]),
-            )
-            assert ok is False and warn is None
+            con, node_id, node_path = _mk_validation_node(tmp_path)
+            result = run_validations(agent, con, node_id, node_path)
+            assert not result.passed
+            assert any(f.startswith("V1:") for f in result.failures)
         finally:
             agent.dispose()
+
+    def test_submit_verdicts_schema_requires_payload_fields_per_shape(self):
+        """F2: submit_verdicts carries one tool with two payload shapes (V1
+        verdicts array, V2 passes/reason pair), so its JSON Schema keeps a
+        per-shape ``required`` list via anyOf — an LLM omitting the payload
+        fields is rejected by the schema instead of degrading to
+        pass-with-warning (the 'no room for maneuver' contract)."""
+        from memex.derivers.pi import _HOST_TOOLS
+
+        tool = next(t for t in _HOST_TOOLS if t["name"] == "submit_verdicts")
+        params = tool["parameters"]
+        branches = params.get("anyOf")
+        assert branches, (
+            "submit_verdicts must be a union schema (anyOf) with per-shape "
+            "required lists, not an unconstrained object"
+        )
+        required_by_branch = [set(b.get("required", [])) for b in branches]
+        assert {"verdicts"} in required_by_branch  # V1 shape
+        assert {"passes"} in required_by_branch  # V2 shape
+        props = set(params["properties"])
+        for req in required_by_branch:
+            assert req <= props, f"required fields {req} not in properties {props}"
+
+        def _matches(payload: dict, branch: dict) -> bool:
+            if not isinstance(payload, dict):
+                return False
+            for req in branch.get("required", []):
+                if req not in payload:
+                    return False
+            for key, value in payload.items():
+                spec = params["properties"].get(key)
+                if spec is None:
+                    continue
+                spec_type = spec.get("type")
+                if spec_type == "array":
+                    if not isinstance(value, list):
+                        return False
+                elif spec_type == "boolean":
+                    if not isinstance(value, bool):
+                        return False
+                elif spec_type == "string":
+                    if not isinstance(value, str):
+                        return False
+            return True
+
+        def _valid(payload: dict) -> bool:
+            return any(_matches(payload, b) for b in branches)
+
+        assert _valid({"verdicts": [{"claim": "c", "verdict": "SUPPORTED"}]})
+        assert _valid({"passes": True, "reason": "ok"})
+        assert _valid({"verdicts": [], "passes": True})  # both shapes at once
+        # Omitting the payload fields never validates.
+        assert not _valid({})
+        assert not _valid({"reason": "ok"})  # V2 shape without passes
+        assert not _valid({"verdicts": "not-a-list"})  # wrong type
 
     def test_fallback_to_text_when_no_tool_call(self, fake_omp):
         # No FAKE_OMP_TOOL: the fake returns plain text; derive parses it.
