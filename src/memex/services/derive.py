@@ -8,6 +8,7 @@ assignment, checks, and trust state updates.
 from __future__ import annotations
 
 import os
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -37,6 +38,55 @@ def _cap_prompt_content(content: str) -> str:
         + "\n\n[source content truncated — exceeds prompt limit; "
         "the remainder was not considered]"
     )
+
+
+_SYNTHESIS_MARKER_RE = re.compile(r"^>\s*Synthesis:\s*(.*)$")
+
+
+def canonicalize_synthesis_markers(prose: str, statements: list[str]) -> str:
+    """Rewrite the ``> Synthesis:`` marker lines of *prose* from *statements*.
+
+    The file is the presentation channel; the ``synthesis_statements`` column
+    is the source of truth the D3 check compares the file against (CONTEXT.md:
+    "the column is the source of truth that the deterministic check ... all
+    marker is presentation"). Agents often render the same statements with
+    different quoting/style, failing D3's exact file-vs-column comparison
+    (~60% of derivations went draft, ticket #143). This rewrites the file's
+    markers from the (cleaned) column:
+
+      - markers present: replaced in order; markers beyond ``len(statements)``
+        are dropped;
+      - no markers but statements exist: a terminal ``## Synthesis`` section
+        (Rule S1 format) with the statements is appended;
+      - no statements: prose returned untouched (D3 failure unchanged).
+
+    The result carries EXACTLY ``len(statements)`` markers, each equal to the
+    corresponding statement.
+    """
+    if not statements:
+        return prose
+
+    lines = prose.splitlines()
+    out: list[str] = []
+    placed = 0
+    for line in lines:
+        if _SYNTHESIS_MARKER_RE.match(line):
+            if placed < len(statements):
+                out.append(f"> Synthesis: {statements[placed]}")
+                placed += 1
+            # marker beyond len(statements): dropped
+        else:
+            out.append(line)
+
+    if placed < len(statements):
+        out.append("")
+        out.append("## Synthesis")
+        out.extend(f"> Synthesis: {s}" for s in statements[placed:])
+
+    text = "\n".join(out)
+    if prose.endswith("\n"):
+        text += "\n"
+    return text
 
 
 @dataclass
@@ -307,7 +357,12 @@ class DeriverService:
             first_line.lstrip("# ").strip().strip('"').strip("'") or deriv_id
         )
         md_path = self._human_path(head_name)
-        md_path.write_text(deriv.prose, encoding="utf-8")
+        # Ticket #143: the file renders the column — canonicalize its markers
+        # from synthesis_statements so D3's exact file-vs-column check passes.
+        prose = canonicalize_synthesis_markers(
+            deriv.prose, deriv.synthesis_statements
+        )
+        md_path.write_text(prose, encoding="utf-8")
 
         # --- Create node and provenance edge ---
         now = datetime.now(timezone.utc).isoformat()

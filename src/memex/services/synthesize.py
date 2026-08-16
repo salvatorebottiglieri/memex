@@ -14,6 +14,7 @@ from pathlib import Path
 
 from memex.agent import Agent, load_agent
 from memex.schemas import DocumentRef, coerce_derivation
+from memex.services.derive import canonicalize_synthesis_markers
 from memex.store import Store, min_confidence
 from memex.utils.retry import call_with_retry
 from memex.validators.validate import validate_derivation
@@ -139,7 +140,12 @@ class SynthesizerService:
             first_line.lstrip("# ").strip().strip('"').strip("'") or deriv_id
         )
         md_path = self._human_path(head_name)
-        md_path.write_text(deriv.prose, encoding="utf-8")
+        # Ticket #143: same marker canonicalization as derive — the file
+        # renders the column, so D3's file-vs-column check always passes.
+        prose = canonicalize_synthesis_markers(
+            deriv.prose, deriv.synthesis_statements
+        )
+        md_path.write_text(prose, encoding="utf-8")
 
         # --- Create node and provenance edges ---
         now = datetime.now(timezone.utc).isoformat()

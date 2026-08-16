@@ -943,3 +943,253 @@ class TestReaderAgentMode:
         # Non-reader agents still get the inlined content.
         assert "Test Article" in agent.received["content"]
         assert agent.received["content"] is not None
+
+
+class TestCanonicalizeSynthesisMarkers:
+    """Pure helper ``canonicalize_synthesis_markers`` (ticket #143).
+
+    The file's ``> Synthesis:`` markers are the presentation channel; the
+    ``synthesis_statements`` column is the source of truth the D3 check
+    compares the file against. The helper rewrites the file's markers from
+    the column so D3 always passes for valid derivations.
+    """
+
+    def test_replaces_markers_in_order_with_statements(self):
+        from memex.services.derive import canonicalize_synthesis_markers
+
+        prose = (
+            "# Title\n\nBody.\n\n"
+            "> Synthesis: The 'x' claim\n"
+            "> Synthesis: Another 'y' claim\n"
+        )
+        out = canonicalize_synthesis_markers(
+            prose, ['The "x" claim', 'Another "y" claim']
+        )
+        assert out == (
+            "# Title\n\nBody.\n\n"
+            '> Synthesis: The "x" claim\n'
+            '> Synthesis: Another "y" claim\n'
+        )
+
+    def test_drops_extra_markers_beyond_statements(self):
+        from memex.services.derive import canonicalize_synthesis_markers
+
+        prose = (
+            "# Title\n\nBody.\n\n"
+            "> Synthesis: one\n"
+            "> Synthesis: two\n"
+            "> Synthesis: three\n"
+            "> Synthesis: four\n"
+            "> Synthesis: five\n"
+        )
+        out = canonicalize_synthesis_markers(
+            prose, ["one", "two", "three", "four"]
+        )
+        assert out.count("> Synthesis:") == 4
+        assert out == (
+            "# Title\n\nBody.\n\n"
+            "> Synthesis: one\n"
+            "> Synthesis: two\n"
+            "> Synthesis: three\n"
+            "> Synthesis: four\n"
+        )
+
+    def test_appends_synthesis_section_when_prose_has_no_markers(self):
+        from memex.services.derive import canonicalize_synthesis_markers
+
+        prose = "# Title\n\nBody without any markers."
+        out = canonicalize_synthesis_markers(
+            prose, ["Statement one", "Statement two"]
+        )
+        assert out == (
+            "# Title\n\nBody without any markers.\n\n"
+            "## Synthesis\n"
+            "> Synthesis: Statement one\n"
+            "> Synthesis: Statement two"
+        )
+
+    def test_fewer_markers_than_statements_appends_remaining(self):
+        """Fewer prose markers than statements → the remaining statements are
+        appended (in a ``## Synthesis`` section) so the file ends up with
+        EXACTLY len(statements) markers (canonical contract)."""
+        from memex.services.derive import canonicalize_synthesis_markers
+
+        prose = (
+            "# Title\n\nBody.\n\n"
+            "> Synthesis: one\n"
+        )
+        out = canonicalize_synthesis_markers(prose, ["one", "two", "three"])
+        assert out == (
+            "# Title\n\nBody.\n\n"
+            "> Synthesis: one\n"
+            "\n"
+            "## Synthesis\n"
+            "> Synthesis: two\n"
+            "> Synthesis: three\n"
+        )
+
+    def test_leaves_prose_untouched_without_statements(self):
+        from memex.services.derive import canonicalize_synthesis_markers
+
+        prose = "# Title\n\nBody without any markers."
+        assert canonicalize_synthesis_markers(prose, []) == prose
+
+    def test_keeps_non_marker_lines_intact(self):
+        from memex.services.derive import canonicalize_synthesis_markers
+
+        prose = (
+            "# Title\n\n"
+            "Body prose mentioning > Synthesis: not a marker mid-line.\n\n"
+            "> Synthesis: old\n"
+        )
+        out = canonicalize_synthesis_markers(prose, ["new statement"])
+        assert "Body prose mentioning > Synthesis: not a marker mid-line." in out
+        assert out.endswith("> Synthesis: new statement\n")
+
+
+class TestDeriveCanonicalizeMarkers:
+    """Ticket #143 — derive canonicalizes the file's > Synthesis: markers
+    from the synthesis_statements column so D3 passes (auto-verified).
+
+    Exercises the full service path in-process: agent call → file write →
+    column store → deterministic checks → trust state.
+    """
+
+    @staticmethod
+    def _ingest(store, url: str) -> str:
+        import uuid
+
+        filename = f"{uuid.uuid4().hex}.md"
+        vault = Path(store["vault"])
+        p = register_node(store, vault, filename, url)
+        assert p.returncode == 0, p.stderr
+        return json.loads(p.stdout)["id"]
+
+    @staticmethod
+    def _derive(store, node_id: str, agent):
+        from memex.services.derive import DeriverService
+
+        with _Store.open(store["db"]) as s:
+            return DeriverService(s, Path(store["vault"]), agent).derive(node_id)
+
+    @staticmethod
+    def _file_markers(store, content_path: str) -> list[str]:
+        import re
+
+        content = Path(content_path).read_text(encoding="utf-8")
+        return re.findall(r"> Synthesis:\s*(.*)", content)
+
+    @staticmethod
+    def _db_statements(store, deriv_id: str) -> list[str]:
+        con = sqlite3.connect(store["db"])
+        try:
+            row = con.execute(
+                "SELECT synthesis_statements FROM node WHERE id = ?",
+                (deriv_id,),
+            ).fetchone()
+        finally:
+            con.close()
+        return json.loads(row[0]) if row and row[0] else []
+
+    def test_divergent_quote_style_markers_are_canonicalized(self, store):
+        """Prose markers with different quoting than the column → written file
+        markers equal the column exactly → D3 passes → auto-verified (was draft)."""
+        from tests.fake_llm_client import FakeAgentDivergent
+
+        node_id = self._ingest(store, "https://example.com/article")
+        agent = FakeAgentDivergent(
+            prose=(
+                "# The Claim\n\n"
+                "This article discusses the topic at hand and its broader implications.\n\n"
+                "> Synthesis: The 'x' claim\n\n"
+                "The source material covers the subject thoroughly."
+            ),
+            statements=['The "x" claim'],
+        )
+        result = self._derive(store, node_id, agent)
+
+        assert result.status == "derived"
+        assert result.trust_state == "auto-verified"
+        assert result.check_failures == []
+        assert self._file_markers(store, result.content_path) == ['The "x" claim']
+        assert self._file_markers(store, result.content_path) == self._db_statements(
+            store, result.id
+        )
+
+    def test_extra_file_markers_are_dropped_to_statement_count(self, store):
+        """5 prose markers but 4 statements → the file gets exactly 4 markers
+        (the extra agent marker is dropped) → D3 count check passes."""
+        from tests.fake_llm_client import FakeAgentDivergent
+
+        node_id = self._ingest(store, "https://example.com/article")
+        agent = FakeAgentDivergent(
+            prose=(
+                "# The Claim\n\n"
+                "This article discusses the topic at hand and its broader implications.\n\n"
+                "> Synthesis: one\n"
+                "> Synthesis: two\n"
+                "> Synthesis: three\n"
+                "> Synthesis: four\n"
+                "> Synthesis: five\n\n"
+                "The source material covers the subject thoroughly."
+            ),
+            statements=["one", "two", "three", "four"],
+        )
+        result = self._derive(store, node_id, agent)
+
+        assert result.status == "derived"
+        assert result.trust_state == "auto-verified"
+        assert result.check_failures == []
+        markers = self._file_markers(store, result.content_path)
+        assert markers == ["one", "two", "three", "four"]
+        assert len(markers) == len(self._db_statements(store, result.id))
+
+    def test_no_markers_but_statements_appends_synthesis_section(self, store):
+        """Prose without markers but statements present → the file gains a
+        ``## Synthesis`` section with one marker per statement → D3 passes."""
+        from tests.fake_llm_client import FakeAgentDivergent
+
+        node_id = self._ingest(store, "https://example.com/article")
+        agent = FakeAgentDivergent(
+            prose=(
+                "# The Claim\n\n"
+                "This article discusses the topic at hand and its broader implications.\n\n"
+                "The source material covers the subject thoroughly."
+            ),
+            statements=[
+                "A canonical statement",
+                "Another canonical statement",
+            ],
+        )
+        result = self._derive(store, node_id, agent)
+
+        assert result.status == "derived"
+        assert result.trust_state == "auto-verified"
+        assert result.check_failures == []
+        content = Path(result.content_path).read_text(encoding="utf-8")
+        assert "## Synthesis" in content
+        assert self._file_markers(store, result.content_path) == [
+            "A canonical statement",
+            "Another canonical statement",
+        ]
+
+    def test_no_statements_leaves_prose_unchanged_and_still_draft(self, store):
+        """No statements and no markers → prose untouched; D3 still fails, so
+        the derivation stays draft (unchanged behavior)."""
+        from tests.fake_llm_client import FakeAgentDivergent
+
+        node_id = self._ingest(store, "https://example.com/article")
+        prose = (
+            "# The Claim\n\n"
+            "This article discusses the topic at hand and its broader implications.\n\n"
+            "The source material covers the subject thoroughly."
+        )
+        agent = FakeAgentDivergent(prose=prose, statements=[])
+        result = self._derive(store, node_id, agent)
+
+        assert result.status == "derived"
+        assert result.trust_state == "draft"
+        assert any(
+            "Synthesis marker check failed" in f for f in result.check_failures
+        )
+        assert Path(result.content_path).read_text(encoding="utf-8") == prose
