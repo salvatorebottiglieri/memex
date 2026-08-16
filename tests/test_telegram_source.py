@@ -154,8 +154,29 @@ class TestRealTelegramSourceCaptureCursor:
     """
 
     @staticmethod
-    def _stub_telethon(monkeypatch, calls):
-        """Inject a fake telethon module recording get_messages calls."""
+    def _stub_telethon(monkeypatch, calls, raise_error=None):
+        """Inject a fake telethon module mirroring the real 1.44 error API.
+
+        Real telethon 1.44 exposes ``telethon.errors.AuthKeyError`` and
+        ``telethon.errors.RPCError`` (no ``AuthError``), plus
+        ``telethon.errors.rpcbaseerrors.UnauthorizedError`` — both auth
+        classes subclass ``RPCError``. Keeping the stub faithful catches
+        future telethon API drift.
+
+        ``raise_error``: ``None`` (no error), ``"auth"`` (get_messages
+        raises UnauthorizedError), or ``"rpc"`` (raises a plain RPCError).
+        """
+
+        class FakeAuthKeyError(Exception):
+            pass
+
+        class FakeRPCError(Exception):
+            pass
+
+        class FakeUnauthorizedError(FakeRPCError):
+            pass
+
+        _raise = {"auth": FakeUnauthorizedError, "rpc": FakeRPCError}.get(raise_error)
 
         class FakeTelegramClient:
             def __init__(self, *args, **kwargs):
@@ -166,25 +187,26 @@ class TestRealTelegramSourceCaptureCursor:
 
             async def get_messages(self, *args, **kwargs):
                 calls.append((args, kwargs))
+                if _raise is not None:
+                    raise _raise("boom")
                 return []
 
             async def disconnect(self):
                 pass
 
-        class FakeAuthError(Exception):
-            pass
-
-        class FakeRPCError(Exception):
-            pass
-
         telethon = types.ModuleType("telethon")
         telethon_errors = types.ModuleType("telethon.errors")
-        telethon_errors.AuthError = FakeAuthError
+        telethon_errors.AuthKeyError = FakeAuthKeyError
         telethon_errors.RPCError = FakeRPCError
+        telethon_errors.rpcbaseerrors = types.ModuleType("telethon.errors.rpcbaseerrors")
+        telethon_errors.rpcbaseerrors.UnauthorizedError = FakeUnauthorizedError
         telethon.TelegramClient = FakeTelegramClient
         telethon.errors = telethon_errors
         monkeypatch.setitem(sys.modules, "telethon", telethon)
         monkeypatch.setitem(sys.modules, "telethon.errors", telethon_errors)
+        monkeypatch.setitem(
+            sys.modules, "telethon.errors.rpcbaseerrors", telethon_errors.rpcbaseerrors
+        )
 
     def test_capture_uses_min_id_not_offset_id(self, monkeypatch, tmp_path):
         calls = []
@@ -206,3 +228,77 @@ class TestRealTelegramSourceCaptureCursor:
         assert args == ("me",)
         assert kwargs == {"limit": 100, "min_id": 0}
         assert "offset_id" not in kwargs
+
+    def test_unauthorized_error_maps_to_auth_failed(self, monkeypatch, tmp_path):
+        """Auth failures surface as AuthFailedError, never NetworkError.
+
+        UnauthorizedError subclasses RPCError, so the source must catch it
+        BEFORE the generic RPCError branch or auth failures get mislabeled
+        as network errors.
+        """
+        calls = []
+        self._stub_telethon(monkeypatch, calls, raise_error="auth")
+        source = RealTelegramSource(
+            api_id=123,
+            api_hash="hash",
+            session_path=str(tmp_path / "telegram.session"),
+        )
+
+        with pytest.raises(AuthFailedError):
+            source.capture(cursor=0)
+
+    def test_rpc_error_maps_to_network_error(self, monkeypatch, tmp_path):
+        calls = []
+        self._stub_telethon(monkeypatch, calls, raise_error="rpc")
+        source = RealTelegramSource(
+            api_id=123,
+            api_hash="hash",
+            session_path=str(tmp_path / "telegram.session"),
+        )
+
+        with pytest.raises(NetworkError):
+            source.capture(cursor=0)
+
+
+class TestRealTelethonErrorContract:
+    """Pins the real telethon 1.44 error API the source depends on.
+
+    telethon 1.44 dropped ``AuthError``; auth failures arrive as
+    ``telethon.errors.AuthKeyError`` or as
+    ``telethon.errors.rpcbaseerrors.UnauthorizedError`` (a subclass of
+    ``RPCError``). These tests catch future API drift so capture() never
+    crashes with ImportError again.
+    """
+
+    def test_telethon_1_44_error_names_exist(self):
+        import telethon.errors
+        from telethon.errors.rpcbaseerrors import UnauthorizedError
+
+        assert hasattr(telethon.errors, "AuthKeyError")
+        assert hasattr(telethon.errors, "RPCError")
+        # AuthError was removed in telethon 1.44 — the regression this
+        # hotfix fixes.
+        assert not hasattr(telethon.errors, "AuthError")
+        assert issubclass(UnauthorizedError, telethon.errors.RPCError)
+
+    def test_source_imports_exist_in_real_telethon(self):
+        """Every error name the source imports must exist in real telethon.
+
+        This is the red test: pre-fix the source imports AuthError, which
+        telethon 1.44 dropped, crashing capture() with ImportError.
+        """
+        import re
+
+        src = inspect.getsource(RealTelegramSource)
+        imports = re.findall(
+            r"^[ \t]*from (telethon\.errors(?:\.[a-z]+)?) import ([A-Za-z_, ]+)$",
+            src,
+            re.MULTILINE,
+        )
+        assert imports, "source must import error classes from telethon.errors"
+        for module_name, names in imports:
+            module = __import__(module_name, fromlist=["*"])
+            for name in (n.strip() for n in names.split(",")):
+                assert hasattr(module, name), (
+                    f"{module_name} has no {name!r} in real telethon — API drift"
+                )

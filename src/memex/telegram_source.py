@@ -112,7 +112,8 @@ class RealTelegramSource:
         from pathlib import Path
 
         from telethon import TelegramClient
-        from telethon.errors import AuthError, RPCError
+        from telethon.errors import AuthKeyError, RPCError
+        from telethon.errors.rpcbaseerrors import UnauthorizedError
 
         session = os.path.expanduser(self.session_path)
         Path(session).parent.mkdir(parents=True, exist_ok=True)
@@ -128,7 +129,9 @@ class RealTelegramSource:
                 # re-fetch the already-captured window, duplicate messages
                 # into the append-only inbox, and regress the cursor.
                 msgs = await client.get_messages("me", limit=100, min_id=cursor or 0)
-            except AuthError as e:
+            except (AuthKeyError, UnauthorizedError) as e:
+                # Both auth classes subclass RPCError, so they must be caught
+                # before the generic RPCError branch below.
                 raise AuthFailedError(f"Telegram authentication failed: {e}") from e
             except RPCError as e:
                 raise NetworkError(f"Telegram API error: {e}") from e
