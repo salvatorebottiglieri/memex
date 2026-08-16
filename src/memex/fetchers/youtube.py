@@ -10,13 +10,14 @@ with ``content_path`` pointing at the cache file.
 Error model (defensive, verified against youtube-transcript-api 1.2.4's
 ``_errors.py`` and what ``fetch()`` raises): ``TranscriptsDisabled`` /
 ``NoTranscriptFound`` / ``VideoUnavailable`` / ``VideoUnplayable`` /
-``AgeRestricted`` are content outcomes — the fetcher returns a metadata-only
-result (``content_path=None``, no cache file, no ``FetchError``) so the
-extracted node is created anyway and derive fails gracefully. Every other
-exception (``RequestBlocked`` / ``IpBlocked`` / ``YouTubeRequestFailed`` /
-``YouTubeDataUnparsable``, connection errors, timeouts, …) is an
-infrastructure failure and raises ``FetchError``, matching the generic
-fetcher contract.
+``AgeRestricted`` are content outcomes — the fetcher returns an empty
+``FetchResult`` (``content=""``, ``content_path=None``, no cache file, no
+``FetchError``) so the extract command registers URL+source and reports
+``no_content`` (ADR-0013: no extractable text -> store nothing, ticket #140).
+Every other exception (``RequestBlocked`` / ``IpBlocked`` /
+``YouTubeRequestFailed`` / ``YouTubeDataUnparsable``, connection errors,
+timeouts, …) is an infrastructure failure and raises ``FetchError``,
+matching the generic fetcher contract.
 """
 from __future__ import annotations
 
@@ -97,8 +98,10 @@ class YouTubeTranscriptFetcher(Fetcher):
           (immutable cache, ADR-0013).
         - transcript available -> write the cache file, return metadata +
           ``content_path``.
-        - transcript disabled/unavailable -> return metadata only,
-          ``content_path=None``, no cache file, no ``FetchError``.
+        - transcript disabled/unavailable -> return empty content
+          (``content=""``, ``content_path=None``), no cache file, no
+          ``FetchError``: the extract command registers URL+source and
+          reports ``no_content`` (ADR-0013, ticket #140).
         - anything else (network, rate-limit, …) -> ``FetchError``.
         """
         video_id = self._video_id(url)
@@ -112,9 +115,7 @@ class YouTubeTranscriptFetcher(Fetcher):
         # Cache-first (immutable): never hit the API (or the network) again.
         if cache is not None and cache.exists():
             return FetchResult(
-                content=self._metadata_md(
-                    video_id, available=True, cached=True
-                ),
+                content=self._metadata_md(video_id, cached=True),
                 content_path=str(cache),
                 title=self._title_from_cache(cache),
             )
@@ -124,7 +125,7 @@ class YouTubeTranscriptFetcher(Fetcher):
             # FetchedTranscript; to_raw_data() yields segment dicts with
             # 'text' keys (the shape _cache_content consumes). Filter to
             # segments with non-empty text up front so the cache-header
-            # counts (metadata + Synthesis line) agree with the written body.
+            # counts agree with the written body.
             segments = [
                 s
                 for s in self._get_client().fetch(video_id).to_raw_data()
@@ -132,11 +133,13 @@ class YouTubeTranscriptFetcher(Fetcher):
             ]
         except Exception as exc:
             if _is_no_transcript_error(exc):
-                # Content outcome: metadata-only node, graceful derive
-                # failure later. No cache file, no FetchError.
-                title, channel = self._oembed_meta(video_id)
+                # Content outcome (ADR-0013, ticket #140): no extractable
+                # text -> empty FetchResult. The extract command registers
+                # URL+source and reports no_content; no stub file is ever
+                # written, so nothing derivable is created.
+                title, _channel = self._oembed_meta(video_id)
                 return FetchResult(
-                    content=self._metadata_md(video_id, available=False, channel=channel),
+                    content="",
                     content_path=None,
                     title=title,
                 )
@@ -169,7 +172,7 @@ class YouTubeTranscriptFetcher(Fetcher):
                 ) from exc
         return FetchResult(
             content=self._metadata_md(
-                video_id, available=True, segments=len(segments), channel=channel
+                video_id, segments=len(segments), channel=channel
             ),
             content_path=str(cache) if cache is not None else None,
             title=title,
@@ -222,25 +225,20 @@ class YouTubeTranscriptFetcher(Fetcher):
         self,
         video_id: str,
         *,
-        available: bool,
         cached: bool = False,
         segments: int | None = None,
         channel: str | None = None,
     ) -> str:
-        """Small markdown metadata — the extracted-node content when the
-        transcript is unavailable (or the result content on cache hits)."""
+        """Small markdown metadata — the result content on transcript hits."""
         lines = [
             f"video_id: {video_id}",
             f"canonical_url: {_watch_url(video_id)}",
         ]
         if channel:
             lines.append(f"channel: {channel}")
-        if available:
-            lines.append("transcript_available: true")
-            if segments is not None:
-                lines.append(f"segments: {segments}")
-        else:
-            lines.append("transcript_available: false")
+        lines.append("transcript_available: true")
+        if segments is not None:
+            lines.append(f"segments: {segments}")
         if cached:
             lines.append("cached: true")
         return "\n".join(lines) + "\n"
@@ -255,11 +253,9 @@ class YouTubeTranscriptFetcher(Fetcher):
     ) -> str:
         """Immutable cache artifact: metadata header + transcript body.
 
-        The body is one segment text per line. The ``> Synthesis:`` line
-        states the artifact's identity — the shared checks-to-trust gate
-        (D3) requires a synthesis marker in the content file for the
-        extracted node to reach ``auto-verified``, mirroring how the web/PDF
-        extract tests embed a marker in fetched content.
+        The body is one segment text per line. No synthesis marker is
+        injected: extracted L0s auto-verify without one (D3 is kind-aware,
+        tickets #138/#140), and the transcript body is the real content.
         """
         lines: list[str] = []
         if title:
@@ -270,10 +266,6 @@ class YouTubeTranscriptFetcher(Fetcher):
             lines.append(f"channel: {channel}")
         lines.append("transcript_available: true")
         lines.append(f"segments: {len(segments)}")
-        lines.append("")
-        who = title or f"video {video_id}"
-        by = f" by {channel}" if channel else ""
-        lines.append(f"> Synthesis: Transcript of {who}{by} ({len(segments)} segments).")
         lines.append("")
         lines.extend(
             seg.get("text", "").strip() for seg in segments if seg.get("text")

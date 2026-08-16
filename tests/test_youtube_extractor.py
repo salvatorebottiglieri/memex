@@ -151,6 +151,9 @@ class TestYouTubeTranscriptFetcher:
         text = cache.read_text(encoding="utf-8")
         for seg in _SEGMENTS:
             assert seg["text"].strip() in text
+        # No injected fake synthesis marker (ticket #138): the extracted node
+        # auto-verifies without it.
+        assert "> Synthesis:" not in text
         assert result.content_path == str(cache)
         assert result.title == "Fake Video Title"
         # content is metadata, not the transcript body
@@ -182,7 +185,11 @@ class TestYouTubeTranscriptFetcher:
             AgeRestricted,
         ],
     )
-    def test_no_transcript_returns_metadata_only(self, tmp_path, monkeypatch, exc_cls):
+    def test_no_transcript_returns_empty_content(self, tmp_path, monkeypatch, exc_cls):
+        """A video without a transcript is an expected absence (ADR-0013,
+        ticket #140): the fetcher returns empty content and no content_path —
+        no metadata stub, no cache file. The extract command then registers
+        URL+source and reports no_content."""
         fetcher = YouTubeTranscriptFetcher(client=_FakeClient(error=exc_cls("abc123")))
         monkeypatch.setattr(
             YouTubeTranscriptFetcher, "_oembed_meta", lambda self, video_id: (None, None)
@@ -191,7 +198,7 @@ class TestYouTubeTranscriptFetcher:
 
         assert result.content_path is None
         assert result.title is None
-        assert "transcript_available: false" in result.content
+        assert result.content == ""
         assert list(tmp_path.glob("youtube-*.md")) == []
 
     @pytest.mark.parametrize(
@@ -293,7 +300,9 @@ class TestExtractYoutube:
         assert cache.exists()
         text = cache.read_text(encoding="utf-8")
         assert "This is the first segment" in text
-        assert "> Synthesis:" in text
+        # The transcript body alone carries the node to auto-verified: no
+        # injected '> Synthesis:' line (tickets #138/#140).
+        assert "> Synthesis:" not in text
 
         con = sqlite3.connect(store["db"])
         con.row_factory = sqlite3.Row
@@ -318,7 +327,10 @@ class TestExtractYoutube:
         assert src["canonical_key"] == "youtube://abc123"
         assert _counts(store["db"]) == (1, 1, 1)
 
-    def test_no_transcript_returns_metadata_only(self, store, monkeypatch):
+    def test_no_transcript_returns_no_content(self, store, monkeypatch):
+        """A video without a transcript is an expected absence (ADR-0013,
+        ticket #140): `memex extract` reports no_content — only the URL node
+        + source are recorded, no extracted node, no metadata stub file."""
         data = _extract(
             store,
             monkeypatch,
@@ -327,21 +339,15 @@ class TestExtractYoutube:
             oembed=("No Transcript Video", None),
         )
 
-        assert data["status"] == "extracted"
-        assert data["fetcher_type"] == "youtube"
-        assert data["confidence"] == "low"
-        assert data["trust_state"] == "draft"
+        assert data["status"] == "no_content"
+        assert "extracted_node_id" not in data
+        assert data["url_node_id"]
         assert data["title"] == "No Transcript Video"
 
-        md_path = Path(data["content_path"])
-        assert md_path.parent == store["vault"] / "extracted"
-        assert md_path.exists()
-        content = md_path.read_text(encoding="utf-8")
-        assert "video_id: abc123" in content
-        assert "transcript_available: false" in content
-        # No cache artifact was written.
+        # URL node + source recorded; NO extracted node, no stub file, no cache.
+        assert _counts(store["db"]) == (1, 0, 1)
+        assert not list((store["vault"] / "extracted").glob("*.md"))
         assert list((store["vault"] / ".cache").glob("youtube-*.md")) == []
-        assert _counts(store["db"]) == (1, 1, 1)
 
     def test_network_error_marks_source_failed(self, store, monkeypatch):
         data = _extract(store, monkeypatch, _WATCH_URL, error=RequestBlocked("abc123"))
@@ -412,11 +418,10 @@ class TestExtractYoutube:
         assert cache.read_text(encoding="utf-8") == original  # immutable
         assert _counts(store["db"]) == (1, 1, 1)
 
-    def test_force_reextract_with_transcript_updates_db_content_path(self, store, monkeypatch):
-        """Finding 2: a metadata-only node re-extracted with a transcript now
-        available must have its row content_path moved to the cache artifact —
-        derive/render read the row, and a stale vault/extracted path would
-        serve the metadata file forever."""
+    def test_force_reextract_with_transcript_creates_extracted_node(self, store, monkeypatch):
+        """A no-transcript video (no_content, no extracted node) re-extracted
+        once a transcript is available gets a fresh extracted node whose row
+        content_path points at the cache artifact (ticket #140)."""
         first = _extract(
             store,
             monkeypatch,
@@ -424,11 +429,12 @@ class TestExtractYoutube:
             error=TranscriptsDisabled("abc123"),
             oembed=("No Transcript Video", None),
         )
-        assert Path(first["content_path"]).parent == store["vault"] / "extracted"
+        assert first["status"] == "no_content"
+        assert "extracted_node_id" not in first
 
         data = _extract(store, monkeypatch, _WATCH_URL, segments=_SEGMENTS, force=True)
 
-        assert data["status"] == "re_extracted"
+        assert data["status"] == "extracted"
         cache = store["vault"] / ".cache" / "youtube-abc123.md"
         assert Path(data["content_path"]) == cache
         assert cache.exists()
@@ -443,12 +449,13 @@ class TestExtractYoutube:
         assert ext["content_path"] == str(cache)
         assert _counts(store["db"]) == (1, 1, 1)
 
-    def test_force_no_transcript_after_cache_delete_targets_extracted_dir(self, store, monkeypatch):
-        """Finding 3: when the fetch writes no artifact, --force must target a
-        fresh CLI-owned vault/extracted file — never the DB's previous cache
-        path. Overwriting .cache/youtube-<id>.md with metadata would poison
-        the immutable cache-first branch forever."""
+    def test_force_no_transcript_never_writes_stub_file(self, store, monkeypatch):
+        """A no-transcript (re-)extract writes nothing: no cache artifact, no
+        vault/extracted stub (ticket #140). The node row is untouched — the
+        deleted cache path is the documented manual refresh, and a later
+        extract with a transcript recreates the cache artifact in place."""
         first = _extract(store, monkeypatch, _WATCH_URL, segments=_SEGMENTS)
+        ext_id = first["extracted_node_id"]
         cache = store["vault"] / ".cache" / "youtube-abc123.md"
         assert Path(first["content_path"]) == cache
         cache.unlink()  # documented refresh
@@ -462,24 +469,22 @@ class TestExtractYoutube:
             force=True,
         )
 
-        assert data["status"] == "re_extracted"
-        md_path = Path(data["content_path"])
-        assert md_path.parent == store["vault"] / "extracted"
-        assert md_path.exists()
-        assert "transcript_available: false" in md_path.read_text(encoding="utf-8")
-        # The cache file must NOT be recreated with metadata-only content.
+        assert data["status"] == "no_content"
+        # No metadata stub anywhere — not in .cache, not in vault/extracted.
         assert not cache.exists()
         assert list((store["vault"] / ".cache").glob("youtube-*.md")) == []
-        # The node row tracks the new CLI-owned file.
+        assert not list((store["vault"] / "extracted").glob("*.md"))
+        # The extracted node row is untouched (still points at the deleted
+        # cache artifact).
         con = sqlite3.connect(store["db"])
         con.row_factory = sqlite3.Row
         try:
             ext = con.execute(
-                "SELECT content_path FROM node WHERE id = ?", (data["extracted_node_id"],)
+                "SELECT content_path FROM node WHERE id = ?", (ext_id,)
             ).fetchone()
         finally:
             con.close()
-        assert ext["content_path"] == str(md_path)
+        assert ext["content_path"] == str(cache)
         assert _counts(store["db"]) == (1, 1, 1)
 
         # A later extract must call the API again (cache-first branch not
@@ -501,7 +506,9 @@ class TestDeriveYoutube:
             env={"MEMEX_AGENT": FAKE_AGENT},
         )
 
-    def test_derive_metadata_only_youtube_node_does_not_crash(self, store, monkeypatch):
+    def test_no_content_youtube_node_is_not_derivable(self, store, monkeypatch):
+        """A video without a transcript leaves NO extracted L0 (ticket #140):
+        derive --all finds nothing to derive and no summary node is created."""
         data = _extract(
             store,
             monkeypatch,
@@ -509,11 +516,24 @@ class TestDeriveYoutube:
             error=TranscriptsDisabled("abc123"),
             oembed=("No Transcript Video", None),
         )
-        proc = self._derive(store, data["extracted_node_id"])
+        assert data["status"] == "no_content"
+        assert "extracted_node_id" not in data
+
+        proc = _run_memex(
+            ["derive", "--all", "--db", str(store["db"]), "--vault", str(store["vault"])],
+            env={"MEMEX_AGENT": FAKE_AGENT},
+        )
         assert proc.returncode == 0, proc.stderr
-        d = json.loads(proc.stdout)
-        assert d["status"] in ("derived", "error")
-        assert d["l0_node_id"] == data["extracted_node_id"]
+        assert json.loads(proc.stdout) == []
+
+        con = sqlite3.connect(store["db"])
+        try:
+            summary_count = con.execute(
+                "SELECT COUNT(*) FROM node WHERE kind = 'summary'"
+            ).fetchone()[0]
+        finally:
+            con.close()
+        assert summary_count == 0
 
     def test_derive_transcript_youtube_node_does_not_crash(self, store, monkeypatch):
         data = _extract(store, monkeypatch, _WATCH_URL, segments=_SEGMENTS)
