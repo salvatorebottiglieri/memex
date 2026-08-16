@@ -955,7 +955,7 @@ class TestCanonicalizeSynthesisMarkers:
     """
 
     def test_replaces_markers_in_order_with_statements(self):
-        from memex.services.derive import canonicalize_synthesis_markers
+        from memex.rules import canonicalize_synthesis_markers
 
         prose = (
             "# Title\n\nBody.\n\n"
@@ -972,7 +972,7 @@ class TestCanonicalizeSynthesisMarkers:
         )
 
     def test_drops_extra_markers_beyond_statements(self):
-        from memex.services.derive import canonicalize_synthesis_markers
+        from memex.rules import canonicalize_synthesis_markers
 
         prose = (
             "# Title\n\nBody.\n\n"
@@ -995,7 +995,7 @@ class TestCanonicalizeSynthesisMarkers:
         )
 
     def test_appends_synthesis_section_when_prose_has_no_markers(self):
-        from memex.services.derive import canonicalize_synthesis_markers
+        from memex.rules import canonicalize_synthesis_markers
 
         prose = "# Title\n\nBody without any markers."
         out = canonicalize_synthesis_markers(
@@ -1012,7 +1012,7 @@ class TestCanonicalizeSynthesisMarkers:
         """Fewer prose markers than statements → the remaining statements are
         appended (in a ``## Synthesis`` section) so the file ends up with
         EXACTLY len(statements) markers (canonical contract)."""
-        from memex.services.derive import canonicalize_synthesis_markers
+        from memex.rules import canonicalize_synthesis_markers
 
         prose = (
             "# Title\n\nBody.\n\n"
@@ -1029,13 +1029,13 @@ class TestCanonicalizeSynthesisMarkers:
         )
 
     def test_leaves_prose_untouched_without_statements(self):
-        from memex.services.derive import canonicalize_synthesis_markers
+        from memex.rules import canonicalize_synthesis_markers
 
         prose = "# Title\n\nBody without any markers."
         assert canonicalize_synthesis_markers(prose, []) == prose
 
     def test_keeps_non_marker_lines_intact(self):
-        from memex.services.derive import canonicalize_synthesis_markers
+        from memex.rules import canonicalize_synthesis_markers
 
         prose = (
             "# Title\n\n"
@@ -1045,6 +1045,24 @@ class TestCanonicalizeSynthesisMarkers:
         out = canonicalize_synthesis_markers(prose, ["new statement"])
         assert "Body prose mentioning > Synthesis: not a marker mid-line." in out
         assert out.endswith("> Synthesis: new statement\n")
+
+    def test_existing_synthesis_header_reused_when_no_markers(self):
+        """Prose with a ``## Synthesis`` header but no markers → the missing
+        markers are inserted right after the existing header (exactly one
+        header in the result), not appended as a second section."""
+        from memex.rules import canonicalize_synthesis_markers
+
+        prose = "# Title\n\nBody.\n\n## Synthesis\n"
+        out = canonicalize_synthesis_markers(
+            prose, ["Statement one", "Statement two"]
+        )
+        assert out.count("## Synthesis") == 1
+        assert out == (
+            "# Title\n\nBody.\n\n"
+            "## Synthesis\n"
+            "> Synthesis: Statement one\n"
+            "> Synthesis: Statement two\n"
+        )
 
 
 class TestDeriveCanonicalizeMarkers:
@@ -1193,3 +1211,57 @@ class TestDeriveCanonicalizeMarkers:
             "Synthesis marker check failed" in f for f in result.check_failures
         )
         assert Path(result.content_path).read_text(encoding="utf-8") == prose
+
+    def test_mid_line_mention_is_ignored_by_d3_check(self, store):
+        """A mid-line ``> Synthesis:`` mention in prose is NOT a marker: D3
+        counts only line-anchored markers, so N anchored markers + N
+        statements pass (previously the unanchored parse counted the mention
+        → N+1 vs N → the derivation flipped to draft)."""
+        from tests.fake_llm_client import FakeAgentDivergent
+
+        node_id = self._ingest(store, "https://example.com/article")
+        agent = FakeAgentDivergent(
+            prose=(
+                "# The Claim\n\n"
+                "The agent wrote: > Synthesis: a mid-line mention, not a marker.\n\n"
+                "> Synthesis: one\n"
+                "> Synthesis: two\n\n"
+                "The source material covers the subject thoroughly."
+            ),
+            statements=["one", "two"],
+        )
+        result = self._derive(store, node_id, agent)
+
+        assert result.status == "derived"
+        assert result.trust_state == "auto-verified"
+        assert result.check_failures == []
+
+    def test_existing_synthesis_header_gets_markers_and_auto_verifies(self, store):
+        """Prose with a ``## Synthesis`` header but no markers → the missing
+        markers land right after the existing header (exactly one header),
+        so the file matches the column and D3 passes."""
+        from tests.fake_llm_client import FakeAgentDivergent
+
+        node_id = self._ingest(store, "https://example.com/article")
+        agent = FakeAgentDivergent(
+            prose=(
+                "# The Claim\n\n"
+                "This article discusses the topic at hand.\n\n"
+                "## Synthesis\n"
+            ),
+            statements=[
+                "A canonical statement",
+                "Another canonical statement",
+            ],
+        )
+        result = self._derive(store, node_id, agent)
+
+        assert result.status == "derived"
+        assert result.trust_state == "auto-verified"
+        assert result.check_failures == []
+        content = Path(result.content_path).read_text(encoding="utf-8")
+        assert content.count("## Synthesis") == 1
+        assert self._file_markers(store, result.content_path) == [
+            "A canonical statement",
+            "Another canonical statement",
+        ]

@@ -13,8 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from memex.agent import Agent, load_agent
+from memex.rules import canonicalize_synthesis_markers
 from memex.schemas import DocumentRef, coerce_derivation
-from memex.services.derive import canonicalize_synthesis_markers
 from memex.store import Store, min_confidence
 from memex.utils.retry import call_with_retry
 from memex.validators.validate import validate_derivation
