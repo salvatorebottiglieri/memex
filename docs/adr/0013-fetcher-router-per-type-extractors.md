@@ -53,7 +53,7 @@ This cache is **immutable once written**: re-derive reuses the cached artifact. 
 | Extractor | L0 content | content_path | Dependency |
 |---|---|---|---|
 | `HttpFetcher` | Extracted markdown | None | stdlib only |
-| `YouTubeTranscriptFetcher` | Metadata (title, channel) | Path to cached transcript | `youtube-transcript-api` |
+| `YouTubeTranscriptFetcher` | Metadata (title, channel); empty (`""`) when no transcript | Path to cached transcript; `None` when no transcript | `youtube-transcript-api` |
 | `PDFFetcher` | Extracted text | None | `pypdf` |
 
 ### YouTube error handling
@@ -61,10 +61,10 @@ This cache is **immutable once written**: re-derive reuses the cached artifact. 
 `YouTubeTranscriptFetcher.fetch()` never raises `FetchError` for content issues:
 
 - **Transcript available** -> writes cache, returns metadata in `content`, `content_path` set
-- **Transcript disabled / unavailable** -> returns metadata in `content`, `content_path = None`
+- **Transcript disabled / unavailable** -> returns **empty content** (`content=""`, `content_path=None`), writes no cache file
 - **Network / rate limiting** -> raises `FetchError` (same as any fetcher)
 
-The derive caller checks `content_path`: if None and the node has no markdown file, derive fails gracefully. This keeps the fetcher interface clean: `FetchError` only for infrastructure failures, never for expected content absences.
+The extract command treats empty content with no `content_path` as a content absence (ticket #140): it registers the URL+source pair only, reports `no_content`, and creates **no extracted node and no stub file** — nothing derivable is left behind. Earlier drafts returned metadata as stub content and let the derive caller fail gracefully; #140 removed the stub so a transcript-less video can never be derived into a process-description note. This keeps the fetcher interface clean: `FetchError` only for infrastructure failures, never for expected content absences.
 
 ### Extensibility
 
