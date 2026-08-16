@@ -287,6 +287,59 @@ class TestSynthesizeQualityGate:
         assert "Validator LLM call failed" in warning["validator_warning"]
 
 
+class TestSynthesizeCanonicalizeMarkers:
+    """Ticket #143 — synthesis writes files + stores synthesis_statements with
+    the same pattern as derive, so the file markers get the same
+    canonicalization from the column (D3 passes → auto-verified)."""
+
+    def test_synthesize_divergent_markers_are_canonicalized(self, store):
+        """Prose markers with divergent quoting → written file markers equal the
+        column exactly → D3 passes → auto-verified."""
+        import re
+        import uuid
+
+        from memex.services.synthesize import SynthesizerService
+        from tests.fake_llm_client import FakeAgentDivergent
+
+        def _ingest(url: str) -> str:
+            filename = f"{uuid.uuid4().hex}.md"
+            p = register_node(store, store["vault"], filename, url)
+            assert p.returncode == 0, p.stderr
+            return json.loads(p.stdout)["id"]
+
+        a = _ingest("https://example.com/article-a")
+        b = _ingest("https://example.com/article-b")
+        agent = FakeAgentDivergent(
+            prose=(
+                "# Synthesized Claim\n\n"
+                "This synthesis aggregates the topic across both sources.\n\n"
+                "> Synthesis: The 'x' claim\n\n"
+                "Both source materials cover the subject thoroughly."
+            ),
+            statements=['The "x" claim'],
+        )
+        with Store.open(store["db"]) as s:
+            result = SynthesizerService(
+                s, Path(store["vault"]), agent
+            ).synthesize([a, b])
+
+        assert result["status"] == "synthesized"
+        assert result["trust_state"] == "auto-verified"
+        assert result["check_failures"] == []
+        content = Path(result["content_path"]).read_text(encoding="utf-8")
+        assert re.findall(r"> Synthesis:\s*(.*)", content) == ['The "x" claim']
+
+        con = sqlite3.connect(store["db"])
+        try:
+            row = con.execute(
+                "SELECT synthesis_statements FROM node WHERE id = ?",
+                (result["id"],),
+            ).fetchone()
+        finally:
+            con.close()
+        assert json.loads(row[0]) == ['The "x" claim']
+
+
 class TestBackfillSynthesis:
     """Tests for `memex backfill-synthesis` — synthesis_statements backfill.
 

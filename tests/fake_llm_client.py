@@ -6,7 +6,7 @@ Provides a deterministic review() returning configurable ReviewProposal.
 from __future__ import annotations
 
 from memex.agent import Agent
-from memex.schemas import DerivationResult, ReviewProposal
+from memex.schemas import DerivationResult, DocumentRef, ReviewProposal
 
 class FakeAgent(Agent):
     """Deterministic Agent for tests."""
@@ -113,3 +113,59 @@ class FakeReaderAgent(Agent):
 
     def extract_ideas(self, content=None, source_url=None, *, reference=None):
         return ["Reader idea"]
+
+
+class FakeAgentDivergent(Agent):
+    """Fake whose prose markers deliberately diverge from synthesis_statements.
+
+    Ticket #143: the service canonicalizes the file's ``> Synthesis:`` markers
+    from the column, so D3's exact file-vs-column check must pass even when
+    the agent renders the same statements with different quoting/style.
+    Construct with explicit ``prose``/``statements`` to shape each scenario;
+    the defaults reproduce the divergent-quoting case (single quotes in prose,
+    double quotes in the column).
+    """
+
+    def __init__(
+        self,
+        prose: str | None = None,
+        statements: list[str] | None = None,
+    ):
+        self._prose = prose
+        self._statements = statements
+
+    def derive(
+        self,
+        content: str | None = None,
+        *,
+        reference: DocumentRef | None = None,
+    ) -> DerivationResult:
+        prose = self._prose if self._prose is not None else (
+            "# The Claim\n\n"
+            "This article discusses the topic at hand and its broader implications.\n\n"
+            "> Synthesis: The 'x' claim\n\n"
+            "The source material covers the subject thoroughly."
+        )
+        statements = self._statements if self._statements is not None else [
+            'The "x" claim'
+        ]
+        return DerivationResult(prose=prose, synthesis_statements=statements)
+
+    def review(
+        self, target_content: str, asserting_content: str, edge_payload: dict
+    ) -> ReviewProposal:
+        return ReviewProposal(
+            affected_node_ids=[],
+            damage_boundary_node_id=None,
+            rationale_md="Fake review: all good.",
+            confidence="high",
+        )
+
+    def extract_ideas(
+        self,
+        content: str | None = None,
+        source_url: str | None = None,
+        *,
+        reference: DocumentRef | None = None,
+    ) -> list[str]:
+        return ["Key idea 1", "Key idea 2", "Key idea 3"]

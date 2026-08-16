@@ -195,6 +195,75 @@ def _node_kind(con: sqlite3.Connection, node_id: str) -> str | None:
     return row[0] if row is not None else None
 
 
+# ── Synthesis marker grammar (canonicalizer + D3 share it) ─────────────
+#
+# A synthesis marker is a LINE-ANCHORED ``> Synthesis:`` line — the file
+# structure the pipeline guarantees. The canonicalizer rewrites exactly this
+# grammar, and the D3 check counts exactly this grammar, so both must use
+# the SAME regex or the file-vs-column comparison drifts (ticket #143).
+
+_SYNTHESIS_MARKER_RE = re.compile(r"^>\s*Synthesis:\s*(.*)$", re.M)
+
+
+def canonicalize_synthesis_markers(prose: str, statements: list[str]) -> str:
+    """Rewrite the ``> Synthesis:`` marker lines of *prose* from *statements*.
+
+    The file is the presentation channel; the ``synthesis_statements`` column
+    is the source of truth the D3 check compares the file against (CONTEXT.md:
+    "the column is the source of truth that the deterministic check ... all
+    marker is presentation"). Agents often render the same statements with
+    different quoting/style, failing D3's exact file-vs-column comparison
+    (~60% of derivations went draft, ticket #143). This rewrites the file's
+    markers from the (cleaned) column:
+
+      - markers present: replaced in order; markers beyond ``len(statements)``
+        are dropped;
+      - no markers but statements exist: the missing statements are emitted
+        as ``> Synthesis:`` lines — after an existing ``## Synthesis`` header
+        when prose already carries one, else in an appended ``## Synthesis``
+        section (Rule S1 format);
+      - no statements: prose returned untouched (D3 failure unchanged).
+
+    Only LINE-ANCHORED markers count (``> Synthesis:`` at the start of a
+    line — the grammar ``_SYNTHESIS_MARKER_RE`` shares with the D3 check).
+    The result carries EXACTLY ``len(statements)`` line-anchored markers,
+    each equal to the corresponding statement.
+    """
+    if not statements:
+        return prose
+
+    lines = prose.splitlines()
+    out: list[str] = []
+    placed = 0
+    for line in lines:
+        if _SYNTHESIS_MARKER_RE.match(line):
+            if placed < len(statements):
+                out.append(f"> Synthesis: {statements[placed]}")
+                placed += 1
+            # marker beyond len(statements): dropped
+        else:
+            out.append(line)
+
+    if placed < len(statements):
+        remaining = statements[placed:]
+        try:
+            header = out.index("## Synthesis")
+        except ValueError:
+            out.append("")
+            out.append("## Synthesis")
+            out.extend(f"> Synthesis: {s}" for s in remaining)
+        else:
+            # Prose already carries a "## Synthesis" header (the agent emitted
+            # it without markers): insert the missing markers immediately
+            # after it instead of appending a second section.
+            out[header + 1 : header + 1] = [f"> Synthesis: {s}" for s in remaining]
+
+    text = "\n".join(out)
+    if prose.endswith("\n"):
+        text += "\n"
+    return text
+
+
 def _d3_synthesis_check(
     con: sqlite3.Connection, node_id: str, content_path: Path, content: str
 ) -> list[str]:
@@ -220,7 +289,7 @@ def _d3_synthesis_check(
         except (json.JSONDecodeError, TypeError):
             pass
 
-    file_statements = re.findall(r"> Synthesis:\s*(.*)", content)
+    file_statements = _SYNTHESIS_MARKER_RE.findall(content)
 
     if not db_statements and not file_statements:
         return [
