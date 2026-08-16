@@ -189,10 +189,25 @@ def _d2_dangling_ref_check(
     return failures
 
 
+def _node_kind(con: sqlite3.Connection, node_id: str) -> str | None:
+    """Kind of *node_id*, or None when the row is missing."""
+    row = con.execute("SELECT kind FROM node WHERE id = ?", (node_id,)).fetchone()
+    return row[0] if row is not None else None
+
+
 def _d3_synthesis_check(
     con: sqlite3.Connection, node_id: str, content_path: Path, content: str
 ) -> list[str]:
-    """D3: At least one synthesis statement (from DB column or file marker)."""
+    """D3: At least one synthesis statement (from DB column or file marker).
+
+    Only derivations are gated: extracted L0s carry raw source content,
+    which has no synthesis markers by construction (ticket #138). The check
+    message itself says 'derivation must contain' — synthesis statements are
+    a derivation-level contract, not an L0 one.
+    """
+    if _node_kind(con, node_id) == "extracted":
+        return []
+
     ss_row = con.execute(
         "SELECT synthesis_statements FROM node WHERE id = ?", (node_id,)
     ).fetchone()
@@ -234,21 +249,27 @@ def _d4_size_bounds(
 ) -> list[str]:
     """D4: Content length between MIN_CHARS and MAX_CHARS.
 
-    Synthesis-tier nodes aggregate several parents and routinely exceed the
-    notes-tier cap — they get a wider ceiling.
+    The MIN floor applies everywhere — content must be real. The MAX cap is a
+    derivations-tier gate (synthesis gets a wider ceiling because it
+    aggregates several parents); extracted L0s have no cap at all: raw
+    content is what it is, and legitimately long sources (arXiv papers,
+    hour-long transcripts) must not be draft 'too long' forever (ticket #139).
     """
     row = con.execute(
-        "SELECT tier FROM node WHERE id = ?", (node_id,)
+        "SELECT tier, kind FROM node WHERE id = ?", (node_id,)
     ).fetchone()
-    max_chars = _SYNTH_MAX_CHARS if row and row[0] == "synthesis" else MAX_CHARS
+    tier, kind = (row[0], row[1]) if row is not None else (None, None)
     length = len(content)
     if length < MIN_CHARS:
         return [
-            f"Size check failed: derivation is too short ({length} chars, minimum is {MIN_CHARS})"
+            f"Size check failed: content is too short ({length} chars, minimum is {MIN_CHARS})"
         ]
-    elif length > max_chars:
+    if kind == "extracted":
+        return []
+    max_chars = _SYNTH_MAX_CHARS if tier == "synthesis" else MAX_CHARS
+    if length > max_chars:
         return [
-            f"Size check failed: derivation is too long ({length} chars, maximum is {max_chars})"
+            f"Size check failed: content is too long ({length} chars, maximum is {max_chars})"
         ]
     return []
 

@@ -23,7 +23,6 @@ _WEB_BODY = (
     "<p>This is a longer article body that exceeds the minimum character "
     "threshold of one hundred characters so that the deterministic checks "
     "pass and the extracted node becomes auto-verified.</p>"
-    "<p>> Synthesis: this page demonstrates the checks-to-trust pattern.</p>"
     "</body></html>"
 )
 

@@ -38,7 +38,6 @@ _WEB_BODY = (
     "<p>This is a longer article body that exceeds the minimum character "
     "threshold of one hundred characters so that the deterministic checks "
     "pass and the extracted node becomes auto-verified.</p>"
-    "<p>> Synthesis: this page demonstrates the checks-to-trust pattern.</p>"
     "</body></html>"
 )
 
@@ -167,7 +166,9 @@ def test_extract_web_page_creates_url_and_extracted_pair(store, local_server, ru
     assert content_path.exists()
     text = content_path.read_text(encoding="utf-8")
     assert "Memex Test Article" in text
-    assert "> Synthesis:" in text
+    # Ticket #138: extracted L0s auto-verify WITHOUT an injected synthesis
+    # marker — the marker was a test hack encoding the broken behavior.
+    assert "> Synthesis:" not in text
 
     # DB rows: url node + extracted node + provenance edge + source
     con = sqlite3.connect(store["db"])
@@ -394,6 +395,36 @@ def test_short_content_stays_draft_with_check_failures(store, local_server, run_
         con.close()
     assert row[0] == "draft"
     assert row[1] is not None  # check_failures persisted
+
+
+def test_large_web_page_auto_verifies_without_size_cap(store, local_server, run_extract):
+    """A legitimately long L0 (> MAX_CHARS) is NOT draft for size: extracted
+    nodes only enforce the MIN floor, the MAX cap is a derivations gate
+    (ticket #139)."""
+    from memex.checks import MAX_CHARS
+
+    body = (
+        "<html><head><title>Long Article</title></head><body>"
+        "<p>" + "x" * (MAX_CHARS + 10_000) + "</p>"
+        "</body></html>"
+    )
+    local_server.route("/long", body)
+    url = local_server.base_url + "/long"
+    data = run_extract(url)
+
+    assert data["status"] == "extracted"
+    assert data["trust_state"] == "auto-verified"
+    assert len(Path(data["content_path"]).read_text(encoding="utf-8")) > MAX_CHARS
+    con = sqlite3.connect(store["db"])
+    try:
+        row = con.execute(
+            "SELECT trust_state, check_failures FROM node WHERE id = ?",
+            (data["extracted_node_id"],),
+        ).fetchone()
+    finally:
+        con.close()
+    assert row[0] == "auto-verified"
+    assert row[1] in (None, "[]")  # no persisted size failure
 
 
 # ── fetcher router unit tests ────────────────────────────────────────

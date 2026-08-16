@@ -61,6 +61,34 @@ def _setup_db(tmp_path: Path) -> tuple[sqlite3.Connection, str, Path]:
     return con, deriv_id, content_path
 
 
+def _setup_extracted(tmp_path: Path, content: str) -> tuple[sqlite3.Connection, str, Path]:
+    """Minimal db with a url node + extracted L0 child + provenance edge.
+
+    Mirrors the url+extracted pair the extract command produces. The checks
+    are kind-aware (tickets #138/#139): extracted L0s skip the synthesis-marker
+    and size-max gates, so these tests exercise that kind explicitly.
+    """
+    from memex.store import Store
+
+    db_path = tmp_path / "memex.db"
+    with Store.open(db_path) as store:
+        store.init_schema()
+        url_id = str(uuid.uuid4())
+        store.create_node(node_id=url_id, kind="url", created_at=_utcnow())
+        ext_id = str(uuid.uuid4())
+        content_path = tmp_path / f"{ext_id}.md"
+        content_path.write_text(content, encoding="utf-8")
+        store.create_node(
+            node_id=ext_id, kind="extracted",
+            content_path=str(content_path), derived_from=url_id, created_at=_utcnow(),
+        )
+
+    con = sqlite3.connect(db_path)
+    con.execute("PRAGMA foreign_keys = ON")
+
+    return con, ext_id, content_path
+
+
 # ---------------------------------------------------------------------------
 # Tracer bullet: all-passing check
 # ---------------------------------------------------------------------------
@@ -492,6 +520,74 @@ class TestSizeBoundsSynthesisTier:
         con.execute("UPDATE node SET tier = 'synthesis', depth = 2 WHERE id = ?", (deriv_id,))
         con.commit()
         content_path.write_text("> Synthesis: ok\n" + "x" * 160_000, encoding="utf-8")
+
+        result = run_checks(con, deriv_id, content_path)
+        con.close()
+
+        assert result.passed is False
+        assert any("long" in f.lower() for f in result.failures)
+
+
+class TestChecksKindAwareExtracted:
+    """D3/D4 are kind-aware (tickets #138/#139).
+
+    Extracted L0s carry raw source content: no synthesis markers by
+    construction, and no size ceiling (the MAX cap is a derivations-tier
+    gate). The MIN floor stays. Derivations keep both gates unchanged.
+    """
+
+    def test_extracted_without_marker_skips_synthesis_check(self, tmp_path):
+        """An extracted L0 with real content but no '> Synthesis:' marker
+        passes the checks (D3 is skipped for kind='extracted')."""
+        con, ext_id, content_path = _setup_extracted(
+            tmp_path, "Extracted raw content without any synthesis marker. " * 4
+        )
+        result = run_checks(con, ext_id, content_path)
+        con.close()
+
+        assert result.passed is True
+        assert not any("synthesis" in f.lower() for f in result.failures)
+
+    def test_extracted_over_max_chars_skips_size_cap(self, tmp_path):
+        """An extracted L0 longer than MAX_CHARS is NOT draft for size: the
+        cap only applies to derivations."""
+        from memex.checks import MAX_CHARS
+        con, ext_id, content_path = _setup_extracted(
+            tmp_path, "x" * (MAX_CHARS + 10_000)
+        )
+        result = run_checks(con, ext_id, content_path)
+        con.close()
+
+        assert result.passed is True
+        assert not any("long" in f.lower() for f in result.failures)
+
+    def test_extracted_under_min_chars_still_fails_size(self, tmp_path):
+        """The MIN_CHARS floor still applies to extracted L0s."""
+        con, ext_id, content_path = _setup_extracted(tmp_path, "tiny")
+        result = run_checks(con, ext_id, content_path)
+        con.close()
+
+        assert result.passed is False
+        assert any("short" in f.lower() for f in result.failures)
+
+    def test_summary_without_marker_still_fails_synthesis(self, tmp_path):
+        """D3 stays intact for derivations: a summary without synthesis
+        statements is still draft."""
+        con, deriv_id, content_path = _setup_db(tmp_path)
+        content_without_synthesis = "This derivation is long enough but has no synthesis marker. " * 5
+        content_path.write_text(content_without_synthesis, encoding="utf-8")
+
+        result = run_checks(con, deriv_id, content_path)
+        con.close()
+
+        assert result.passed is False
+        assert any("synthesis" in f.lower() for f in result.failures)
+
+    def test_summary_over_max_chars_still_fails_size(self, tmp_path):
+        """The MAX_CHARS cap stays intact for derivations."""
+        from memex.checks import MAX_CHARS
+        con, deriv_id, content_path = _setup_db(tmp_path)
+        content_path.write_text("> Synthesis: too long\n" + "x" * (MAX_CHARS + 1), encoding="utf-8")
 
         result = run_checks(con, deriv_id, content_path)
         con.close()
