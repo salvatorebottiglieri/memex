@@ -222,7 +222,7 @@ class DeriverService:
         content_path = l0.get("content_path")
         if not content_path or not Path(content_path).exists():
             return True
-        return Path(content_path).stat().st_size < MIN_CHARS
+        return len(Path(content_path).read_text(encoding="utf-8")) < MIN_CHARS
 
     def _agent_inputs(self, l0: dict) -> tuple[str | None, DocumentRef | None]:
         """Decide what the agent receives for an L0.

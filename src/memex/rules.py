@@ -262,14 +262,14 @@ def _d4_size_bounds(
     length = len(content)
     if length < MIN_CHARS:
         return [
-            f"Size check failed: derivation is too short ({length} chars, minimum is {MIN_CHARS})"
+            f"Size check failed: content is too short ({length} chars, minimum is {MIN_CHARS})"
         ]
     if kind == "extracted":
         return []
     max_chars = _SYNTH_MAX_CHARS if tier == "synthesis" else MAX_CHARS
     if length > max_chars:
         return [
-            f"Size check failed: derivation is too long ({length} chars, maximum is {max_chars})"
+            f"Size check failed: content is too long ({length} chars, maximum is {max_chars})"
         ]
     return []
 

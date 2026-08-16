@@ -538,6 +538,60 @@ class TestDeriveNoContentGate:
             con.close()
         assert summary_count == 0
 
+    def test_reader_agent_short_non_ascii_l0_returns_no_content(self, store):
+        """Reader agents get a DocumentRef, so the MIN_CHARS gate must count
+        characters, not file bytes: a 60-char non-ASCII L0 (~120 UTF-8 bytes)
+        is below the floor and must be skipped (ticket #141)."""
+        from tests.fake_llm_client import FakeReaderAgent
+
+        class RecordingReader(FakeReaderAgent):
+            def __init__(self):
+                super().__init__()
+                self.calls = 0
+
+            def derive(self, **kwargs):
+                self.calls += 1
+                return super().derive(**kwargs)
+
+        node_id = str(uuid.uuid4())
+        md_path = Path(store["vault"]) / "non-ascii-short.md"
+        md_path.write_text("à" * 60, encoding="utf-8")
+        assert len(md_path.read_text(encoding="utf-8")) == 60
+        assert md_path.stat().st_size > 100
+
+        con = sqlite3.connect(store["db"])
+        st = _Store(con)
+        st.create_node(
+            node_id=node_id, kind="raw_source", depth=0,
+            content_path=str(md_path), created_at=datetime.now(timezone.utc).isoformat(),
+        )
+        st.attach_source(
+            node_id=node_id, canonical_key="https://example.com/non-ascii-short",
+            source_url="https://example.com/non-ascii-short", title="Short",
+            fetched_at=None,
+        )
+        con.commit()
+        con.close()
+
+        agent = RecordingReader()
+        with _Store.open(store["db"]) as s:
+            from memex.services.derive import DeriverService
+
+            svc = DeriverService(s, Path(store["vault"]), agent)
+            result = svc.derive(node_id)
+
+        assert result.status == "no_content"
+        assert agent.calls == 0
+
+        con = sqlite3.connect(store["db"])
+        try:
+            summary_count = con.execute(
+                "SELECT COUNT(*) FROM node WHERE kind = 'summary'"
+            ).fetchone()[0]
+        finally:
+            con.close()
+        assert summary_count == 0
+
     def test_derive_short_l0_does_not_block_real_derive(self, store):
         """A real-content L0 next to a short one derives unchanged."""
         short = _seed_raw_source_short(store, "short.md", "https://example.com/short")
