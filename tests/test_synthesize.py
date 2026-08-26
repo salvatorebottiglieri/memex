@@ -216,75 +216,173 @@ class TestSynthesize:
         assert row[0] == 3, f"Expected depth 3, got {row[0]}"
 
 
-class TestSynthesizeQualityGate:
-    """Integration tests for the adversarial validation gate in _do_synthesize.
+class TestSynthesizeValidationFamily:
+    """Integration tests for the always-on V1/V2 family + D6 in synthesize().
 
-    Validator is injected via MEMEX_VALIDATOR env var.
+    The family runs WITHOUT MEMEX_VALIDATOR; MEMEX_VALIDATION=off disables
+    only the LLM criteria (D1–D6 never opt out). quality_failed is replaced
+    by status="synthesized" + trust_state=draft + check_failures.
     """
 
-    FAKE_VALIDATOR_FAILS = "tests.fake_validator_fails:FakeValidatorFails"
-    FAKE_VALIDATOR_WARNS = "tests.fake_validator_warns:FakeValidatorWarns"
+    FAKE_JUDGE = "tests.fake_llm_client:FakeJudge"
 
-    def test_no_validator_proceeds(self, store):
-        """No MEMEX_VALIDATOR set -> synthesize proceeds normally (no regression)."""
+    def test_always_on_runs_without_memex_validator(self, store):
+        """No MEMEX_VALIDATOR, no MEMEX_VALIDATION: synthesize proceeds;
+        FakeAgent (no call_llm) as judge skips V1/V2 with a warning ->
+        auto-verified."""
         a = _ingest(store, "https://example.com/article-a")
         b = _ingest(store, "https://example.com/article-b")
         result = _synthesize(store, a["id"], b["id"])
         assert result.returncode == 0, result.stderr
         data = json.loads(result.stdout)
         assert data["status"] == "synthesized"
+        assert data["trust_state"] == "auto-verified"
+        assert data["check_failures"] == []
 
-    def test_fake_agent_validator_skips(self, store):
-        """MEMEX_VALIDATOR=FakeAgent (no call_llm) -> validation skipped, synthesize proceeds."""
+    def test_synthesis_link_to_non_parent_goes_draft(self, store):
+        """D6: a synthesis with a link to a non-parent -> draft with an
+        explicit 'Link validity' check failure."""
+        from memex.services.synthesize import SynthesizerService
+        from tests.fake_llm_client import FakeAgentDivergent
+
         a = _ingest(store, "https://example.com/article-a")
         b = _ingest(store, "https://example.com/article-b")
-        result = _run_memex(
-            ["synthesize", "--db", str(store["db"]), "--vault", str(store["vault"]), a["id"], b["id"]],
-            env={"MEMEX_AGENT": FAKE_AGENT, "MEMEX_VALIDATOR": FAKE_AGENT},
+        agent = FakeAgentDivergent(
+            prose=(
+                "# Combined\n\n"
+                "This synthesis cites [[ghost|Ghost]] for support.\n\n"
+                "> Synthesis: The combined inference holds.\n\n"
+                "Both source materials cover the subject thoroughly."
+            ),
+            statements=["The combined inference holds."],
         )
-        assert result.returncode == 0, result.stderr
-        data = json.loads(result.stdout)
-        assert data["status"] == "synthesized"
+        with Store.open(store["db"]) as s:
+            result = SynthesizerService(s, Path(store["vault"]), agent).synthesize(
+                [a["id"], b["id"]]
+            )
 
-    def test_failing_validator_rejects(self, store):
-        """Validator rejects -> quality_failed, no node or edge created."""
+        assert result["status"] == "synthesized"
+        assert result["trust_state"] == "draft"
+        assert any("Link validity" in f for f in result["check_failures"])
+
+    def test_synthesis_missing_link_goes_draft(self, store, monkeypatch):
+        """V1: a source-derived fact without a link in a synthesis ->
+        UNSUPPORTED (missing declaration) -> draft."""
+        from memex.services.synthesize import SynthesizerService
+        from tests.fake_llm_client import FakeAgentDivergent
+
+        monkeypatch.setenv("MEMEX_JUDGE", self.FAKE_JUDGE)
         a = _ingest(store, "https://example.com/article-a")
         b = _ingest(store, "https://example.com/article-b")
-        result = _run_memex(
-            ["synthesize", "--db", str(store["db"]), "--vault", str(store["vault"]), a["id"], b["id"]],
-            env={"MEMEX_AGENT": FAKE_AGENT, "MEMEX_VALIDATOR": self.FAKE_VALIDATOR_FAILS},
+        agent = FakeAgentDivergent(
+            prose=(
+                "# Combined\n\n"
+                "This synthesis states a source-derived fact without any link.\n\n"
+                "> Synthesis: The combined inference holds.\n\n"
+                "The topic is covered in both sources."
+            ),
+            statements=["The combined inference holds."],
         )
-        assert result.returncode == 0, result.stderr
-        data = json.loads(result.stdout)
-        assert data["status"] == "quality_failed"
-        assert "Synthesis does not meaningfully re-elaborate" in data["reason"]
-        assert a["id"] in data["parent_ids"]
-        assert b["id"] in data["parent_ids"]
-        # Verify no synthesis node was created
-        conn = sqlite3.connect(store["db"])
-        try:
-            count = conn.execute(
-                "SELECT COUNT(*) FROM node WHERE kind = 'summary' AND tier = 'synthesis'"
-            ).fetchone()[0]
-            assert count == 0, f"Expected 0 synthesis nodes, got {count}"
-        finally:
-            conn.close()
+        with Store.open(store["db"]) as s:
+            result = SynthesizerService(s, Path(store["vault"]), agent).synthesize(
+                [a["id"], b["id"]]
+            )
 
-    def test_warning_validator_proceeds_with_warning(self, store):
-        """Validator warns -> synthesize proceeds but warning on stderr."""
+        assert result["status"] == "synthesized"
+        assert result["trust_state"] == "draft"
+        assert any(
+            f.startswith("V1:") and "Unsupported claim" in f
+            for f in result["check_failures"]
+        )
+
+    def test_synthesis_linked_to_non_supporting_parent_goes_draft(
+        self, store, monkeypatch
+    ):
+        """V1: a claim linked to a real parent that does not support it ->
+        draft (the link alone does not exempt the claim). D6 passes: the link
+        target IS a parent."""
+        from memex.services.synthesize import SynthesizerService
+        from tests.fake_llm_client import FakeAgentDivergent
+
+        monkeypatch.setenv("MEMEX_JUDGE", self.FAKE_JUDGE)
         a = _ingest(store, "https://example.com/article-a")
         b = _ingest(store, "https://example.com/article-b")
-        result = _run_memex(
-            ["synthesize", "--db", str(store["db"]), "--vault", str(store["vault"]), a["id"], b["id"]],
-            env={"MEMEX_AGENT": FAKE_AGENT, "MEMEX_VALIDATOR": self.FAKE_VALIDATOR_WARNS},
+        agent = FakeAgentDivergent(
+            prose=(
+                "# Combined\n\n"
+                "This synthesis states the SENTINEL-UNSUPPORTED figure from "
+                "[[article-a|A]].\n\n"
+                "> Synthesis: The combined inference holds.\n\n"
+                "Both source materials cover the subject thoroughly."
+            ),
+            statements=["The combined inference holds."],
         )
-        assert result.returncode == 0, result.stderr
-        data = json.loads(result.stdout)
-        assert data["status"] == "synthesized"
-        # Warning should be on stderr
-        warning = json.loads(result.stderr.strip())
-        assert "validator_warning" in warning
-        assert "Validator LLM call failed" in warning["validator_warning"]
+        with Store.open(store["db"]) as s:
+            result = SynthesizerService(s, Path(store["vault"]), agent).synthesize(
+                [a["id"], b["id"]]
+            )
+
+        assert result["status"] == "synthesized"
+        assert result["trust_state"] == "draft"
+        assert any("SENTINEL-UNSUPPORTED" in f for f in result["check_failures"])
+        # The link target is a real parent, so D6 itself did not fail.
+        assert not any("Link validity" in f for f in result["check_failures"])
+
+    def test_synthesis_all_pass_auto_verified(self, store, monkeypatch):
+        """V1/V2 + D1–D6 all pass (every claim linked, no sentinels) ->
+        auto-verified with no failures."""
+        from memex.services.synthesize import SynthesizerService
+        from tests.fake_llm_client import FakeAgentDivergent
+
+        monkeypatch.setenv("MEMEX_JUDGE", self.FAKE_JUDGE)
+        a = _ingest(store, "https://example.com/article-a")
+        b = _ingest(store, "https://example.com/article-b")
+        agent = FakeAgentDivergent(
+            prose=(
+                "# Combined\n\n"
+                "This synthesis aggregates the topic across both sources "
+                "[[article-a|A]] and [[article-b|B]].\n\n"
+                "> Synthesis: The combined inference holds.\n\n"
+                "The shared basis is documented in [[article-a|A]]."
+            ),
+            statements=["The combined inference holds."],
+        )
+        with Store.open(store["db"]) as s:
+            result = SynthesizerService(s, Path(store["vault"]), agent).synthesize(
+                [a["id"], b["id"]]
+            )
+
+        assert result["status"] == "synthesized"
+        assert result["trust_state"] == "auto-verified"
+        assert result["check_failures"] == []
+
+    def test_memex_validation_off_skips_llm_criteria(self, store, monkeypatch):
+        """MEMEX_VALIDATION=off disables V1/V2; D1–D6 still run -> a
+        sentinel-laden, link-free synthesis still auto-verifies."""
+        from memex.services.synthesize import SynthesizerService
+        from tests.fake_llm_client import FakeAgentDivergent
+
+        monkeypatch.setenv("MEMEX_JUDGE", self.FAKE_JUDGE)
+        monkeypatch.setenv("MEMEX_VALIDATION", "off")
+        a = _ingest(store, "https://example.com/article-a")
+        b = _ingest(store, "https://example.com/article-b")
+        agent = FakeAgentDivergent(
+            prose=(
+                "# Combined\n\n"
+                "This synthesis states the SENTINEL-UNSUPPORTED figure without links.\n\n"
+                "> Synthesis: The combined inference holds.\n\n"
+                "Both source materials cover the subject thoroughly."
+            ),
+            statements=["The combined inference holds."],
+        )
+        with Store.open(store["db"]) as s:
+            result = SynthesizerService(s, Path(store["vault"]), agent).synthesize(
+                [a["id"], b["id"]]
+            )
+
+        assert result["status"] == "synthesized"
+        assert result["trust_state"] == "auto-verified"
+        assert result["check_failures"] == []
 
 
 class TestSynthesizeCanonicalizeMarkers:

@@ -1,23 +1,36 @@
 """SynthesizerService — orchestration for synthesis operations.
 
 Encapsulates: parent validation, content loading, idempotency checks,
-agent synthesis, adversarial validation, file writing, node/edge
-creation, confidence assignment, checks, and trust state updates.
+agent synthesis, file writing, node/edge creation, confidence assignment,
+deterministic checks (D1–D6), post-creation LLM validations (V1–V2), and
+trust state updates.
 """
 
 from __future__ import annotations
 
-import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from memex.agent import Agent, load_agent
+from memex.agent import Agent
 from memex.rules import canonicalize_synthesis_markers
 from memex.schemas import DocumentRef, coerce_derivation
 from memex.store import Store, min_confidence
 from memex.utils.retry import call_with_retry
-from memex.validators.validate import validate_derivation
+from memex.validators.validate import (
+    merge_gate_failures,
+    run_validations,
+    validation_environment,
+)
+
+
+def _first_h1(content: str) -> str | None:
+    """First ``# Heading`` line of *content*, or None."""
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("# "):
+            return stripped[2:].strip()
+    return None
 
 
 class SynthesizerService:
@@ -30,11 +43,9 @@ class SynthesizerService:
         self._store = store
         self._vault_path = vault_path
         self._agent = agent
-        self._validator: Agent | None = None
-
-        validator_path = os.environ.get("MEMEX_VALIDATOR")
-        if validator_path:
-            self._validator = load_agent(validator_path)
+        # Validation judge + enabled flag: shared with derive (single source
+        # of truth in validators.validate.validation_environment).
+        self._judge, self._validations_enabled = validation_environment(agent)
 
     def synthesize(
         self, parent_ids: list[str]
@@ -42,9 +53,10 @@ class SynthesizerService:
         """Synthesize across *parent_ids*.
 
         Validates all parents exist, checks idempotency by parent set,
-        runs agent synthesis, validates, writes markdown, creates the
-        synthesis node and provenance edges, sets confidence, runs
-        content checks, and updates trust state.
+        runs agent synthesis, writes markdown, creates the synthesis node
+        and provenance edges, sets confidence, runs content checks
+        (D1–D6) and the post-creation LLM validations (V1–V2), and
+        updates trust state.
 
         Returns a result dict (never raises — agent failures are captured
         in the result).
@@ -62,6 +74,7 @@ class SynthesizerService:
         max_depth = 0
         contents: list[str] = []
         references: list[DocumentRef] = []
+        source_lines: list[str] = []
         for pid in parent_ids:
             parent = self._store.get_node(pid)
             if parent is None:
@@ -72,10 +85,10 @@ class SynthesizerService:
                 }
             max_depth = max(max_depth, parent["depth"])
             content_path = parent.get("content_path") or ""
+            content_text = ""
             if content_path and Path(content_path).exists():
-                contents.append(
-                    Path(content_path).read_text(encoding="utf-8")
-                )
+                content_text = Path(content_path).read_text(encoding="utf-8")
+                contents.append(content_text)
                 if getattr(self._agent, "can_read_files", False):
                     references.append(
                         DocumentRef(
@@ -88,8 +101,22 @@ class SynthesizerService:
                     )
             else:
                 contents.append("")
+            # The link targets the synthesis agent must use: filename stem +
+            # display alias. Inline (non-reader) agents get this block
+            # prepended so they can emit [[filename|alias]] links; reader
+            # agents already see the paths (stem = link filename).
+            filename = Path(content_path).stem if content_path else parent["id"]
+            alias = parent.get("title") or _first_h1(content_text) or parent["id"]
+            source_lines.append(f"- [[{filename}|{alias}]]")
 
-        combined_content = "\n\n---\n\n".join(contents)
+        # Syntheses link every source-derived fact to its parent: give inline
+        # agents the exact link targets up front.
+        combined_content = (
+            "# Sources\n"
+            + "\n".join(source_lines)
+            + "\n\n---\n\n"
+            + "\n\n---\n\n".join(contents)
+        )
 
         # --- Agent call ---
         def _agent_derive():
@@ -111,27 +138,6 @@ class SynthesizerService:
             }
 
         deriv_id = str(uuid.uuid4())
-
-        # --- Adversarial validation gate ---
-        if self._validator is not None:
-            passes, warning = validate_derivation(
-                self._validator, combined_content, deriv,
-                reference=references or None,
-            )
-            if warning:
-                import json as _json
-                import sys as _sys
-
-                _sys.stderr.write(
-                    _json.dumps({"validator_warning": warning}) + "\n"
-                )
-
-            if not passes:
-                return {
-                    "status": "quality_failed",
-                    "reason": "Synthesis does not meaningfully re-elaborate the source material.",
-                    "parent_ids": list(parent_ids),
-                }
 
         # --- Write markdown file ---
         self._vault_path.mkdir(parents=True, exist_ok=True)
@@ -183,15 +189,26 @@ class SynthesizerService:
             (synth_conf, deriv_id),
         )
 
-        # --- Content checks ---
+        # --- Content checks (D1–D6) ---
         from memex.checks import run_checks
 
         check_result = run_checks(self._store._con, deriv_id, md_path)
-        trust_state = "auto-verified" if check_result.passed else "draft"
+
+        # --- Adversarial validations (V1–V2, post-creation, always-on) ---
+        validation_result = None
+        if self._validations_enabled:
+            validation_result = run_validations(
+                self._judge, self._store._con, deriv_id, md_path
+            )
+
+        # One gate: D + V failures accumulate; any failure → draft.
+        failures, trust_state = merge_gate_failures(
+            check_result, validation_result
+        )
         self._store.update_trust_state(
             node_id=deriv_id,
             trust_state=trust_state,
-            check_failures=check_result.failures,
+            check_failures=failures,
         )
 
         return {
@@ -200,7 +217,7 @@ class SynthesizerService:
             "parent_ids": list(parent_ids),
             "trust_state": trust_state,
             "content_path": str(md_path),
-            "check_failures": check_result.failures,
+            "check_failures": failures,
         }
 
     def _human_path(self, name: str, suffix: str = ".md") -> Path:

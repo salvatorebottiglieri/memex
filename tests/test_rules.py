@@ -4,6 +4,7 @@ TDD: red-green-refactor.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 import uuid
 from pathlib import Path
@@ -381,6 +382,61 @@ class TestCheckRuleD3:
 
         assert failures == []
 
+    # F2: the column is parsed by the shared parse_synthesis_statements
+    # helper (identical semantics to the validation DAG's _decode_statements)
+    # — a JSON array drives the check, garbage/non-list columns degrade to
+    # the file-marker path instead of crashing.
+
+    def test_column_array_matching_file_markers_passes(self, tmp_path):
+        con, deriv_id, content_path = _setup_check_db(tmp_path)
+        con.execute(
+            "UPDATE node SET synthesis_statements = ? WHERE id = ?",
+            (
+                json.dumps(
+                    ["The author implies a broader pattern beyond what is stated directly."]
+                ),
+                deriv_id,
+            ),
+        )
+        con.commit()
+
+        rule = _rule(CHECK_RULES, "D3")
+        content = content_path.read_text(encoding="utf-8")
+        failures = rule.condition(con, deriv_id, content_path, content)
+        con.close()
+
+        assert failures == []
+
+    def test_garbage_column_falls_back_to_file_markers(self, tmp_path):
+        con, deriv_id, content_path = _setup_check_db(tmp_path)
+        con.execute(
+            "UPDATE node SET synthesis_statements = ? WHERE id = ?",
+            ("not json", deriv_id),
+        )
+        con.commit()
+
+        rule = _rule(CHECK_RULES, "D3")
+        content = content_path.read_text(encoding="utf-8")
+        failures = rule.condition(con, deriv_id, content_path, content)
+        con.close()
+
+        assert failures == []
+
+    def test_non_list_column_falls_back_to_file_markers(self, tmp_path):
+        con, deriv_id, content_path = _setup_check_db(tmp_path)
+        con.execute(
+            "UPDATE node SET synthesis_statements = ? WHERE id = ?",
+            ('{"a": 1}', deriv_id),
+        )
+        con.commit()
+
+        rule = _rule(CHECK_RULES, "D3")
+        content = content_path.read_text(encoding="utf-8")
+        failures = rule.condition(con, deriv_id, content_path, content)
+        con.close()
+
+        assert failures == []
+
 
 class TestCheckRuleD4:
     """D4: Size bounds."""
@@ -691,6 +747,135 @@ class TestRunChecksViaRules:
 
         assert result.passed is False
         assert len(result.failures) >= 2
+
+
+# ---------------------------------------------------------------------------
+# Link surface stripping (fenced + indented code) and JSON verdict parsing
+# ---------------------------------------------------------------------------
+
+class TestStripFencedBlocks:
+    def test_indented_code_runs_are_dropped(self):
+        """F3: 4-space-indented code blocks are not link surface — a
+        [[ghost|...]] inside an indented code example is dropped, while
+        links in real prose around it survive."""
+        from memex.rules import _strip_fenced_blocks
+
+        text = (
+            "Prose with a real [[link|L]].\n"
+            '    link = "[[ghost|G]]"\n'
+            "    more code with [[ghost2|G2]]\n"
+            "\n"
+            "Back to prose [[real2|R]].\n"
+        )
+        stripped = _strip_fenced_blocks(text)
+        assert "[[ghost|G]]" not in stripped
+        assert "[[ghost2|G2]]" not in stripped
+        assert "[[link|L]]" in stripped
+        assert "[[real2|R]]" in stripped
+
+    def test_indented_run_with_blank_line_stays_dropped(self):
+        """A blank line inside an indented code run keeps the run open
+        (Markdown indented code blocks may contain blank lines)."""
+        from memex.rules import _strip_fenced_blocks
+
+        text = (
+            '    link = "[[ghost|G]]"\n'
+            "\n"
+            "    more code\n"
+            "Prose resumes here [[real|R]].\n"
+        )
+        stripped = _strip_fenced_blocks(text)
+        assert "[[ghost|G]]" not in stripped
+        assert "more code" not in stripped
+        assert "Prose resumes here [[real|R]]." in stripped
+
+    def test_fenced_blocks_still_dropped(self):
+        """F3 sanity: the existing fenced-region stripping is unchanged."""
+        from memex.rules import _strip_fenced_blocks
+
+        text = (
+            "Prose [[real|R]].\n"
+            "```python\n"
+            'link = "[[ghost|G]]"\n'
+            "```\n"
+            "Tail prose.\n"
+        )
+        stripped = _strip_fenced_blocks(text)
+        assert "[[ghost|G]]" not in stripped
+        assert "[[real|R]]" in stripped
+        assert "Tail prose." in stripped
+
+    def test_list_line_inside_open_indented_run_is_code(self):
+        """F4: a list-formatted line inside an OPEN indented code run is
+        code, not a nested list item — its [[ghost]] must not leak into the
+        link surface (previously the nested-list exemption dropped it into
+        prose, spuriously drafting legitimate content), and the run stays
+        open for the lines after it."""
+        from memex.rules import _strip_fenced_blocks
+
+        text = (
+            '    code = "..."\n'
+            "    - option: [[ghost|G1]]\n"
+            "    more = 2\n"
+            "Prose resumes [[real|R]].\n"
+        )
+        stripped = _strip_fenced_blocks(text)
+        assert "[[ghost|G1]]" not in stripped
+        assert "more = 2" not in stripped
+        assert "[[real|R]]" in stripped
+
+    def test_nested_list_item_still_link_surface(self):
+        """F4/F6: a TRUE nested list item ('- Level one' then
+        '    - Nested') is list continuation, not indented code — its
+        [[ghost]] stays link surface (pass-5 F6 behavior preserved)."""
+        from memex.rules import _strip_fenced_blocks
+
+        text = (
+            "- Level one\n"
+            "    - Nested cites [[ghost|G]]\n"
+            "Tail prose [[real|R]].\n"
+        )
+        stripped = _strip_fenced_blocks(text)
+        assert "[[ghost|G]]" in stripped
+        assert "[[real|R]]" in stripped
+
+    def test_tab_indented_code_is_dropped(self):
+        """F5: tab-indented lines are Markdown indented code (expanded-tab
+        semantics) — a [[ghost]] on a tab-indented line is code, not link
+        surface, and stays dropped inside an open run."""
+        from memex.rules import _strip_fenced_blocks
+
+        text = (
+            '\tlink = "[[ghost|G]]"\n'
+            "\tmore code [[ghost2|G2]]\n"
+            "\n"
+            "\tstill code [[ghost3|G3]]\n"
+            "Prose resumes [[real|R]].\n"
+        )
+        stripped = _strip_fenced_blocks(text)
+        assert "[[ghost|G]]" not in stripped
+        assert "[[ghost2|G2]]" not in stripped
+        assert "[[ghost3|G3]]" not in stripped
+        assert "[[real|R]]" in stripped
+
+
+class TestParseJsonVerdictReusesFenceRegex:
+    def test_uses_shared_fence_regex(self):
+        """F4: _parse_json_verdict reuses parsing._FENCE_RE instead of
+        re-declaring the fence pattern — one fence grammar for the whole
+        codebase."""
+        import memex.rules as rules_mod
+        from memex.utils.parsing import _FENCE_RE
+
+        assert rules_mod._parse_json_verdict.__globals__["_FENCE_RE"] is _FENCE_RE
+
+    def test_parses_fenced_json(self):
+        from memex.rules import _parse_json_verdict
+
+        assert _parse_json_verdict("```json\n{\"a\": 1}\n```") == {"a": 1}
+        assert _parse_json_verdict("```\n{\"a\": 1}\n```") == {"a": 1}
+        assert _parse_json_verdict('{"a": 1}') == {"a": 1}
+        assert _parse_json_verdict("not json") is None
 
 
 # ---------------------------------------------------------------------------

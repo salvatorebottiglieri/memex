@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from memex.utils.parsing import _FENCE_RE, parse_synthesis_statements
+
 
 # ── Size bounds ────────────────────────────────────────────────────
 
@@ -280,14 +282,12 @@ def _d3_synthesis_check(
     ss_row = con.execute(
         "SELECT synthesis_statements FROM node WHERE id = ?", (node_id,)
     ).fetchone()
-    db_statements: list[str] = []
-    if ss_row is not None and ss_row[0]:
-        try:
-            parsed = json.loads(ss_row[0])
-            if isinstance(parsed, list):
-                db_statements = [str(s) for s in parsed]
-        except (json.JSONDecodeError, TypeError):
-            pass
+    # Same parse the validation DAG applies to the column
+    # (``parse_synthesis_statements``): JSON array of strings, garbage or a
+    # non-list payload means no statements, never a crash.
+    db_statements = (
+        parse_synthesis_statements(ss_row[0]) if ss_row is not None else []
+    )
 
     file_statements = _SYNTHESIS_MARKER_RE.findall(content)
 
@@ -396,6 +396,135 @@ def _d5_tier_depth(
     return []
 
 
+# ── Inline wikilinks (D6 + V1 share the grammar) ────────────────────
+
+_WIKILINK_RE = re.compile(r"\[\[([^\]|]+?)(?:\|([^\]]+?))?\]\]")
+
+
+def _strip_frontmatter(text: str) -> str:
+    """Return *text* without a leading YAML frontmatter block."""
+    if text.startswith("---"):
+        parts = text.split("---", 2)
+        if len(parts) >= 3:
+            return parts[2]
+    return text
+
+
+# Markdown list-item marker: a bullet (-, *, +) or a numbered marker (1.
+# 1)) followed by whitespace, allowing leading indent. Shared by the V1
+# prose filter and the fenced/indented-code stripper — 4-space-indented
+# NESTED list items are list continuation, not indented code.
+_LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
+
+
+def _strip_fenced_blocks(text: str) -> str:
+    """Return *text* with fenced and indented code regions removed.
+
+    Shared by D6 and the V1 slicer so both parse the same link surface: a
+    ``[[...]]`` inside a code example is code, not a wikilink declaration.
+    A line whose stripped form starts with a fence (````` or ``~~~``)
+    toggles the fence state; runs of indented lines (4+ literal spaces or a
+    leading tab — Markdown's expanded-tab indented code blocks) are dropped
+    too — blank lines inside the run keep it open, the first non-blank,
+    non-indented line ends it. An indented line whose stripped form is a
+    list item (``-``/``*``/``+`` or ``N.``/``N)``) is a NESTED list item,
+    not indented code, so it is kept — but only OUTSIDE an open indented
+    run: a list-formatted line inside a genuine code block is code, not a
+    nested item, and stays dropped (the same list handling the V1 prose
+    filter applies). Note that a TOP-LEVEL ``    - item`` line (a
+    list-formatted line with no enclosing list and no open run) is kept in
+    the surface — CommonMark would parse it as indented code, an accepted
+    divergence, since a true nested list item only ever follows a
+    non-indented list line. An unclosed fence drops the remainder — the
+    safe direction: trailing code must never leak into the parsed surface.
+    """
+    lines: list[str] = []
+    in_fence = False
+    in_indented = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(("```", "~~~")):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        if line.startswith(("    ", "\t")):
+            if in_indented or not _LIST_ITEM_RE.match(stripped):
+                # Indented code: inside an open run every indented line —
+                # list-formatted or not — is code and keeps the run open;
+                # outside a run, a non-list indented line opens the run.
+                in_indented = True
+                continue
+            # Outside a run, a list-formatted indented line is a nested
+            # list item (list continuation), not code — keep it.
+        if in_indented:
+            if not stripped:
+                continue  # blank line inside an indented code run
+            in_indented = False
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _d6_link_validity_check(
+    con: sqlite3.Connection, node_id: str, content_path: Path, content: str
+) -> list[str]:
+    """D6: Inline wikilinks in syntheses MUST resolve to provenance parents.
+
+    Syntheses only: notes and extracted L0s carry no link contract (a note
+    has a single parent and needs no declaration). Every ``[[filename|alias]]``
+    in the body must name a node in ``derived_from`` whose content_path
+    basename matches the link filename — the same resolution the renderer
+    uses when it emits provenance wikilinks (``Path.stem``). Dangling or
+    wrong-target links fail; a link-free synthesis passes (V1 then judges
+    whether source facts were left undeclared). Frontmatter (rendered
+    provenance wikilinks) and code blocks — fenced and 4-space-indented
+    (code examples are not link surface — same stripping the V1 slicer
+    applies) — are excluded from the parse.
+    """
+    if _node_kind(con, node_id) == "extracted":
+        return []
+    row = con.execute("SELECT tier FROM node WHERE id = ?", (node_id,)).fetchone()
+    if row is None or row[0] != "synthesis":
+        return []  # notes and legacy L0s are exempt from the link contract
+
+    links = _WIKILINK_RE.findall(
+        _strip_fenced_blocks(_strip_frontmatter(content))
+    )
+    if not links:
+        return []
+
+    parent_rows = con.execute(
+        """
+        SELECT to_node FROM edge
+        WHERE from_node = ? AND type = 'provenance' AND relation = 'derived_from'
+        """,
+        (node_id,),
+    ).fetchall()
+    valid: set[str] = set()
+    for (pid,) in parent_rows:
+        prow = con.execute(
+            "SELECT content_path FROM node WHERE id = ?", (pid,)
+        ).fetchone()
+        if prow is not None and prow[0]:
+            valid.add(Path(prow[0]).stem)
+        else:
+            # A parent without a content file has no stem to link to; the
+            # synthesize link-target fallback emits its node id instead
+            # (``Path(content_path).stem if content_path else parent["id"]``),
+            # so D6 must accept that id as a valid name too.
+            valid.add(pid)
+
+    failures: list[str] = []
+    for filename, alias in links:
+        if filename not in valid:
+            label = f"[[{filename}|{alias}]]" if alias else f"[[{filename}]]"
+            failures.append(
+                f"{SEVERITY_FATAL} Link validity check failed: {label} does not "
+                f"resolve to a provenance parent of {node_id}"
+            )
+    return failures
+
+
 CHECK_RULES: list[Rule] = [
     Rule(
         id="D1",
@@ -431,6 +560,402 @@ CHECK_RULES: list[Rule] = [
         description="Tier/depth consistency: L0=0, notes=parent depth+1, synthesis>=2",
         condition=_d5_tier_depth,
         consequence="Tier/depth check",
+    ),
+    Rule(
+        id="D6",
+        category="check",
+        description="Inline wikilinks in syntheses resolve to provenance parents",
+        condition=_d6_link_validity_check,
+        consequence="Link validity check",
+    ),
+]
+
+# ── Adversarial validation rules (V1–V2, LLM-judged) ────────────────
+#
+# A family of small, orthogonal criteria symmetric to the deterministic
+# checks. They run POST-creation (the node and its provenance edges exist),
+# so evidence is the node's own content plus its parents' contents (read
+# from the parents' content_path files). Every verdict is structured and
+# cites the claim plus a supporting/refuting excerpt. A judge call or
+# verdict-parse failure degrades to pass-with-warning — it never crashes
+# the derive.
+
+# Severity tags carried by every gate failure message. Fatal (D6, D7,
+# V1-UNSUPPORTED): one is enough → draft. Quality (V2): draft annotated
+# severity=quality, human-promotable. The tags are an informational
+# annotation guiding human review: both severities gate to draft (there is
+# no separate quality_failed state) and draft nodes are human-promotable via
+# the existing review flow. auto-verified ⇒ every unadorned claim is
+# grounded.
+SEVERITY_FATAL = "[severity=fatal]"
+SEVERITY_QUALITY = "[severity=quality]"
+
+
+@dataclass(frozen=True)
+class ValidationRule:
+    """A single LLM-judged validation criterion.
+
+    - ``slicer(node_content, node, parents) -> list[str]``: slice the node's
+      evidence into rendered prompt blocks. ``node`` is a dict with ``tier``,
+      ``kind`` and ``synthesis_statements``; ``parents`` is a list of dicts
+      with ``node_id``, ``filename``, ``content_path``, ``content`` (None
+      when unreadable) and ``title``. Return [] to skip the rule (nothing
+      to judge).
+
+    - ``prompt_template``: str with ``{context}``, ``{slices}``, ``{body}``,
+      ``{parents}`` and (V2 only) ``{v1_verdicts}`` placeholders (unused
+      ones are left untouched).
+
+    - ``verdict_parser(raw, payload) -> (failures, warning, verdicts)``:
+      parse the judge's structured verdict (host-tool payload wins over
+      JSON-in-text); return failure messages (empty = pass), an optional
+      warning string when the verdict was unusable, and the normalized
+      structured verdicts (consumed by downstream DAG members, e.g. D7
+      verifies V1's evidence quotes).
+
+    DAG placement fields (``run_validations`` executes waves in ascending
+    ``order``; nothing else in the registry is hardcoded):
+
+    - ``order``: ascending execution order.
+    - ``depends_on``: rule ids whose waves must have run first.
+    - ``skip_when_fatal``: skip this wave when a ``depends_on`` wave
+      produced a ``[severity=fatal]`` failure (V2 is skipped when V1 is
+      fatal — the node is draft already, the judge call is saved).
+    - ``expects_full_verdicts``: one verdict per presented slice; a
+      shortfall (fewer verdicts than slices, including an empty set) emits
+      a warning so an incomplete grounding pass is never silently clean.
+    """
+
+    id: str
+    description: str
+    slicer: Callable[..., list[str]]
+    prompt_template: str
+    verdict_parser: Callable[..., tuple[list[str], str | None, list[dict[str, Any]]]]
+    order: int = 0
+    depends_on: tuple[str, ...] = ()
+    skip_when_fatal: bool = False
+    expects_full_verdicts: bool = False
+
+
+def _parse_json_verdict(raw: str) -> dict[str, Any] | None:
+    """Best-effort parse of a JSON object, tolerating markdown code fences."""
+    stripped = _FENCE_RE.sub("", (raw or "").strip())
+    try:
+        data = json.loads(stripped)
+        return data if isinstance(data, dict) else None
+    except json.JSONDecodeError:
+        return None
+
+
+# ── V1 — evidence support ────────────────────────────────────────────
+
+# Claims: sentence-split unadorned body prose. Sentence boundaries are
+# masked out of decimals ("3.14"), common abbreviations ("Dr.", "e.g.",
+# "U.S."), initials ("J. R. R.") and ellipses before splitting.
+_DOT = "\u0000"
+_ELLIPSIS_RE = re.compile(r"\.\.\.")
+_DECIMAL_RE = re.compile(r"(\d)\.(\d)")
+_ABBR_TOKEN_RE = re.compile(
+    r"\b((?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|vs|etc|approx|dept|fig|inc|ltd|co|"
+    r"vol|pp|ed|eds|trans|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec|"
+    r"e\.g|i\.e|U\.S|U\.K|a\.m|p\.m))\.(?=\s|$)",
+    re.I,
+)
+_INITIALS_RE = re.compile(r"\b([A-Z])\.(?=\s+[A-Z]\.)")
+_INITIAL_NAME_RE = re.compile(r"\b([A-Z])\.(?=\s+[A-Z][a-z]+)")
+_SENT_SPLIT_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z\"'(\[])")
+
+
+def _mask_sentence_endings(text: str) -> str:
+    masked = _ELLIPSIS_RE.sub(_DOT * 3, text)
+    masked = _DECIMAL_RE.sub(rf"\1{_DOT}\2", masked)
+    masked = _ABBR_TOKEN_RE.sub(rf"\1{_DOT}", masked)
+    masked = _INITIALS_RE.sub(rf"\1{_DOT}", masked)
+    masked = _INITIAL_NAME_RE.sub(rf"\1{_DOT}", masked)
+    return masked
+
+
+def _split_claims(prose: str) -> list[str]:
+    """Split *prose* into sentence-level claims (abbreviation/decimals safe)."""
+    masked = _mask_sentence_endings(prose)
+    parts = _SENT_SPLIT_RE.split(masked)
+    claims = [p.replace(_DOT, ".").strip() for p in parts]
+    return [c for c in claims if c]
+
+
+# Markdown table separator row without a leading pipe (e.g. ``---|---``);
+# rows with a leading pipe are caught by the startswith("|") check.
+_TABLE_SEP_RE = re.compile(r"^\s*:?-{2,}(?:\s*\|[\s:|-]*)*$")
+
+
+def _unadorned_prose(content: str) -> str:
+    """Body prose minus frontmatter, headings, ``> Synthesis:`` markers,
+    fenced code blocks, tables, and list/blockquote lines.
+
+    Only unadorned prose sentences become V1 claims: a code example or a
+    table cell is not a claim the judge can ground against parent content,
+    and bullets/blockquotes are presentation. Fenced and indented code
+    regions (4-space or tab-indented) are dropped entirely (an unclosed
+    fence drops the remainder — the safe direction: trailing code must not
+    leak into the claims).
+    """
+    text = _strip_fenced_blocks(_strip_frontmatter(content))
+    lines: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("#"):
+            continue
+        if _SYNTHESIS_MARKER_RE.match(stripped):
+            continue
+        if stripped.startswith((">", "|")) or _LIST_ITEM_RE.match(stripped):
+            continue
+        if _TABLE_SEP_RE.match(stripped):
+            continue
+        lines.append(stripped)
+    return " ".join(lines)
+
+
+def _v1_evidence_slicer(
+    content: str, node: dict[str, Any], parents: list[dict[str, Any]]
+) -> list[str]:
+    """Split the unadorned body prose into sentence-level claims."""
+    claims = _split_claims(_unadorned_prose(content))
+    if not claims:
+        return []
+    blocks: list[str] = []
+    for i, claim in enumerate(claims, start=1):
+        block = f'Claim {i}: "{claim}"'
+        links = _WIKILINK_RE.findall(claim)
+        if links:
+            resolved: list[str] = []
+            for filename, alias in links:
+                label = f"[[{filename}|{alias}]]" if alias else f"[[{filename}]]"
+                if any(p["filename"] == filename for p in parents):
+                    resolved.append(f"{label} -> parent {filename}")
+                else:
+                    resolved.append(f"{label} -> NOT a provenance parent")
+            block += "\n  links: " + "; ".join(resolved)
+        blocks.append(block)
+    return blocks
+
+
+_V1_PROMPT_TEMPLATE = """\
+You are a strict evidence auditor for a knowledge-graph system. A derivation
+node was just created from one or more source documents (its "parents"). Your
+job: judge every unadorned claim in the node's body against the parent content.
+
+{context}
+
+Judge each claim below and submit one verdict per claim:
+  - SUPPORTED: the relevant parent content states the claim, or directly
+    implies it. evidence_quote MUST be a verbatim quote from that parent
+    content (it is verified deterministically).
+  - COMMON_KNOWLEDGE: the claim is a generic, uncontroversial fact that needs
+    no source. Quantitative claims about specific entities are NEVER exempt
+    from evidence — never mark those COMMON_KNOWLEDGE.
+  - UNSUPPORTED: the claim is not supported by the relevant parent content.
+    You MUST cite the source examined and why the source does not contain it.
+
+Rules:
+- In a synthesis (node tier = synthesis), every fact taken from a source MUST
+  carry an inline link [[filename|alias]] naming the parent it comes from.
+  A source-derived fact WITHOUT such a link is UNSUPPORTED (missing
+  declaration).
+- A claim WITH a link is judged ONLY against the parent the link names — the
+  parent contents are listed in the Parent content section, keyed by
+  filename.
+- In a notes derivation, claims are judged against the single parent
+  regardless of any inline links they carry.
+
+Submit your verdicts by calling the submit_verdicts tool with a JSON payload:
+{"verdicts": [
+  {"claim": "<claim text>", "verdict": "SUPPORTED", "evidence_quote": "<verbatim quote from the cited source>"},
+  {"claim": "<claim text>", "verdict": "COMMON_KNOWLEDGE", "evidence_quote": ""},
+  {"claim": "<claim text>", "verdict": "UNSUPPORTED", "source_examined": "<parent filename examined>", "absence_explanation": "<why the source does not contain the claim>"}
+]}
+If the submit_verdicts tool is unavailable, return ONLY that JSON object —
+no commentary.
+
+{slices}
+
+{parents}
+"""
+
+
+def _v1_verdict_parser(
+    raw: str, payload: dict[str, Any] | None
+) -> tuple[list[str], str | None, list[dict[str, Any]]]:
+    """V1 verdicts: per-claim SUPPORTED / COMMON_KNOWLEDGE / UNSUPPORTED.
+
+    Returns (failures, warning, verdicts) — the normalized verdicts feed the
+    downstream DAG members (D7 quote verification, V2's grounding block).
+    """
+    data = payload if isinstance(payload, dict) else _parse_json_verdict(raw)
+    if not isinstance(data, dict) or not isinstance(data.get("verdicts"), list):
+        return [], "V1 response parse failed, validation skipped", []
+    failures: list[str] = []
+    verdicts: list[dict[str, Any]] = []
+    for v in data["verdicts"]:
+        if not isinstance(v, dict):
+            continue
+        claim = v.get("claim")
+        if not isinstance(claim, str) or not claim.strip():
+            continue
+        verdict = str(v.get("verdict", "")).upper()
+        if verdict not in ("SUPPORTED", "COMMON_KNOWLEDGE", "UNSUPPORTED"):
+            continue
+        normalized: dict[str, Any] = {"claim": claim.strip(), "verdict": verdict}
+        if verdict == "SUPPORTED":
+            quote = v.get("evidence_quote")
+            normalized["evidence_quote"] = quote if isinstance(quote, str) else ""
+        elif verdict == "UNSUPPORTED":
+            source = v.get("source_examined")
+            explanation = v.get("absence_explanation")
+            normalized["source_examined"] = (
+                source if isinstance(source, str) else ""
+            )
+            normalized["absence_explanation"] = (
+                explanation if isinstance(explanation, str) else ""
+            )
+            message = f"{SEVERITY_FATAL} Unsupported claim: {claim.strip()}"
+            if normalized["source_examined"]:
+                message += f" (source_examined: {normalized['source_examined']})"
+            if normalized["absence_explanation"]:
+                message += (
+                    f" (absence_explanation: {normalized['absence_explanation']})"
+                )
+            # Negative-verdict contract: an UNSUPPORTED verdict MUST cite the
+            # source examined and why the source lacks the claim. A judge
+            # omitting either field violates the contract — deterministic
+            # failure, symmetric to D7's SUPPORTED-without-quote treatment.
+            if not normalized["source_examined"] or not normalized[
+                "absence_explanation"
+            ]:
+                message += (
+                    " [negative-verdict contract violated: UNSUPPORTED must "
+                    "cite source_examined and absence_explanation]"
+                )
+            failures.append(message)
+        verdicts.append(normalized)
+    return failures, None, verdicts
+
+
+# ── V2 — re-elaboration quality ──────────────────────────────────────
+
+def _v2_evidence_slicer(
+    content: str, node: dict[str, Any], parents: list[dict[str, Any]]
+) -> list[str]:
+    """Synthesis statements (from the node column; file markers as fallback)."""
+    statements = node.get("synthesis_statements") or []
+    if statements:
+        stmts = [str(s) for s in statements if str(s).strip()]
+    else:
+        stmts = _SYNTHESIS_MARKER_RE.findall(content)
+    return [f'Statement {i}: "{s}"' for i, s in enumerate(stmts, start=1)]
+
+
+_V2_PROMPT_TEMPLATE = """\
+You are a strict re-elaboration auditor for a knowledge-graph system. A
+derivation node aggregates facts from its parents; its synthesis statements
+must be legitimate, specific inferences that go beyond the source material.
+
+{context}
+
+Evaluate the synthesis statements below and submit ONE verdict:
+  - passes = true: the statements are legitimate, specific inferences that
+    go beyond the source and follow from the body's facts.
+  - passes = false: a statement is boilerplate ("the article discusses",
+    "the author covers"), vacuous, or not a legitimate inference from the
+    body's facts.
+
+Note: factual grounding is judged by a separate evidence criterion (V1) —
+its per-claim verdicts are listed below. Do NOT re-verify whether the
+body's facts are true; judge only whether the statements are legitimate,
+specific re-elaborations of those facts as V1 saw them.
+
+Submit your verdict by calling the submit_verdicts tool with a JSON payload:
+{"passes": true, "reason": "<explanation>"}
+If the submit_verdicts tool is unavailable, return ONLY that JSON object —
+no commentary.
+
+Synthesis statements:
+{slices}
+
+Node body:
+{body}
+
+V1 verdicts (grounding — the body as V1 judged it):
+{v1_verdicts}
+
+{parents}
+"""
+
+
+def _v2_verdict_parser(
+    raw: str, payload: dict[str, Any] | None
+) -> tuple[list[str], str | None, list[dict[str, Any]]]:
+    """V2 verdict: a single {passes, reason}; quality-level severity.
+
+    ``passes`` is coerced bool-ish (mirroring V1's lenient verdict
+    normalization): 'true', '1', 'yes', 'on' — strings or numbers — all
+    count as passing, so a judge's JSON sloppiness never downgrades a good
+    node to draft.
+    """
+    data = payload if isinstance(payload, dict) else _parse_json_verdict(raw)
+    if not isinstance(data, dict) or "passes" not in data:
+        return [], "V2 response parse failed, validation skipped", []
+    passes_value = data.get("passes", "")
+    if isinstance(passes_value, bool):
+        passing = passes_value
+    elif isinstance(passes_value, (int, float)):
+        # JSON-decodable numbers: 1 / 1.0 -> pass, 0 / 0.0 -> fail.
+        passing = passes_value != 0
+    else:
+        passing = str(passes_value).strip().upper() in ("TRUE", "1", "YES", "ON")
+    if passing:
+        return [], None, []
+    reason = data.get("reason")
+    if isinstance(reason, str) and reason.strip():
+        return [
+            f"{SEVERITY_QUALITY} Re-elaboration quality failed: {reason.strip()}"
+        ], None, []
+    return [
+        f"{SEVERITY_QUALITY} Re-elaboration quality failed: synthesis statement "
+        "is boilerplate or unsupported"
+    ], None, []
+
+
+VALIDATION_RULES: list[ValidationRule] = [
+    ValidationRule(
+        id="V1",
+        description=(
+            "Evidence support: every unadorned claim is SUPPORTED / "
+            "COMMON_KNOWLEDGE / UNSUPPORTED against the parent content"
+        ),
+        slicer=_v1_evidence_slicer,
+        prompt_template=_V1_PROMPT_TEMPLATE,
+        verdict_parser=_v1_verdict_parser,
+        # DAG root: runs first, one verdict per claim, no dependencies.
+        order=1,
+        expects_full_verdicts=True,
+    ),
+    ValidationRule(
+        id="V2",
+        description=(
+            "Re-elaboration quality: synthesis statements go beyond the "
+            "source, are specific, and follow from the body's facts"
+        ),
+        slicer=_v2_evidence_slicer,
+        prompt_template=_V2_PROMPT_TEMPLATE,
+        verdict_parser=_v2_verdict_parser,
+        # Runs after V1 (and D7, which verifies V1's quotes inside V1's
+        # wave); skipped when V1 produced fatal failures — the node is
+        # draft already and the judge call is saved.
+        order=2,
+        depends_on=("V1",),
+        skip_when_fatal=True,
     ),
 ]
 
@@ -481,7 +1006,7 @@ def render_ontology() -> str:
         "| `contested_at` | ISO-8601 | null | 0–1 | When first contested |\n"
         "| `content_path` | path | 1 | Filesystem path to markdown file |\n"
         "| `synthesis_statements` | JSON array | null | 0–1 | Structured list of inferences |\n"
-        "| `check_failures` | JSON array | null | 0–1 | Deterministic check failures (if any) |\n"
+        "| `check_failures` | JSON array | null | 0–1 | Deterministic (D1–D6) + adversarial (V1–V2) gate failures (if any) |\n"
         "| `created_at` | ISO-8601 | 1 | Creation timestamp |\n"
         "\n"
         "### 1.2 Edge\n"
@@ -683,13 +1208,28 @@ def render_ontology() -> str:
         + sec7_intro
         + "\n"
         + "```\n"
-        + "Rule D6 \u2014 Auto-verified gate\n"
-        + "  A node passes from 'draft' to 'auto-verified' ONLY if all checks D1\u2013D5 pass.\n"
-        + "  Failures persist as JSON in node.check_failures.\n"
+        + "Rule D0 \u2014 Auto-verified gate\n"
+        + "  A node passes from 'draft' to 'auto-verified' ONLY if all checks D1\u2013D6 pass\n"
+        + "  AND the validation DAG passes: V1 (grounding) \u2192 D7 (quote\n"
+        + "  verification over V1's verdicts) \u2192 V2 (re-elaboration quality,\n"
+        + "  consuming V1's verdicts; skipped when V1 is fatal).\n"
+        + "  MEMEX_VALIDATION=off disables the DAG (deterministic D1\u2013D7 never opt\n"
+        + "  out \u2014 D7 runs over V1's verdicts and is vacuous without them).\n"
+        + "  Failures accumulate in node.check_failures, each identifying its\n"
+        + "  criterion (id prefix \u2014 'D7: ', 'V1: ', 'V2: ' \u2014 or the\n"
+        + "  consequence label for the D-checks, e.g. 'Link validity check\n"
+        + "  failed'); the gate failures D6, D7, V1 and V2 carry two-level\n"
+        + "  severity tags: fatal (D6, D7, V1-UNSUPPORTED) \u2014 one is\n"
+        + "  enough \u2192 draft; quality (V2) \u2192 draft, human-promotable. The\n"
+        + "  tag is an informational annotation guiding human review: both\n"
+        + "  severities gate to draft (there is no separate quality_failed\n"
+        + "  state) and draft nodes are human-promotable via the existing\n"
+        + "  review flow.\n"
+        + "  Invariant: auto-verified \u21d2 every unadorned claim is grounded.\n"
         + "  Trust state is set by the CLI caller (checks.py only reports failures).\n"
         + "```\n"
         + "\n"
-        + "Implementation: `checks.run_checks()` delegates to `CHECK_RULES` in `rules.py`. CLI: `_do_derive()` and `_do_synthesize()` call `update_trust_state()` with `check_failures` list.\n"
+        + "Implementation: `checks.run_checks()` delegates to `CHECK_RULES`; `validators.validate.run_validations()` runs the validation DAG (V1 \u2192 D7 \u2192 V2) from `VALIDATION_RULES` with the judge agent (`MEMEX_JUDGE`, default = the derive agent). services/derive.py and services/synthesize.py merge both failure lists (`merge_gate_failures`) and call `update_trust_state()`.\n"
         + "\n"
         + "---\n"
         "\n"
@@ -723,14 +1263,86 @@ def render_ontology() -> str:
         "  Falling back: if JSON parsing fails, the entire response is treated as prose\n"
         "  and synthesis statements are recovered by regex: ^>\\s*Synthesis:\\s+(.+)$\n"
         "\n"
-        "Rule S6 — Adversarial validation\n"
-        "  IF validator is configured (MEMEX_VALIDATOR):\n"
-        "    validator checks that the derivation genuinely re-elaborates the source.\n"
-        "    Generic boilerplate (\"the article discusses\", \"the author covers\") fails.\n"
-        "  IF validator is absent, not callable, or throws: passes with warning.\n"
+        "Rule S6 \u2014 Factual fidelity (prompt contract)\n"
+        "  Statistics or specific numbers absent from the source MUST be omitted\n"
+        "  or marked as synthesis statements \u2014 never invented, rounded, or\n"
+        "  approximated from memory.\n"
+        "  In syntheses, every source-derived fact MUST carry an inline wikilink\n"
+        "  [[filename|alias]] naming the parent it comes from.\n"
+        "\n"
+        "Rule V1 \u2014 Evidence support (LLM-judged, DAG root)\n"
+        "  Every unadorned claim in the body is judged SUPPORTED /\n"
+        "  COMMON_KNOWLEDGE / UNSUPPORTED against the parent content, with an\n"
+        "  evidence quote. COMMON_KNOWLEDGE covers generic uncontroversial\n"
+        "  facts only; quantitative claims about specific entities are NEVER\n"
+        "  exempt. In syntheses, a source-derived fact WITHOUT a link is\n"
+        "  UNSUPPORTED (missing declaration); a claim WITH a link is judged\n"
+        "  against the linked parent only. In notes, every claim is judged\n"
+        "  against the single parent regardless of any inline links it\n"
+        "  carries (the notes exemption — a stray wikilink in note prose\n"
+        "  never redirects the judgment to a parent that does not exist).\n"
+        + "  Negative-verdict contract: every UNSUPPORTED verdict cites the\n"
+        + "  claim, the source examined, and why the source does not contain it\n"
+        + "  (source_examined, absence_explanation). An UNSUPPORTED verdict\n"
+        + "  lacking either field produces a deterministic contract-violation\n"
+        + "  failure (symmetric to D7's SUPPORTED-without-quote failure). A\n"
+        + "  verdict shortfall (a presented claim with no matching verdict,\n"
+        + "  including an empty set) emits a warning \u2014 coverage is\n"
+        + "  correlated per presented claim INSTANCE (whitespace-normalized\n"
+        + "  claim text, inline link markers ignored): N identical presented\n"
+        + "  claims need N verdicts, so a single verdict for a duplicated\n"
+        + "  sentence leaves its twin unjudged, and an echo that drops or\n"
+        + "  adds [[...]] markers still resolves to the presented claim.\n"
+        + "  Duplicate verdicts or verdicts whose claim was never presented\n"
+        + "  are coverage gaps, never a clean pass; grounding coverage is\n"
+        + "  then incomplete, never silently clean.\n"
+        "\n"
+        + "Rule D7 \u2014 Evidence-quote verification (deterministic, over V1's output)\n"
+        + "  Every evidence_quote V1 cites for a SUPPORTED verdict must appear\n"
+        + "  in the cited source (linked parent for syntheses, single parent\n"
+        + "  for notes). Matching is a literal substring with a\n"
+        + "  whitespace-collapsed fallback: quote and source are compared with\n"
+        + "  every run of whitespace collapsed to a single space (LLMs re-wrap\n"
+        + "  line breaks; a fabricated quote differs in words, not whitespace).\n"
+        + "  Quote not found \u2192 failure D7. This keeps\n"
+        + "  LLM-judged evidence honest: an LLM that hallucinates a claim can\n"
+        + "  hallucinate the supporting quote. COMMON_KNOWLEDGE is backstopped\n"
+        + "  too: a COMMON_KNOWLEDGE verdict on a link-free synthesis claim is\n"
+        + "  a missing declaration (a source-derived fact without an inline\n"
+        + "  link is UNSUPPORTED) and fails deterministically. The cited\n"
+        + "  source (and the COMMON_KNOWLEDGE link check) resolves from the\n"
+        + "  PRESENTED claim text, not the verdict's echo: each verdict is\n"
+        + "  correlated to the presented slice (whitespace-normalized, link\n"
+        + "  markers ignored \u2014 LLMs routinely echo/normalize claim text,\n"
+        + "  dropping or adding [[...]] markers); only a verdict matching no\n"
+        + "  slice falls back to the echoed claim.\n"
+        "\n"
+        "Rule V2 \u2014 Re-elaboration quality (LLM-judged, consumes V1's verdicts)\n"
+        "  Synthesis statements must be legitimate inferences from the body's\n"
+        "  facts, specific, and go beyond the source; boilerplate fails.\n"
+        "  Grounding is V1's job \u2014 V2 does not re-verify the facts; its prompt\n"
+        "  carries V1's per-claim verdicts (the body as V1 saw it).\n"
+        "\n"
+        + "DAG execution: waves run in ascending registry order (V1 first; D7\n"
+        + "  verifies V1's quotes inside V1's wave; V2 declares\n"
+        + "  depends_on=(\"V1\",) + skip_when_fatal, so it runs after D7 and is\n"
+        + "  SKIPPED when V1 has fatal failures \u2014 the node is draft already,\n"
+        + "  re-derive re-runs both). The DAG is declarative: VALIDATION_RULES\n"
+        + "  carries order/depends_on/skip_when_fatal/expects_full_verdicts;\n"
+        + "  adding a criterion never edits run_validations.\n"
+        + "  MEMEX_VALIDATION=off disables the DAG (deterministic checks never\n"
+        + "  opt out). Judge call/parse failures degrade to pass-with-warning;\n"
+        + "  V1 verdict shortfalls warn.\n"
+        "\n"
+        "Rule V3 \u2014 Registry curation (process, not a criterion)\n"
+        "  VALIDATION_RULES has an entry/exit process: every new member adds\n"
+        "  ONE disjoint defect class with a declared scope (what it catches,\n"
+        "  what it does not), placed in the DAG; members exit when their\n"
+        "  defect class is subsumed. Without curation the family degrades into\n"
+        "  N overlapping mini-judges.\n"
         "```\n"
         "\n"
-        "Implementation: `agent._parse_derive_response()` (full function), agent system prompts, `agent.validate_derivation()`.\n"
+        "Implementation: agent system prompts (factual fidelity), `validators.validate.run_validations()` + `VALIDATION_RULES` in `rules.py` (V1\u2013V2) with D7 quote verification in `validate.py`. Judge = `MEMEX_JUDGE` or the derive agent; `submit_verdicts` host tool (pi.py) carries structured verdicts.\n"
         "\n"
         "---\n"
         "\n"
@@ -807,7 +1419,9 @@ def render_ontology() -> str:
         "| X1–X6 | ADR-0012, `store.py` `_propagate_contradiction()` | Architectural + Code |\n"
         "| R1–R6 | ADR-0012, `store.py` `accept/reject/dismiss_proposal()`, `_close_contestation_event()` | Architectural + Code |\n"
         "| D1–D6 | ADR-0011, `checks.py` `run_checks()` | Architectural + Code |\n"
-        "| S1–S6 | `agent.py` system prompts, `_parse_derive_response()`, `validate_derivation()` | Code |\n"
+        "| D7 | `validators/validate.py` (deterministic, over V1's verdicts) | Code |\n"
+        "| S1–S6 | agent system prompts, `_parse_derive_response()` | Code |\n"
+        "| V1–V2 | `validators/validate.py` `run_validations()`, `rules.py` `VALIDATION_RULES` (curated: one disjoint defect class per member, see Rule V3) | Code |\n"
         "| A1–A3 | ADR-0004, ADR-0001 | Architectural (not yet enforced in code) |\n"
         "| SC1–SC8 | `store.py` `init_schema()` | DB |\n"
 

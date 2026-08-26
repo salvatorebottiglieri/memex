@@ -1,42 +1,29 @@
 """DeriverService — orchestration for derive operations.
 
 Encapsulates: content loading, idempotency checks, agent derivation,
-adversarial validation, file writing, node/edge creation, confidence
-assignment, checks, and trust state updates.
+file writing, node/edge creation, confidence assignment, deterministic
+checks (D1–D6), post-creation LLM validations (V1–V2), and trust state
+updates.
 """
 
 from __future__ import annotations
 
-import os
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from memex.agent import Agent, load_agent
+from memex.agent import Agent
 from memex.rules import MIN_CHARS, canonicalize_synthesis_markers
 from memex.schemas import DocumentRef, coerce_derivation
 from memex.store import Store
+from memex.utils.parsing import _cap_prompt_content
 from memex.utils.retry import call_with_retry
-from memex.validators.validate import validate_derivation
-
-# Upper bound on source content fed to the LLM. Extraction can produce
-# multi-megabyte files (broken PDF text layers, HTML dumps) that blow past
-# any model context window; the summary needs the head of the source, not
-# a token overflow. Kept explicit so a truncated prompt is honest about it.
-_MAX_PROMPT_CHARS = 120_000
-
-
-def _cap_prompt_content(content: str) -> str:
-    """Strip NUL bytes (PDF ToUnicode artifacts) and cap prompt size."""
-    content = content.replace("\x00", "")
-    if len(content) <= _MAX_PROMPT_CHARS:
-        return content
-    return (
-        content[:_MAX_PROMPT_CHARS]
-        + "\n\n[source content truncated — exceeds prompt limit; "
-        "the remainder was not considered]"
-    )
+from memex.validators.validate import (
+    merge_gate_failures,
+    run_validations,
+    validation_environment,
+)
 
 
 @dataclass
@@ -44,7 +31,7 @@ class DeriveResult:
     """Result of a single derive operation."""
 
     id: str
-    # "derived" | "already_derived" | "quality_failed" | "no_content" | "error"
+    # "derived" | "already_derived" | "no_content" | "error"
     status: str
     l0_node_id: str
     trust_state: str | None = None
@@ -66,11 +53,9 @@ class DeriverService:
         self._store = store
         self._vault_path = vault_path
         self._agent = agent
-        self._validator: Agent | None = None
-
-        validator_path = os.environ.get("MEMEX_VALIDATOR")
-        if validator_path:
-            self._validator = load_agent(validator_path)
+        # Validation judge + enabled flag: shared with synthesize (single
+        # source of truth in validators.validate.validation_environment).
+        self._judge, self._validations_enabled = validation_environment(agent)
 
     # ------------------------------------------------------------------
     # Public API
@@ -279,27 +264,6 @@ class DeriverService:
 
         deriv_id = str(uuid.uuid4())
 
-        # --- Adversarial validation gate ---
-        if self._validator is not None:
-            passes, warning = validate_derivation(
-                self._validator, l0_content, deriv, reference=reference
-            )
-            if warning:
-                import json as _json
-                import sys as _sys
-
-                _sys.stderr.write(
-                    _json.dumps({"validator_warning": warning}) + "\n"
-                )
-
-            if not passes:
-                return DeriveResult(
-                    id=l0_node_id,
-                    status="quality_failed",
-                    l0_node_id=l0_node_id,
-                    reason="Derivation does not meaningfully re-elaborate the source material.",
-                )
-
         # --- Write markdown file ---
         self._vault_path.mkdir(parents=True, exist_ok=True)
         first_line = deriv.prose.split("\n")[0].strip()
@@ -342,15 +306,26 @@ class DeriverService:
             "UPDATE node SET confidence = 'medium' WHERE id = ?", (deriv_id,)
         )
 
-        # --- Content checks ---
+        # --- Content checks (D1–D6) ---
         check_result = run_checks(self._store._con, deriv_id, md_path)
-        trust_state = (
-            "auto-verified" if check_result.passed else "draft"
+
+        # --- Adversarial validations (V1–V2, post-creation, always-on) ---
+        validation_result = None
+        if self._validations_enabled:
+            validation_result = run_validations(
+                self._judge, self._store._con, deriv_id, md_path
+            )
+
+        # One gate: D + V failures accumulate into a single list; any failure
+        # → draft. quality_failed is gone — status stays "derived" and the
+        # annotations ride on trust_state=draft + check_failures.
+        failures, trust_state = merge_gate_failures(
+            check_result, validation_result
         )
         self._store.update_trust_state(
             node_id=deriv_id,
             trust_state=trust_state,
-            check_failures=check_result.failures,
+            check_failures=failures,
         )
 
         return DeriveResult(
@@ -359,7 +334,7 @@ class DeriverService:
             l0_node_id=l0_node_id,
             trust_state=trust_state,
             content_path=str(md_path),
-            check_failures=check_result.failures,
+            check_failures=failures,
         )
 
     def _human_path(self, name: str, suffix: str = ".md") -> Path:

@@ -843,8 +843,8 @@ def derive(db_path: Path, vault_path: Path, node_id: str | None = None,
 
     Writes derivation prose as <deriv_id>.md in the vault, inserts a node row
     (kind=summary, tier=notes, trust_state=draft, depth=parent depth+1), records a
-    derived_from provenance edge, and runs deterministic checks to transition
-    draft -> auto-verified.
+    derived_from provenance edge, and runs deterministic checks (D1–D6) plus the
+    validation DAG (V1 → D7 → V2) to transition draft -> auto-verified.
     """
     from memex.agent import load_agent
     from memex.store import Store

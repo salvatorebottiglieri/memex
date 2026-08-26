@@ -40,7 +40,7 @@ per memex invocation, speaking the official protocol.
 - **Turn timeout** (default 600s): `abort` command, then SIGTERM, then SIGKILL; the call
   fails with `error`, never hangs.
 - **Phase 2 — host tools** (**implemented 2026-08-05**): typed `submit_derivation` /
-  `submit_ideas` / `submit_review` / `submit_validation` tools via `set_host_tools`. The
+  `submit_ideas` / `submit_review` / `submit_verdicts` tools via `set_host_tools`. The
   agent calls them with structured args (JSON Schema); the host replies `host_tool_result`;
   at `agent_end` the structured payload wins, text parsing becomes fallback only. The
   validator's "response parse failed → pass-with-warning" downgrade is gone: the verdict
@@ -89,7 +89,7 @@ sequenceDiagram
   participant OMP as omp --mode rpc
   participant CORE as agent core
 
-  RPC->>OMP: {"id":"h1","type":"set_host_tools","tools":[submit_derivation,submit_validation,...]}
+  RPC->>OMP: {"id":"h1","type":"set_host_tools","tools":[submit_derivation,submit_verdicts,...]}
   OMP-->>RPC: {"id":"h1","type":"response","command":"set_host_tools","success":true}
   RPC->>OMP: {"id":"p1","type":"prompt","message":"...then call submit_derivation"}
   loop agent turn
@@ -174,7 +174,12 @@ submit_review       { affected_node_ids: string[],
                       damage_boundary_node_id: string|null,
                       rationale_md: string,
                       confidence: "high"|"medium"|"low" }
-submit_validation   { passes: boolean, reason?: string }
+submit_verdicts     { verdicts: [{ claim: string,
+                                   verdict: "SUPPORTED"|"COMMON_KNOWLEDGE"|"UNSUPPORTED",
+                                   evidence_quote: string,
+                                   source_examined: string,
+                                   absence_explanation: string }],
+                      passes: boolean, reason?: string }
 
 Precedence: structured tool payload > text-parse fallback.
 If the agent ends the turn without calling the tool, fall back to parsing the text

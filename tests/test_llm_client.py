@@ -160,6 +160,57 @@ class TestAnthropicAgent:
         client = AnthropicAgent()
         assert hasattr(client, "review")
 
+    def test_call_llm_returns_message_text(self):
+        """F1: AnthropicAgent exposes the call_llm validation-judge seam —
+        the prompt goes out as the user message and the response text is
+        returned. This is what the always-on V1/V2 family drives, so the
+        built-in real agent is actually judged instead of being skipped as
+        a judge without a callable seam."""
+        import sys  # noqa: PLC0415
+
+        from memex.derivers.anthropic import AnthropicAgent  # noqa: PLC0415
+
+        fake_module = self._make_mock_anthropic("judge verdict text")
+
+        saved = sys.modules.get("anthropic")
+        sys.modules["anthropic"] = fake_module
+        try:
+            client = AnthropicAgent()
+            raw = client.call_llm("Judge this claim.")
+        finally:
+            if saved is None:
+                del sys.modules["anthropic"]
+            else:
+                sys.modules["anthropic"] = saved
+
+        assert raw == "judge verdict text"
+        create = fake_module.Anthropic.return_value.messages.create
+        assert create.call_count == 1
+        assert create.call_args.kwargs["messages"] == [
+            {"role": "user", "content": "Judge this claim."}
+        ]
+
+    def test_call_llm_judge_seam_max_tokens(self, monkeypatch):
+        """The V1/V2 judge seam must not truncate large verdict sets: the
+        call_llm client call needs max_tokens >= 8192 (a body of ordinary
+        length yields 20-40 claims, and each SUPPORTED verdict is ~250
+        chars, which already exceeds the old 2048-token cap and breaks
+        JSON parsing for the larger derivations the gate matters most
+        for)."""
+        import sys  # noqa: PLC0415
+
+        from memex.derivers.anthropic import AnthropicAgent  # noqa: PLC0415
+
+        fake_module = self._make_mock_anthropic("judge verdict text")
+        monkeypatch.setitem(sys.modules, "anthropic", fake_module)
+
+        client = AnthropicAgent()
+        client.call_llm("Judge this claim.")
+
+        create = fake_module.Anthropic.return_value.messages.create
+        assert create.call_count == 1
+        assert create.call_args.kwargs["max_tokens"] >= 8192
+
     def test_review_returns_review_proposal(self):
         """AnthropicAgent.review returns a ReviewProposal from valid JSON."""
         import json  # noqa: PLC0415
