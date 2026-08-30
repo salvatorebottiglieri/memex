@@ -335,6 +335,7 @@ _REFERENCE_TEMPLATE = (
     "- source_url: {source_url}\n"
     "- path: {content_path}\n"
     "- size_bytes: {size_bytes}\n"
+    "- link_key: {link_key}\n"
 )
 
 
@@ -355,6 +356,7 @@ def format_reference(reference: DocumentRef | list[DocumentRef]) -> str:
                 source_url=ref.source_url or "(none)",
                 content_path=ref.content_path,
                 size_bytes=ref.size_bytes,
+                link_key=ref.link_key or "(none)",
             )
         )
     return "\n\n".join(blocks)

@@ -51,3 +51,4 @@ class DocumentRef:
     title: str | None = None
     source_url: str | None = None
     size_bytes: int = 0
+    link_key: str | None = None

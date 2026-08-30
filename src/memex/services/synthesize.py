@@ -8,6 +8,7 @@ trust state updates.
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,6 +32,28 @@ def _first_h1(content: str) -> str | None:
         if stripped.startswith("# "):
             return stripped[2:].strip()
     return None
+
+
+_LINK_RE = re.compile(r"\[\[([^\]|]+)(?:\|([^\]]+))?\]\]")
+
+
+def _resolve_link_keys(prose: str, key_map: dict[str, str]) -> str:
+    """Rewrite stable parent keys to their resolved link targets.
+
+    The agent references parents by change-insensitive keys (``[[P1|A]]``);
+    the system inserts the real link target (``[[filename|A]]``)
+    deterministically, so the agent never emits a fragile uuid/path.
+    Links whose target is not a key are left untouched.
+    """
+    def _repl(match: re.Match[str]) -> str:
+        target = match.group(1).strip()
+        alias = (match.group(2) or "").strip()
+        resolved = key_map.get(target)
+        if resolved is None:
+            return match.group(0)
+        return f"[[{resolved}|{alias}]]" if alias else f"[[{resolved}]]"
+
+    return _LINK_RE.sub(_repl, prose)
 
 
 class SynthesizerService:
@@ -75,7 +98,8 @@ class SynthesizerService:
         contents: list[str] = []
         references: list[DocumentRef] = []
         source_lines: list[str] = []
-        for pid in parent_ids:
+        key_map: dict[str, str] = {}
+        for idx, pid in enumerate(parent_ids, start=1):
             parent = self._store.get_node(pid)
             if parent is None:
                 return {
@@ -85,6 +109,9 @@ class SynthesizerService:
                 }
             max_depth = max(max_depth, parent["depth"])
             content_path = parent.get("content_path") or ""
+            filename = Path(content_path).stem if content_path else parent["id"]
+            key = f"P{idx}"
+            key_map[key] = filename
             content_text = ""
             if content_path and Path(content_path).exists():
                 content_text = Path(content_path).read_text(encoding="utf-8")
@@ -97,17 +124,17 @@ class SynthesizerService:
                             title=parent.get("title"),
                             source_url=parent.get("source_url"),
                             size_bytes=Path(content_path).stat().st_size,
+                            link_key=key,
                         )
                     )
             else:
                 contents.append("")
-            # The link targets the synthesis agent must use: filename stem +
-            # display alias. Inline (non-reader) agents get this block
-            # prepended so they can emit [[filename|alias]] links; reader
-            # agents already see the paths (stem = link filename).
-            filename = Path(content_path).stem if content_path else parent["id"]
+            # Stable per-parent key: the agent references parents by P1..Pn
+            # (change-insensitive); the system resolves the key to the real
+            # link target after the agent returns. The agent never emits the
+            # filename/uuid itself.
             alias = parent.get("title") or _first_h1(content_text) or parent["id"]
-            source_lines.append(f"- [[{filename}|{alias}]]")
+            source_lines.append(f"- [[{key}|{alias}]]")
 
         # Syntheses link every source-derived fact to its parent: give inline
         # agents the exact link targets up front.
@@ -130,6 +157,7 @@ class SynthesizerService:
         try:
             deriv = call_with_retry(_agent_derive)
             coerce_derivation(deriv)
+            deriv.prose = _resolve_link_keys(deriv.prose, key_map)
         except Exception as e:
             return {
                 "status": "error",

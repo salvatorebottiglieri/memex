@@ -732,8 +732,12 @@ def _v1_evidence_slicer(
             resolved: list[str] = []
             for filename, alias in links:
                 label = f"[[{filename}|{alias}]]" if alias else f"[[{filename}]]"
-                if any(p["filename"] == filename for p in parents):
-                    resolved.append(f"{label} -> parent {filename}")
+                key = next(
+                    (p["key"] for p in parents if p["filename"] == filename),
+                    None,
+                )
+                if key:
+                    resolved.append(f"{label} -> parent {key}")
                 else:
                     resolved.append(f"{label} -> NOT a provenance parent")
             block += "\n  links: " + "; ".join(resolved)
@@ -748,32 +752,40 @@ job: judge every unadorned claim in the node's body against the parent content.
 
 {context}
 
-Judge each claim below and submit one verdict per claim:
+Judge each claim below and submit one verdict per claim, referencing the
+claim by its index (claim_index = the N in "Claim N:") — do NOT re-type the
+claim text; the system correlates by index:
   - SUPPORTED: the relevant parent content states the claim, or directly
-    implies it. evidence_quote MUST be a verbatim quote from that parent
-    content (it is verified deterministically).
+    implies it. evidence_anchor MUST be a SHORT verbatim substring (5-15
+    consecutive words) copied character-for-character from that parent
+    content — it is verified deterministically against the exact source
+    text. Copy it EXACTLY as it appears: keep any odd spacing, punctuation,
+    or symbols; do NOT reword, normalize, correct, or "clean up" the span
+    (a paraphrased or corrected span fails verification). If you cannot
+    find an exact verbatim substring to copy, the verdict is UNSUPPORTED —
+    never paraphrase or summarize a span as evidence.
   - COMMON_KNOWLEDGE: the claim is a generic, uncontroversial fact that needs
     no source. Quantitative claims about specific entities are NEVER exempt
     from evidence — never mark those COMMON_KNOWLEDGE.
   - UNSUPPORTED: the claim is not supported by the relevant parent content.
-    You MUST cite the source examined and why the source does not contain it.
+    You MUST cite the parent_key examined and why the source does not
+    contain it.
 
 Rules:
 - In a synthesis (node tier = synthesis), every fact taken from a source MUST
-  carry an inline link [[filename|alias]] naming the parent it comes from.
-  A source-derived fact WITHOUT such a link is UNSUPPORTED (missing
-  declaration).
+  carry an inline link naming the parent it comes from. A source-derived
+  fact WITHOUT such a link is UNSUPPORTED (missing declaration).
 - A claim WITH a link is judged ONLY against the parent the link names — the
-  parent contents are listed in the Parent content section, keyed by
-  filename.
+  "links:" line under each claim resolves the link to its parent key (P1,
+  P2, ...); reference that key in parent_key.
 - In a notes derivation, claims are judged against the single parent
   regardless of any inline links they carry.
 
 Submit your verdicts by calling the submit_verdicts tool with a JSON payload:
 {"verdicts": [
-  {"claim": "<claim text>", "verdict": "SUPPORTED", "evidence_quote": "<verbatim quote from the cited source>"},
-  {"claim": "<claim text>", "verdict": "COMMON_KNOWLEDGE", "evidence_quote": ""},
-  {"claim": "<claim text>", "verdict": "UNSUPPORTED", "source_examined": "<parent filename examined>", "absence_explanation": "<why the source does not contain the claim>"}
+  {"claim_index": 1, "verdict": "SUPPORTED", "parent_key": "P3", "evidence_anchor": "<5-15 consecutive words copied exactly from that parent>"},
+  {"claim_index": 2, "verdict": "COMMON_KNOWLEDGE"},
+  {"claim_index": 3, "verdict": "UNSUPPORTED", "parent_key": "P3", "absence_explanation": "<why the source does not contain the claim>"}
 ]}
 If the submit_verdicts tool is unavailable, return ONLY that JSON object —
 no commentary.
@@ -800,42 +812,51 @@ def _v1_verdict_parser(
     for v in data["verdicts"]:
         if not isinstance(v, dict):
             continue
-        claim = v.get("claim")
-        if not isinstance(claim, str) or not claim.strip():
+        claim_index = v.get("claim_index")
+        if not isinstance(claim_index, int):
             continue
         verdict = str(v.get("verdict", "")).upper()
         if verdict not in ("SUPPORTED", "COMMON_KNOWLEDGE", "UNSUPPORTED"):
             continue
-        normalized: dict[str, Any] = {"claim": claim.strip(), "verdict": verdict}
+        normalized: dict[str, Any] = {
+            "claim_index": claim_index,
+            "verdict": verdict,
+        }
         if verdict == "SUPPORTED":
-            quote = v.get("evidence_quote")
-            normalized["evidence_quote"] = quote if isinstance(quote, str) else ""
+            anchor = v.get("evidence_anchor")
+            parent_key = v.get("parent_key")
+            normalized["evidence_anchor"] = (
+                anchor if isinstance(anchor, str) else ""
+            )
+            normalized["parent_key"] = (
+                parent_key if isinstance(parent_key, str) else ""
+            )
         elif verdict == "UNSUPPORTED":
-            source = v.get("source_examined")
+            parent_key = v.get("parent_key")
             explanation = v.get("absence_explanation")
-            normalized["source_examined"] = (
-                source if isinstance(source, str) else ""
+            normalized["parent_key"] = (
+                parent_key if isinstance(parent_key, str) else ""
             )
             normalized["absence_explanation"] = (
                 explanation if isinstance(explanation, str) else ""
             )
-            message = f"{SEVERITY_FATAL} Unsupported claim: {claim.strip()}"
-            if normalized["source_examined"]:
-                message += f" (source_examined: {normalized['source_examined']})"
+            message = f"{SEVERITY_FATAL} Unsupported claim #{claim_index}"
+            if normalized["parent_key"]:
+                message += f" (parent_key: {normalized['parent_key']})"
             if normalized["absence_explanation"]:
                 message += (
                     f" (absence_explanation: {normalized['absence_explanation']})"
                 )
             # Negative-verdict contract: an UNSUPPORTED verdict MUST cite the
-            # source examined and why the source lacks the claim. A judge
+            # parent examined and why the source lacks the claim. A judge
             # omitting either field violates the contract — deterministic
-            # failure, symmetric to D7's SUPPORTED-without-quote treatment.
-            if not normalized["source_examined"] or not normalized[
+            # failure, symmetric to D7's SUPPORTED-without-anchor treatment.
+            if not normalized["parent_key"] or not normalized[
                 "absence_explanation"
             ]:
                 message += (
                     " [negative-verdict contract violated: UNSUPPORTED must "
-                    "cite source_examined and absence_explanation]"
+                    "cite parent_key and absence_explanation]"
                 )
             failures.append(message)
         verdicts.append(normalized)

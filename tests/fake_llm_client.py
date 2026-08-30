@@ -151,45 +151,51 @@ class FakeJudge(Agent):
 
     @staticmethod
     def _parse_parents(prompt: str) -> dict[str, str]:
+        """Map parent key (P1..Pn) -> inline content (parent block)."""
         parents = {}
         for m in re.finditer(
-            r"Parent \d+: (\S+) \(node [^)]*\)\n(.*?)(?=\n\nParent \d+: |\Z)",
+            r"Parent (P\d+): ([^\s]+) \(node [^)]*\)\n(.*?)(?=\n\nParent P\d+: |\Z)",
             prompt,
             re.S,
         ):
-            parents[m.group(1)] = m.group(2)
+            parents[m.group(1)] = m.group(3)
         return parents
 
     @staticmethod
-    def _cited_source(claim: str, parents: dict[str, str]) -> str | None:
-        links = re.findall(r"\[\[([^\]|]+?)(?:\|([^\]]+?))?\]\]", claim)
-        if links:
-            return links[0][0]
-        return next(iter(parents), None)  # notes: the single parent
+    def _presented_slices(prompt: str) -> list[dict]:
+        """Parse the slice section into [{index, claim, key}] pairs.
+
+        The rendered block is ``Claim N: "<claim>"`` with V1's optional
+        ``\n  links: … -> parent Pk`` continuation line carrying the parent
+        key the judge must reference.
+        """
+        slices = []
+        for m in re.finditer(
+            r'Claim (\d+): "(.*)"(?:\n\s+links: (.*))?', prompt
+        ):
+            idx = int(m.group(1))
+            links_line = m.group(3) or ""
+            km = re.search(r"-> parent (P\d+)", links_line)
+            slices.append(
+                {
+                    "index": idx,
+                    "claim": m.group(2),
+                    "key": km.group(1) if km else None,
+                }
+            )
+        return slices
 
     @staticmethod
-    def _excerpt(filename: str | None, parents: dict[str, str]) -> str:
-        content = re.sub(r"\s+", " ", parents.get(filename or "", "")).strip()
+    def _excerpt(key: str | None, parents: dict[str, str]) -> str:
+        # Notes tier: a None key (no link) grounds on the single parent.
+        k = key if key and key in parents else next(iter(parents), None)
+        content = re.sub(r"\s+", " ", parents.get(k or "", "")).strip()
         return content[:80]
 
     @staticmethod
     def _presented_claims(prompt: str) -> list[str]:
-        """The V1 claims as presented in the prompt's slice section.
-
-        Quote-tolerant extraction, mirroring the production
-        ``_slice_claim_text`` contract: a claim runs to its TRAILING
-        delimiter — the last double quote on its ``Claim N: "..."`` line
-        (the rendered block is ``Claim N: "<claim>"``, with V1's optional
-        ``\n  links: …`` continuation line) — so embedded double quotes
-        inside the claim text are part of the claim, never the end of it.
-        A judge that read the prompt echoes the FULL claim text.
-        """
-        claims = []
-        for line in prompt.splitlines():
-            m = re.match(r'^Claim \d+: "(.*)"$', line)
-            if m:
-                claims.append(m.group(1))
-        return claims
+        """Legacy helper: claim texts only (presented order)."""
+        return [s["claim"] for s in FakeJudge._presented_slices(prompt)]
 
     # -- verdict generation ---------------------------------------------
 
@@ -203,20 +209,26 @@ class FakeJudge(Agent):
                 {"passes": passes, "reason": "" if passes else "statement is boilerplate"}
             )
         parents = self._parse_parents(prompt)
-        claims = self._presented_claims(prompt)
+        slices = self._presented_slices(prompt)
         is_synthesis = "Node tier: synthesis" in prompt
         verdicts = []
-        for claim in claims:
-            source = self._cited_source(claim, parents)
-            if self.unsupported in claim or (is_synthesis and "[[" not in claim):
+        for s in slices:
+            key = s["key"]
+            if key is None and not is_synthesis:
+                # Notes tier: a single parent is the grounding regardless of
+                # any stray link (the notes exemption).
+                key = next(iter(parents), None)
+            if self.unsupported in s["claim"] or (
+                is_synthesis and key is None
+            ):
                 verdicts.append(
                     {
-                        "claim": claim,
+                        "claim_index": s["index"],
                         "verdict": "UNSUPPORTED",
-                        "source_examined": source or "no linked parent",
+                        "parent_key": key or "no linked parent",
                         "absence_explanation": (
                             "missing declaration"
-                            if is_synthesis and "[[" not in claim
+                            if is_synthesis and key is None
                             else "source content does not contain the claim"
                         ),
                     }
@@ -224,12 +236,13 @@ class FakeJudge(Agent):
             else:
                 verdicts.append(
                     {
-                        "claim": claim,
+                        "claim_index": s["index"],
                         "verdict": "SUPPORTED",
-                        "evidence_quote": (
+                        "parent_key": key,
+                        "evidence_anchor": (
                             "this fabricated quote appears nowhere in the source"
                             if self.fabricate
-                            else self._excerpt(source or "", parents)
+                            else self._excerpt(key, parents)
                         ),
                     }
                 )
@@ -264,23 +277,6 @@ class FakeJudge(Agent):
         reference: DocumentRef | None = None,
     ) -> list[str]:
         return ["Judge idea"]
-
-
-class FakeJudgeNotesHonest(FakeJudge):
-    """Fake judge that honestly grounds notes on the single parent even when
-    the note prose carries stray wikilinks (D6's notes-tier exemption).
-
-    ``_cited_source`` always resolves to the single parent instead of
-    following the claim's link filenames — mirroring the V1 prompt's notes
-    rule ("A claim with no link in a notes derivation is judged against its
-    single parent"): a stray [[non-parent|...]] link does not change what a
-    note is grounded against. Only the notes path is exercised (the class
-    keeps FakeJudge's V2 and UNSUPPORTED behavior).
-    """
-
-    @staticmethod
-    def _cited_source(claim: str, parents: dict[str, str]) -> str | None:
-        return next(iter(parents), None)
 
 
 class FakeAgentDivergent(Agent):

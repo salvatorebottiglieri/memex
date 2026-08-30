@@ -28,11 +28,13 @@ without V1's verdicts).
 
 from __future__ import annotations
 
+import html
 import json as _json
 import os
 import re
 import sqlite3
 import sys as _sys
+import unicodedata
 from pathlib import Path
 from typing import Any, Callable
 
@@ -55,6 +57,29 @@ from memex.utils.parsing import (
 # Quote match: literal substring, with a whitespace-collapsed fallback (LLMs
 # re-wrap line breaks; a fabricated quote differs in words, not whitespace).
 _WS_RE = re.compile(r"\s+")
+
+# Look-alike graphemes folded to ASCII before quote comparison (NFKC alone
+# leaves curly quotes untouched): a judge's echo and an extracted source must
+# compare on the same surface even when one writes ' and the other '.
+_LOOKALIKE_TRANSLATION = str.maketrans({
+    "\u2018": "'", "\u2019": "'", "\u201a": "'", "\u201b": "'",
+    "\u201c": '"', "\u201d": '"', "\u201e": '"', "\u201f": '"',
+    "\u00ab": '"', "\u00bb": '"',
+    "\u2032": "'", "\u2033": '"',
+    "\u00b4": "'", "\u0060": "'",
+    "\u2010": "-", "\u2011": "-", "\u2012": "-",
+    "\u2013": "-", "\u2014": "-", "\u2212": "-",
+})
+
+
+def _unicode_norm(text: str) -> str:
+    """NFKC (math alphanumerics, superscripts, fullwidth) plus folding of
+    look-alike quotes/dashes to ASCII, so a judge's echo and the extracted
+    source compare on the same grapheme surface. HTML entities left behind
+    by the web extractor (``&#x27;``) are decoded first."""
+    return unicodedata.normalize("NFKC", html.unescape(text)).translate(
+        _LOOKALIKE_TRANSLATION
+    )
 
 
 def _decode_statements(raw: str | None) -> list[str]:
@@ -110,6 +135,7 @@ def _load_parents(
         parents.append(
             {
                 "node_id": pid,
+                "key": f"P{len(parents) + 1}",
                 "filename": Path(content_path).stem if content_path else pid,
                 "content_path": content_path,
                 "content": content,
@@ -154,10 +180,10 @@ def _parent_block(
     """
     blocks: list[str] = []
     headers = [
-        f"Parent {i}: {parent['filename']} (node {parent['node_id']}"
+        f"Parent {parent['key']}: {parent['filename']} (node {parent['node_id']}"
         + (f", title: {parent['title']}" if parent.get("title") else "")
         + ")"
-        for i, parent in enumerate(parents, start=1)
+        for parent in parents
     ]
     # NUL-strip up front: the aggregate budget must measure the surface the
     # judge actually sees (the same stripping _cap_prompt_content applies).
@@ -291,43 +317,53 @@ def _call_judge(
     return raw, payload
 
 
-def _cited_sources(
-    claim: str, tier: str | None, parents: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
-    """The sources a SUPPORTED verdict for *claim* is checked against.
-
-    Syntheses: the parents named by ANY of the claim's inline links
-    (cross-source resolution — a multi-link aggregation claim may be quoted
-    from any linked parent). Notes: the (single) parent, unconditionally —
-    the D6 notes-tier exemption, so a stray wikilink in note prose never
-    changes what the note is grounded against. A synthesis claim with no
-    link has no cited source — V1's missing-declaration rule should have
-    flagged it; D7 has nothing to verify against.
-    """
-    if tier != "synthesis":
-        return parents
-    links = _WIKILINK_RE.findall(claim)
-    if not links:
-        return []
-    filenames = {filename for filename, _ in links}
-    return [p for p in parents if p["filename"] in filenames]
-
-
 def _quote_in_source(quote: str, content: str) -> bool:
-    """Literal match, with a whitespace-collapsed fallback.
+    """Literal match, with progressively more tolerant fallbacks.
 
     Surface-invariant across judge surfaces: an inline judge sees the
     NUL-stripped prompt copy, but a READER judge echoes the RAW parent file
     (which may carry PDF ToUnicode NUL bytes) — strip NUL from the quote so
     both surfaces verify against the same NUL-stripped local content (the
     whitespace-collapse fallback alone cannot remove ``\\x00``).
+
+    The three comparison surfaces, applied to both quote and content:
+      1. exact substring;
+      2. whitespace-collapsed substring;
+      3. whitespace-stripped substring — extraction can insert spacing
+         artifacts around punctuation (``context rot : as`` vs ``context
+         rot: as``) that a human reads as identical but break literal
+         comparison.
+
+    Ellipsis-joined quotes (a judge quoting non-contiguous verbatim spans
+    separated by ``...``) are verified fragment-by-fragment: every
+    non-empty fragment must be found on one of the three surfaces. The
+    guarantee "the quote's substance is verbatim from the source" holds at
+    every level — a fabricated fragment is still rejected.
     """
     quote = quote.replace("\x00", "").strip()
     if not quote:
         return False
-    if quote in content:
+
+    content = _unicode_norm(content)
+
+    def _surfaces(text: str) -> list[str]:
+        norm = _unicode_norm(text)
+        return [norm, _WS_RE.sub(" ", norm), "".join(norm.split())]
+
+    content_surfaces = _surfaces(content)
+
+    def _fragment_found(fragment: str) -> bool:
+        for qs in _surfaces(fragment):
+            if qs and any(qs in cs for cs in content_surfaces):
+                return True
+        return False
+
+    if _fragment_found(quote):
         return True
-    return _WS_RE.sub(" ", quote) in _WS_RE.sub(" ", content)
+    fragments = [f for f in quote.split("...") if f.strip()]
+    if len(fragments) > 1:
+        return all(_fragment_found(f) for f in fragments)
+    return False
 
 
 def _d7_verify_quotes(
@@ -336,38 +372,24 @@ def _d7_verify_quotes(
     parents: list[dict[str, Any]],
     slices: list[str] | None = None,
 ) -> list[str]:
-    """D7 (deterministic): every evidence_quote V1 cites for a SUPPORTED
-    verdict must appear literally in the cited source (linked parent for
-    syntheses, single parent for notes). Quote not found → failure.
+    """D7 (deterministic): every evidence_anchor a SUPPORTED verdict cites
+    must appear literally in the parent the verdict names by parent_key.
+    Anchor not found → failure.
 
-    The cited source (and the COMMON_KNOWLEDGE link-presence test) is
-    resolved from the claim text actually PRESENTED to the judge, not the
-    verdict's echoed claim: the V1 contract tells the judge to echo each
-    claim verbatim, but LLMs routinely echo/normalize claim text. A judge
-    that drops the [[filename|alias]] markers from a properly linked claim
-    would otherwise make ``_cited_sources`` return [] and draft an honest
-    node whose quote is genuine; a judge that ADDS a link to a link-free
-    claim would smuggle it past the missing-declaration rule. Each verdict
-    is therefore correlated to its presented slice (the same two-phase
-    correlation the coverage guard uses: link-aware keys — [[filename|alias]]
-    → filename — so claims differing only in their link target stay distinct
-    instances, with the link-stripped fallback for echoes that dropped the
-    markers); only a verdict matching no slice falls back to the echoed
-    claim text.
-
-    Also backstops COMMON_KNOWLEDGE — the third verdict class has no quote
-    and no negative contract: in a synthesis, a COMMON_KNOWLEDGE verdict on
-    a claim with no inline link would silently exempt a source-derived fact
-    from the missing-declaration rule. The link presence is checkable in
-    code, so such a verdict fails deterministically here (the same
-    judgement the prompt's rule makes).
+    The parent is resolved from the judge's parent_key reference (P1..Pn),
+    never by re-parsing claim text; the claim text is recovered from the
+    slice by claim_index. COMMON_KNOWLEDGE on a synthesis claim whose slice
+    carries no inline link is backstopped as a missing declaration.
     """
     tier = node.get("tier")
+    key_to_parent = {p["key"]: p for p in parents}
     failures: list[str] = []
-    _, matched = _correlate_verdicts(slices or [], verdicts)
+    matched = _correlate_verdicts(slices or [], verdicts)
     for v, match in zip(verdicts, matched):
-        echoed = v.get("claim", "")
-        claim = _slice_claim_text(slices[match]) if match is not None else echoed
+        idx = v.get("claim_index")
+        claim = (
+            _slice_claim_text(slices[match]) if match is not None else f"#{idx}"
+        )
         if v.get("verdict") == "COMMON_KNOWLEDGE":
             if tier == "synthesis" and not _WIKILINK_RE.search(claim):
                 failures.append(
@@ -378,28 +400,41 @@ def _d7_verify_quotes(
             continue
         if v.get("verdict") != "SUPPORTED":
             continue
-        quote = v.get("evidence_quote", "")
-        if not quote.strip():
+        anchor = v.get("evidence_anchor", "")
+        if not anchor.strip():
             failures.append(
-                f"{SEVERITY_FATAL} SUPPORTED verdict without an evidence quote "
-                f"(claim: {claim!r})"
+                f"{SEVERITY_FATAL} SUPPORTED verdict without an evidence "
+                f"anchor (claim: {claim!r})"
             )
             continue
-        sources = _cited_sources(claim, tier, parents)
+        if tier == "synthesis":
+            pk = v.get("parent_key", "")
+            sources = [key_to_parent[pk]] if pk in key_to_parent else []
+        else:
+            sources = parents
+        if not sources:
+            # parent_key missing/invalid: fall back to any parent containing
+            # the anchor verbatim, so a genuine anchor is never drafted on a
+            # bad key.
+            sources = [
+                p for p in parents
+                if p.get("content") is not None
+                and _quote_in_source(anchor, p["content"])
+            ]
         if not sources:
             failures.append(
-                f"{SEVERITY_FATAL} Evidence quote {quote!r} has no cited source "
-                f"to verify against (claim: {claim!r})"
+                f"{SEVERITY_FATAL} Evidence anchor {anchor!r} has no cited "
+                f"source to verify against (claim: {claim!r})"
             )
             continue
         if not any(
-            source.get("content") is not None
-            and _quote_in_source(quote, source["content"])
-            for source in sources
+            s.get("content") is not None
+            and _quote_in_source(anchor, s["content"])
+            for s in sources
         ):
-            names = ", ".join(s["filename"] for s in sources)
+            names = ", ".join(s["key"] for s in sources)
             failures.append(
-                f"{SEVERITY_FATAL} Evidence quote not found in {names}: {quote!r}"
+                f"{SEVERITY_FATAL} Evidence anchor not found in {names}: {anchor!r}"
             )
     return failures
 
@@ -408,11 +443,13 @@ def _render_v1_verdicts(verdicts: list[dict[str, Any]]) -> str:
     """Render V1's per-claim verdicts for V2's grounding block."""
     lines: list[str] = []
     for v in verdicts:
-        line = f'- "{v.get("claim", "")}" \u2192 {v.get("verdict", "")}'
-        if v.get("evidence_quote"):
-            line += f" (evidence: {v['evidence_quote']})"
-        if v.get("source_examined"):
-            line += f" (source_examined: {v['source_examined']})"
+        line = f'- #{v.get("claim_index", "?")} \u2192 {v.get("verdict", "")}'
+        if v.get("parent_key"):
+            line += f" (parent: {v['parent_key']})"
+        if v.get("evidence_anchor"):
+            line += f" (anchor: {v['evidence_anchor']})"
+        if v.get("absence_explanation"):
+            line += f" (absence: {v['absence_explanation']})"
         lines.append(line)
     return "\n".join(lines) if lines else "(no verdicts)"
 
@@ -447,83 +484,23 @@ def _slice_claim_text(slice_block: str) -> str:
 
 def _correlate_verdicts(
     slices: list[str], verdicts: list[dict[str, Any]]
-) -> tuple[list[str], list[int | None]]:
-    """Correlate verdicts to presented slices, one verdict per claim instance.
+) -> list[int | None]:
+    """Map each verdict to its slice index by claim_index (1-based).
 
-    Matching is two-phase. Phase 1 keys claim text with inline wikilink
-    markers REPLACED BY their target filenames (``[[p-a|A]]`` → ``p-a``):
-    two claims that differ only in their link target (``Alpha lives in
-    [[p-a|A]].`` vs ``Alpha lives in [[p-b|B]].``) stay distinct instances,
-    so verdicts in any order consume the RIGHT claim — never the other's
-    instance. Phase 2 falls back to the link-stripped key for verdicts
-    phase 1 could not place: echoes that dropped the [[...]] markers
-    entirely (the LLM echo/normalize path the judge is told to avoid but
-    routinely takes), and echoes that ADDED markers to a link-free claim —
-    always across at least one link-free side, so a marker-carrying echo
-    never consumes a differently-linked instance. Each verdict
-    consumes ONE presented instance (multiset semantics): N identical
-    presented claims need N verdicts, and a duplicate verdict past the
-    instance count matches nothing.
-
-    Returns (claims, matched): ``claims`` is the normalized key of each
-    slice (index-aligned with ``slices``); ``matched[i]`` is the index of
-    the slice the i-th verdict consumed, or None when the verdict matched
-    no remaining instance (a duplicate verdict, or claim text never
-    presented). Verdicts with empty claim text match nothing.
+    The judge references claims by their presented index ("Claim N:"), so
+    correlation is a pure index lookup — no text matching, no echo
+    normalization. ``matched[i]`` is the slice index the i-th verdict
+    consumed, or None when its claim_index is out of range (a stray or
+    duplicate verdict).
     """
-
-    def _norm(text: str) -> str:
-        return _WS_RE.sub(" ", _WIKILINK_RE.sub("", text or "")).strip()
-
-    def _norm_linked(text: str) -> str:
-        # [[filename|alias]] → filename: link-target filenames survive the
-        # key so claims differing only in their link target stay distinct.
-        return _WS_RE.sub(" ", _WIKILINK_RE.sub(r"\1", text or "")).strip()
-
-    claims = [_norm(_slice_claim_text(s)) for s in slices]
-    linked_claims = [_norm_linked(_slice_claim_text(s)) for s in slices]
-
-    # Phase 1 — link-aware keys.
-    remaining: dict[str, list[int]] = {}
-    for i, claim in enumerate(linked_claims):
-        remaining.setdefault(claim, []).append(i)
     matched: list[int | None] = []
-    consumed: set[int] = set()
     for v in verdicts:
-        vc = _norm_linked(v.get("claim", ""))
-        if vc and remaining.get(vc):
-            idx = remaining[vc].pop(0)
-            matched.append(idx)
-            consumed.add(idx)
+        idx = v.get("claim_index")
+        if isinstance(idx, int) and 1 <= idx <= len(slices):
+            matched.append(idx - 1)
         else:
             matched.append(None)
-
-    # Phase 2 — link-stripped fallback for verdicts phase 1 could not place:
-    # echoes that DROPPED the [[...]] markers, and echoes that ADDED markers
-    # to a link-free claim (both LLM echo/normalize failure modes). A
-    # fallback match is only made across at least one link-free side: an
-    # echo that still carries its own markers must never consume an
-    # instance whose linked key names a DIFFERENT target (a duplicate
-    # verdict must not steal another claim's instance). Instances already
-    # consumed in phase 1 are excluded so nothing is double-consumed.
-    remaining = {}
-    for i, claim in enumerate(claims):
-        if i not in consumed:
-            remaining.setdefault(claim, []).append(i)
-    for i, v in enumerate(verdicts):
-        if matched[i] is not None:
-            continue
-        echo = v.get("claim", "")
-        vc = _norm(echo)
-        if not vc or not remaining.get(vc):
-            continue
-        echo_link_free = _norm_linked(echo) == vc
-        for j in list(remaining[vc]):
-            if echo_link_free or linked_claims[j] == claims[j]:
-                remaining[vc].remove(j)
-                matched[i] = j
-                break
-    return claims, matched
+    return matched
 
 
 def _verdict_coverage_warnings(
@@ -531,47 +508,57 @@ def _verdict_coverage_warnings(
 ) -> list[str]:
     """Coverage gaps when verdicts are correlated to the presented claims.
 
-    A bare count comparison (fewer verdicts than slices) never checks WHICH
-    claims were judged: a judge returning N verdicts for the same claim, or
-    verdicts whose claim text was never presented (LLMs routinely
-    echo/normalize claim text), satisfies the count while the presented
-    claims sail through unjudged. Each verdict is therefore matched to a
-    slice by the same two-phase correlation as D7 (link-aware keys first —
-    [[filename|alias]] → filename — then the link-stripped fallback for
-    echoes that dropped the markers), one verdict per presented claim
-    INSTANCE: when two slices normalize to the same text — a duplicated
-    sentence, claims differing only in whitespace — a single verdict
-    covers only one of them. Every slice whose instance count is never
-    consumed warns as an unjudged claim, and stray verdicts (duplicates or
-    claim text never presented) warn as a set-level gap.
+    Verdicts reference claims by index, so coverage is a set comparison of
+    referenced indices against the presented slice range. Every slice whose
+    index is never referenced warns as an unjudged claim, and verdicts
+    whose claim_index is out of range (stray or duplicate) warn as a
+    set-level gap.
     """
-    claims, matched = _correlate_verdicts(slices, verdicts)
+    matched = _correlate_verdicts(slices, verdicts)
     judged_slices = {j for j in matched if j is not None}
     stray = sum(1 for m in matched if m is None)
     warnings: list[str] = []
     unjudged = [
-        (block, claim)
-        for block, claim, idx in zip(slices, claims, range(len(slices)))
-        if idx not in judged_slices
+        (i, _slice_claim_text(s))
+        for i, s in enumerate(slices)
+        if i not in judged_slices
     ]
     if unjudged:
         warnings.append(
             f"{rule_id} verdict shortfall: {len(unjudged)} of {len(slices)} "
             "presented claims were not judged; grounding coverage is incomplete"
         )
-        for block, claim in unjudged:
-            label = claim if claim else block
+        for idx, claim in unjudged:
             warnings.append(
-                f"{rule_id} verdict coverage gap: claim {label!r} was not "
-                "judged (no verdict matched the presented claim text)"
+                f"{rule_id} verdict coverage gap: claim {claim!r} was not "
+                "judged (no verdict referenced its index)"
             )
     if stray:
         warnings.append(
             f"{rule_id} verdict coverage gap: {stray} verdict(s) were stray "
-            "(duplicate claims or claim text never presented); one verdict "
-            "per presented claim expected"
+            "(duplicate or out-of-range claim_index); one verdict per "
+            "presented claim expected"
         )
     return warnings
+
+
+def _enrich_claim_text(failures: list[str], slices: list[str]) -> list[str]:
+    """Splice the presented claim text into index-referenced failures.
+
+    The V1 parser emits "Unsupported claim #N" (it has no slice access);
+    readability is restored here by inserting the claim text after the
+    index so a draft failure names the claim it flags.
+    """
+    enriched: list[str] = []
+    for f in failures:
+        m = re.search(r"Unsupported claim #(\d+)\b", f)
+        if m and 1 <= int(m.group(1)) <= len(slices):
+            text = _slice_claim_text(slices[int(m.group(1)) - 1])
+            pos = m.end()
+            enriched.append(f[:pos] + f": {text}" + f[pos:])
+        else:
+            enriched.append(f)
+    return enriched
 
 
 def _run_wave(
@@ -659,6 +646,7 @@ def _run_wave(
         return [], [], []
     if warning:
         _warn(warning)
+    rule_failures = _enrich_claim_text(rule_failures, slices)
     if rule.expects_full_verdicts:
         for coverage_warning in _verdict_coverage_warnings(
             rule.id, slices, verdicts
