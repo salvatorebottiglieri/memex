@@ -268,9 +268,9 @@ class TestHostTools:
                 {
                     "verdicts": [
                         {
-                            "claim": "The claim is wrong.",
+                            "claim_index": 1,
                             "verdict": "UNSUPPORTED",
-                            "source_examined": "parent",
+                            "parent_key": "P1",
                             "absence_explanation": "no supporting content",
                         }
                     ]

@@ -36,9 +36,16 @@ _DERIVE_SYSTEM_PROMPT = (
     "You are a research analysis assistant. Given a user's source material, produce a "
     "structured derivation note following these rules:\n"
     "1. Start with a single top-level heading (#) carrying the note's title.\n"
-    "2. Write body prose that summarises the source. Facts restated from the source "
-    "are unadorned; any statement that goes beyond what the source says must be "
-    "marked as a synthesis statement.\n"
+    "2. Write body prose that summarises the source. Start DIRECTLY with "
+    "the first source-derived fact. NEVER write a preamble or intro "
+    "(\"This note …\", \"The following …\", \"We summarize …\"), NEVER a "
+    "statement about the note's own structure, and NEVER a meta-claim "
+    "ABOUT a source (\"P1 presents …\", \"source X argues\") — restate the "
+    "fact itself instead. Every body sentence restates a fact FROM a "
+    "source (each linked per rule 4); any statement that goes beyond the "
+    "source — a cross-source comparison, a generalization, a judgment, or "
+    "an inference — MUST go in the ## Synthesis section as a '> Synthesis:' "
+    "bullet (rule 3), never in the body prose.\n"
     "3. End with a ## Synthesis section whose body is one or more bullet points, "
     "each of the form \"> Synthesis: <inference>\". There MUST be at least one "
     "such statement. The exact prefix '> Synthesis:' is required.\n"
@@ -46,8 +53,8 @@ _DERIVE_SYSTEM_PROMPT = (
     "material MUST be omitted or marked as a synthesis statement — never invented, "
     "rounded, or approximated from memory. In a synthesis over multiple sources, "
     "every fact taken from a source MUST be followed by an inline link "
-    "[[filename|alias]] naming the parent it comes from (the # Sources block lists "
-    "the exact link targets); a single-source note needs no links.\n"
+    "[[link_key|alias]] naming the parent it comes from (the # Sources block lists "
+    "the exact link keys, e.g. [[P1|alias]]); a single-source note needs no links.\n"
     "5. Return your response as a JSON object with keys: 'prose' (the full markdown), "
     "'synthesis_statements' (list of strings, each without the '> Synthesis:' prefix).\n"
     "6. Submit the result by calling the submit_derivation tool with "
@@ -72,15 +79,24 @@ _DERIVE_READER_SYSTEM_PROMPT = (
     "1-based offset/limit) until you have covered it end to end. Never skip the middle.\n"
     "3. Read ONLY the listed files — never any other file, never any other tool.\n"
     "4. Start with a single top-level heading (#) carrying the note's title.\n"
-    "5. Write body prose that summarises the source. Facts restated from the source "
-    "are unadorned; any statement that goes beyond what the source says must be "
-    "marked as a synthesis statement.\n"
+    "5. Write body prose that summarises the source. Start DIRECTLY with "
+    "the first source-derived fact. NEVER write a preamble or intro "
+    "(\"This note …\", \"The following …\", \"We summarize …\", \"This "
+    "document covers …\"), NEVER a statement about the note's own "
+    "structure (\"All body statements …\", \"Cross-source comparisons appear "
+    "in the Synthesis section\"), and NEVER a meta-claim ABOUT a source "
+    "(\"P1 presents three techniques\", \"source X argues\") — restate the "
+    "fact itself instead. Every body sentence restates a fact FROM a "
+    "source (each linked per rule 6); any statement that goes beyond the "
+    "source — a cross-source comparison, a generalization, a judgment, or "
+    "an inference — MUST go in the ## Synthesis section as a '> Synthesis:' "
+    "bullet (rule 7), never in the body prose.\n"
     "6. Factual fidelity: statistics or specific numbers absent from the source "
     "material MUST be omitted or marked as a synthesis statement — never invented, "
     "rounded, or approximated from memory. In a synthesis over multiple sources, "
     "every fact taken from a source MUST be followed by an inline link "
-    "[[filename|alias]] naming the parent it comes from (the link target is the "
-    "stem of the parent's listed path); a single-source note needs no links.\n"
+    "[[link_key|alias]] naming the parent it comes from (the link target is the "
+    "link_key listed for that document, e.g. P1); a single-source note needs no links.\n"
     "7. End with a ## Synthesis section whose body is one or more bullet points, "
     "each of the form \"> Synthesis: <inference>\". There MUST be at least one "
     "such statement. The exact prefix '> Synthesis:' is required.\n"
@@ -188,11 +204,11 @@ _HOST_TOOLS: list[dict] = [
         "label": "Submit Validation Verdicts",
         "description": (
             "Submit the adversarial-validation verdicts: V1 evidence checks "
-            "carry a per-claim verdicts array (claim, verdict, evidence_quote "
-            "for SUPPORTED; source_examined + absence_explanation for "
-            "UNSUPPORTED); V2 re-elaboration carries a single passes/reason "
-            "pair. This is the authoritative answer — do not also print the "
-            "payload as plain text."
+            "carry a per-claim verdicts array (claim_index, verdict, and "
+            "parent_key + evidence_anchor for SUPPORTED; parent_key + "
+            "absence_explanation for UNSUPPORTED); V2 re-elaboration carries "
+            "a single passes/reason pair. This is the authoritative answer "
+            "— do not also print the payload as plain text."
         ),
         "parameters": {
             "type": "object",
@@ -202,13 +218,13 @@ _HOST_TOOLS: list[dict] = [
                     "items": {
                         "type": "object",
                         "properties": {
-                            "claim": {"type": "string"},
+                            "claim_index": {"type": "integer"},
                             "verdict": {
                                 "type": "string",
                                 "enum": ["SUPPORTED", "COMMON_KNOWLEDGE", "UNSUPPORTED"],
                             },
-                            "evidence_quote": {"type": "string"},
-                            "source_examined": {"type": "string"},
+                            "parent_key": {"type": "string"},
+                            "evidence_anchor": {"type": "string"},
                             "absence_explanation": {"type": "string"},
                         },
                     },

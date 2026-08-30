@@ -848,7 +848,7 @@ class TestDeriveValidationFamily:
         from tests.fake_llm_client import FakeAgentDivergent
 
         monkeypatch.setenv(
-            "MEMEX_JUDGE", "tests.fake_llm_client:FakeJudgeNotesHonest"
+            "MEMEX_JUDGE", "tests.fake_llm_client:FakeJudge"
         )
         ingested = self._ingest(store, "https://example.com/article")
         agent = FakeAgentDivergent(
