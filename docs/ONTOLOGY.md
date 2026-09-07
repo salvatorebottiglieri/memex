@@ -227,8 +227,8 @@ Constants `MIN_CHARS` and `MAX_CHARS` live in `rules.py`.
 ```
 Rule D0 — Auto-verified gate
   A node passes from 'draft' to 'auto-verified' ONLY if all checks D1–D6 pass
-  AND the validation DAG passes: V1 (grounding) → D7 (quote
-  verification over V1's verdicts) → V2 (re-elaboration quality,
+  AND the validation DAG passes: V1 (grounding) → D7 (grounding
+  resolution over V1's verdicts) → V2 (re-elaboration quality,
   consuming V1's verdicts; skipped when V1 is fatal).
   MEMEX_VALIDATION=off disables the DAG (deterministic D1–D7 never opt
   out — D7 runs over V1's verdicts and is vacuous without them).
@@ -290,7 +290,7 @@ Rule S6 — Factual fidelity (prompt contract)
 Rule V1 — Evidence support (LLM-judged, DAG root)
   Every unadorned claim in the body is judged SUPPORTED /
   COMMON_KNOWLEDGE / UNSUPPORTED against the parent content, with an
-  evidence quote. COMMON_KNOWLEDGE covers generic uncontroversial
+  optional evidence_hint locator. COMMON_KNOWLEDGE covers generic uncontroversial
   facts only; quantitative claims about specific entities are NEVER
   exempt. In syntheses, a source-derived fact WITHOUT a link is
   UNSUPPORTED (missing declaration); a claim WITH a link is judged
@@ -300,9 +300,9 @@ Rule V1 — Evidence support (LLM-judged, DAG root)
   never redirects the judgment to a parent that does not exist).
   Negative-verdict contract: every UNSUPPORTED verdict cites the
   claim, the source examined, and why the source does not contain it
-  (source_examined, absence_explanation). An UNSUPPORTED verdict
+  (parent_key, absence_explanation). An UNSUPPORTED verdict
   lacking either field produces a deterministic contract-violation
-  failure (symmetric to D7's SUPPORTED-without-quote failure). A
+  failure (symmetric to D7's ungrounded-SUPPORTED failure). A
   verdict shortfall (a presented claim with no matching verdict,
   including an empty set) emits a warning — coverage is
   correlated per presented claim INSTANCE (whitespace-normalized
@@ -314,16 +314,25 @@ Rule V1 — Evidence support (LLM-judged, DAG root)
   are coverage gaps, never a clean pass; grounding coverage is
   then incomplete, never silently clean.
 
-Rule D7 — Evidence-quote verification (deterministic, over V1's output)
-  Every evidence_quote V1 cites for a SUPPORTED verdict must appear
+Rule D7 — Grounding resolution (deterministic, over V1's output)
+  For every SUPPORTED verdict the system RESOLVES the evidence span
   in the cited source (linked parent for syntheses, single parent
-  for notes). Matching is a literal substring with a
-  whitespace-collapsed fallback: quote and source are compared with
-  every run of whitespace collapsed to a single space (LLMs re-wrap
-  line breaks; a fabricated quote differs in words, not whitespace).
-  Quote not found → failure D7. This keeps
-  LLM-judged evidence honest: an LLM that hallucinates a claim can
-  hallucinate the supporting quote. COMMON_KNOWLEDGE is backstopped
+  for notes) instead of trusting judge-supplied text: candidate =
+  evidence_hint (an optional short locator the judge MAY paraphrase)
+  or the claim itself; a sliding window over sentence-aligned
+  passages of the NORMALIZED source (NUL-stripped, NFKC +
+  look-alike folded, HTML-entity-decoded) picks the tightest
+  passage with the best candidate content-token coverage;
+  confidence = coverage; the span is verbatim by construction.
+  Grounding gate (fail-closed): the claim is grounded only if it
+  carries at least MIN_CONTENT_TOKENS (2) content tokens (numbers +
+  non-stopword words, len >= 3) and >= GROUNDING_THRESHOLD (0.6) of
+  them appear in the resolved span. Not grounded → failure D7:
+  the system overrides the judge (SUPPORTED + no grounded span =
+  draft). This keeps LLM-judged evidence honest: an LLM that
+  hallucinates a claim can fabricate a hint, and a fabricated or
+  paraphrased hint whose content does not co-occur with the claim
+  in a tight passage grounds nothing. COMMON_KNOWLEDGE is backstopped
   too: a COMMON_KNOWLEDGE verdict on a link-free synthesis claim is
   a missing declaration (a source-derived fact without an inline
   link is UNSUPPORTED) and fails deterministically. The cited
@@ -341,7 +350,7 @@ Rule V2 — Re-elaboration quality (LLM-judged, consumes V1's verdicts)
   carries V1's per-claim verdicts (the body as V1 saw it).
 
 DAG execution: waves run in ascending registry order (V1 first; D7
-  verifies V1's quotes inside V1's wave; V2 declares
+  resolves V1's grounding inside V1's wave; V2 declares
   depends_on=("V1",) + skip_when_fatal, so it runs after D7 and is
   SKIPPED when V1 has fatal failures — the node is draft already,
   re-derive re-runs both). The DAG is declarative: VALIDATION_RULES
@@ -359,7 +368,7 @@ Rule V3 — Registry curation (process, not a criterion)
   N overlapping mini-judges.
 ```
 
-Implementation: agent system prompts (factual fidelity), `validators.validate.run_validations()` + `VALIDATION_RULES` in `rules.py` (V1–V2) with D7 quote verification in `validate.py`. Judge = `MEMEX_JUDGE` or the derive agent; `submit_verdicts` host tool (pi.py) carries structured verdicts.
+Implementation: agent system prompts (factual fidelity), `validators.validate.run_validations()` + `VALIDATION_RULES` in `rules.py` (V1–V2) with D7 grounding resolution in `validate.py`. Judge = `MEMEX_JUDGE` or the derive agent; `submit_verdicts` host tool (pi.py) carries structured verdicts.
 
 ---
 

@@ -1,19 +1,32 @@
 """Tests for run_validations() — the validation DAG (V1 → D7 → V2).
 
 Covers the dispatch paths of the always-on adversarial validations:
-  - all-SUPPORTED judge → CheckResult(passed=True, failures=[])
+  - all-SUPPORTED judge → CheckResult(passed=True, failures=[]) + one
+    grounded-evidence record per SUPPORTED claim (I5)
   - UNSUPPORTED claim → fatal failure prefixed with the rule id ("V1: ...")
-    carrying source_examined + absence_explanation (negative-verdict contract)
+    carrying parent_key + absence_explanation (negative-verdict contract)
   - synthesis claim without an inline link → UNSUPPORTED (missing declaration)
   - claim linked to a parent that does not support it → failure
-  - D7: a fabricated evidence quote (not in the cited source) → draft
-  - D7: a literal quote passes
+  - D7: SUPPORTED verdict whose claim is not grounded in the cited parent
+    (fabricated hint or claim absent from the parent) → draft (I1, I6)
+  - D7: a SUPPORTED verdict without an evidence_hint still grounds when the
+    claim itself is token-covered by the parent (missing hint alone is no
+    longer a failure)
+  - D7: a claim_index that does not correlate to a presented slice → fatal,
+    no record (must not crash)
+  - D7: parent_key missing/invalid → fall back to any readable parent
+  - evidence records: UNSUPPORTED/COMMON_KNOWLEDGE verdicts never produce a
+    record (I3); grounded spans are verbatim substrings of the normalized
+    parent (I4)
   - DAG: when V1 produces fatal failures, V2 is skipped (no judge call)
   - V2 boilerplate → quality-level failure ("V2: ...", severity=quality)
   - judge raising → pass-with-warning (graceful degradation, never raises)
   - judge returning non-JSON → pass-with-warning
   - judge without call_llm (DemoAgent) → pass-with-warning (never silently skipped)
   - reader judges receive allow_read=True and path references
+  - fixture groundings: under the D7 token-coverage gate a claim must
+    actually be covered by the cited parent's content (ticket #152 scope 9),
+    so every fixture's claim sentences are drawn verbatim from its parents.
 """
 from __future__ import annotations
 
@@ -25,12 +38,28 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from memex.derivers.demo import DemoAgent
-from memex.validators.validate import run_validations, _quote_in_source
+from memex.validators.validate import run_validations
 from tests.fake_llm_client import FakeJudge
 
 
 def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# Default single parent content — a sentence pool every generic fixture
+# claim is drawn from, so D7's token-coverage gate has real evidence to
+# find (the old "This claim is fine."-against-boilerplate fixtures no
+# longer ground: a claim must be token-covered by its cited parent).
+_PARENT_SENTENCE_1 = (
+    "The memex system derives notes from source documents and records "
+    "provenance edges."
+)
+_PARENT_SENTENCE_2 = "This claim is fine and grounded in the cited parent."
+_PARENT_SENTENCE_3 = "The source material covers the subject thoroughly."
+_DEFAULT_PARENT = (
+    f"{_PARENT_SENTENCE_1} {_PARENT_SENTENCE_2} {_PARENT_SENTENCE_3} "
+)
+_PAD = _PARENT_SENTENCE_3 + " "
 
 
 def _setup(
@@ -48,7 +77,7 @@ def _setup(
     """
     from memex.store import Store
 
-    parents = parents or {"parent.md": "Parent content with supporting facts. " * 6}
+    parents = parents or {"parent.md": _DEFAULT_PARENT}
     db_path = tmp_path / "memex.db"
     with Store.open(db_path) as store:
         store.init_schema()
@@ -76,37 +105,42 @@ def _setup(
     return con, node_id, node_path
 
 
-_PAD = "The source material covers the subject thoroughly. "
-
-
 # ── Deterministic fake judges ───────────────────────────────────────
 
 class _PromptJudge(FakeJudge):
     """Prompt-parsing fake judge: the V1/V2 verdict generation for the
     always-on validations. The V1 prompt-parsing helpers (_parse_parents,
-    _cited_source, _excerpt) are inherited from FakeJudge
+    _presented_slices) are inherited from FakeJudge
     (tests/fake_llm_client.py) so the two fakes never drift apart."""
 
     def _v2(self, prompt: str) -> str:
         return json.dumps({"passes": True, "reason": "ok"})
 
 
+def _supported(
+    claim_index: int, parent_key: str | None = None, hint: str | None = None
+) -> dict:
+    """A SUPPORTED verdict: parent_key reference plus an OPTIONAL
+    evidence_hint locator (the parser normalizes a missing hint to '' and
+    D7 falls back to the claim text)."""
+    verdict = {"claim_index": claim_index, "verdict": "SUPPORTED"}
+    if parent_key:
+        verdict["parent_key"] = parent_key
+    if hint:
+        verdict["evidence_hint"] = hint
+    return verdict
+
+
 class _SupportedJudge(_PromptJudge):
-    """Every claim SUPPORTED with a literal excerpt; V2 passes."""
+    """Every claim SUPPORTED (no hint — the claim text is the candidate);
+    V2 passes."""
 
     def call_llm(self, prompt: str, *, allow_read: bool = False) -> str:
         if "Synthesis statements:" in prompt:
             return self._v2(prompt)
-        parents = self._parse_parents(prompt)
         slices = FakeJudge._presented_slices(prompt)
         verdicts = [
-            {
-                "claim_index": s["index"],
-                "verdict": "SUPPORTED",
-                "parent_key": s["key"],
-                "evidence_anchor": self._excerpt(s["key"], parents),
-            }
-            for s in slices
+            _supported(s["index"], s["key"]) for s in slices
         ]
         return json.dumps({"verdicts": verdicts})
 
@@ -117,7 +151,6 @@ class _UnsupportedJudge(_SupportedJudge):
     def call_llm(self, prompt: str, *, allow_read: bool = False) -> str:
         if "Synthesis statements:" in prompt:
             return self._v2(prompt)
-        parents = self._parse_parents(prompt)
         slices = FakeJudge._presented_slices(prompt)
         verdicts = []
         for s in slices:
@@ -131,14 +164,7 @@ class _UnsupportedJudge(_SupportedJudge):
                     }
                 )
             else:
-                verdicts.append(
-                    {
-                        "claim_index": s["index"],
-                        "verdict": "SUPPORTED",
-                        "parent_key": s["key"],
-                        "evidence_anchor": self._excerpt(s["key"], parents),
-                    }
-                )
+                verdicts.append(_supported(s["index"], s["key"]))
         return json.dumps({"verdicts": verdicts})
 
 
@@ -149,7 +175,6 @@ class _MissingLinkJudge(_SupportedJudge):
     def call_llm(self, prompt: str, *, allow_read: bool = False) -> str:
         if "Synthesis statements:" in prompt:
             return self._v2(prompt)
-        parents = self._parse_parents(prompt)
         slices = FakeJudge._presented_slices(prompt)
         is_synthesis = "Node tier: synthesis" in prompt
         verdicts = []
@@ -165,14 +190,7 @@ class _MissingLinkJudge(_SupportedJudge):
                     }
                 )
             else:
-                verdicts.append(
-                    {
-                        "claim_index": s["index"],
-                        "verdict": "SUPPORTED",
-                        "parent_key": s["key"],
-                        "evidence_anchor": self._excerpt(s["key"], parents),
-                    }
-                )
+                verdicts.append(_supported(s["index"], s["key"]))
         return json.dumps({"verdicts": verdicts})
 
 
@@ -189,8 +207,19 @@ class _LinkedParentJudge(_SupportedJudge):
             return self._v2(prompt)
         parents = self._parse_parents(prompt)
         slices = FakeJudge._presented_slices(prompt)
+        is_synthesis = "Node tier: synthesis" in prompt
         verdicts = []
         for s in slices:
+            if is_synthesis and s["key"] is None:
+                verdicts.append(
+                    {
+                        "claim_index": s["index"],
+                        "verdict": "UNSUPPORTED",
+                        "parent_key": "no linked parent",
+                        "absence_explanation": "missing declaration",
+                    }
+                )
+                continue
             if s["key"]:
                 content = parents.get(s["key"], "")
                 tokens = re.findall(r"TOKEN-([A-Z0-9]+)", s["claim"])
@@ -204,31 +233,24 @@ class _LinkedParentJudge(_SupportedJudge):
                         }
                     )
                     continue
-            verdicts.append(
-                {
-                    "claim_index": s["index"],
-                    "verdict": "SUPPORTED",
-                    "parent_key": s["key"],
-                    "evidence_anchor": self._excerpt(s["key"], parents),
-                }
-            )
+            verdicts.append(_supported(s["index"], s["key"]))
         return json.dumps({"verdicts": verdicts})
 
 
-class _FabricatedQuoteJudge(_SupportedJudge):
-    """SUPPORTED verdicts cite an anchor that is NOT in the cited source."""
+class _FabricatedHintJudge(_SupportedJudge):
+    """SUPPORTED verdicts carry a fabricated evidence_hint that is NOT in
+    the cited source — the deterministic resolver cannot ground it."""
 
     def call_llm(self, prompt: str, *, allow_read: bool = False) -> str:
         if "Synthesis statements:" in prompt:
             return self._v2(prompt)
         slices = FakeJudge._presented_slices(prompt)
         verdicts = [
-            {
-                "claim_index": s["index"],
-                "verdict": "SUPPORTED",
-                "parent_key": s["key"],
-                "evidence_anchor": "this fabricated anchor does not appear anywhere in the source",
-            }
+            _supported(
+                s["index"],
+                s["key"],
+                hint="this fabricated quote appears nowhere in the source",
+            )
             for s in slices
         ]
         return json.dumps({"verdicts": verdicts})
@@ -286,7 +308,7 @@ class _GarbageJudge(_SupportedJudge):
 
 class _ReaderJudge(_SupportedJudge):
     """Reader judge: records allow_read and whether paths reached the prompt,
-    then reads the parent file itself (as a reader agent would) to quote it."""
+    then reads the parent file itself (as a reader agent would)."""
 
     can_read_files = True
 
@@ -298,26 +320,14 @@ class _ReaderJudge(_SupportedJudge):
         self.captured["has_path"] = "parent.md" in prompt and "path:" in prompt
         if "Synthesis statements:" in prompt:
             return self._v2(prompt)
-        m = re.search(r"path: (\S+)", prompt)
-        content = ""
-        if m and Path(m.group(1)).exists():
-            content = Path(m.group(1)).read_text(encoding="utf-8")
         slices = FakeJudge._presented_slices(prompt)
-        verdicts = [
-            {
-                "claim_index": s["index"],
-                "verdict": "SUPPORTED",
-                "parent_key": s["key"],
-                "evidence_anchor": re.sub(r"\s+", " ", content).strip()[:80],
-            }
-            for s in slices
-        ]
+        verdicts = [_supported(s["index"], s["key"]) for s in slices]
         return json.dumps({"verdicts": verdicts})
 
 
 class _PromptCapturingJudge(_PromptJudge):
-    """Records the V1 prompt; SUPPORTED verdicts quote the single parent
-    (the notes exemption — inline links never redirect the source)."""
+    """Records the V1 prompt; SUPPORTED verdicts carry no hint (the notes
+    exemption — inline links never redirect the source)."""
 
     def __init__(self) -> None:
         self.v1_prompt: str | None = None
@@ -327,24 +337,15 @@ class _PromptCapturingJudge(_PromptJudge):
             return self._v2(prompt)
         if self.v1_prompt is None:
             self.v1_prompt = prompt
-        parents = self._parse_parents(prompt)
         slices = FakeJudge._presented_slices(prompt)
-        verdicts = [
-            {
-                "claim_index": s["index"],
-                "verdict": "SUPPORTED",
-                "parent_key": s["key"],
-                "evidence_anchor": self._excerpt(next(iter(parents), None), parents),
-            }
-            for s in slices
-        ]
+        verdicts = [_supported(s["index"], s["key"]) for s in slices]
         return json.dumps({"verdicts": verdicts})
 
 
-class _TailQuoteCapturingJudge(_PromptJudge):
-    """SUPPORTED verdicts quote a marker at the very tail of the parent —
-    beyond any prompt cap — proving D7 compares against the FULL content
-    while the inlined prompt copy is capped."""
+class _TailMarkerJudge(_PromptJudge):
+    """SUPPORTED verdicts with no hint; the judge captures the V1 prompt to
+    prove the resolver runs against the FULL parent content while the
+    inlined prompt copy is capped."""
 
     def __init__(self) -> None:
         self.v1_prompt: str | None = None
@@ -355,23 +356,14 @@ class _TailQuoteCapturingJudge(_PromptJudge):
         if self.v1_prompt is None:
             self.v1_prompt = prompt
         slices = FakeJudge._presented_slices(prompt)
-        verdicts = [
-            {
-                "claim_index": s["index"],
-                "verdict": "SUPPORTED",
-                "parent_key": s["key"],
-                "evidence_anchor": "TAIL-MARKER-QUOTE",
-            }
-            for s in slices
-        ]
+        verdicts = [_supported(s["index"], s["key"]) for s in slices]
         return json.dumps({"verdicts": verdicts})
 
 
 class _CountingSupportedJudge(_SupportedJudge):
-    """SUPPORTED verdicts with literal excerpts (like _SupportedJudge) plus
-    a judge-call counter and the captured V1/V2 prompts — proves an
-    oversized prompt (multi-parent or node-body side) never silently skips
-    the V1/V2 waves."""
+    """SUPPORTED verdicts (like _SupportedJudge) plus a judge-call counter
+    and the captured V1/V2 prompts — proves an oversized prompt
+    (multi-parent or node-body side) never silently skips the V1/V2 waves."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -392,7 +384,7 @@ class _CountingSupportedJudge(_SupportedJudge):
 
 class _NulEchoingReaderJudge(_PromptJudge):
     """Reader judge (can_read_files=True) that echoes the RAW parent file:
-    evidence quotes may carry the PDF ToUnicode NUL bytes a raw read
+    its evidence_hint may carry the PDF ToUnicode NUL bytes a raw read
     exposes, which the NUL-stripped prompt surface never shows."""
 
     can_read_files = True
@@ -407,14 +399,14 @@ class _NulEchoingReaderJudge(_PromptJudge):
         self.reader_surface = allow_read
         slices = FakeJudge._presented_slices(prompt)
         verdicts = [
-            {
-                "claim_index": s["index"],
-                "verdict": "SUPPORTED",
-                "parent_key": s["key"],
-                # Echoed from the RAW read: the NUL byte sits between the
-                # words exactly as reading the un-stripped file shows.
-                "evidence_anchor": "NUL \x00 parent content supporting the claim text. ",
-            }
+            _supported(
+                s["index"],
+                s["key"],
+                # A locator echoed from the RAW read: the NUL byte sits
+                # between the words exactly as reading the un-stripped file
+                # shows; normalization strips it before resolution.
+                hint="NUL \x00 parent content supporting the claim text. ",
+            )
             for s in slices
         ]
         return json.dumps({"verdicts": verdicts})
@@ -437,11 +429,28 @@ class _CommonKnowledgeJudge(_SupportedJudge):
         )
 
 
+class _DuplicateVerdictJudge(_SupportedJudge):
+    """Two SUPPORTED verdicts for the SAME claim_index (both groundable).
+
+    Real judges can repeat a reference; the V1 coverage machinery counts
+    duplicate verdicts as a coverage gap. D7 must record exactly ONE
+    evidence record per grounded claim (I5) — never N for N duplicate
+    verdicts.
+    """
+
+    def call_llm(self, prompt: str, *, allow_read: bool = False) -> str:
+        if "Synthesis statements:" in prompt:
+            return self._v2(prompt)
+        slices = FakeJudge._presented_slices(prompt)
+        verdict = _supported(slices[0]["index"], slices[0]["key"])
+        return json.dumps({"verdicts": [verdict, dict(verdict)]})
+
+
 # ── Tests ───────────────────────────────────────────────────────────
 
 class TestRunValidations:
     def test_all_supported_passes(self, tmp_path):
-        """SUPPORTED verdicts with literal quotes → V1 + D7 + V2 all pass.
+        """SUPPORTED verdicts on grounded claims → V1 + D7 + V2 all pass.
 
         Uses a counting judge: the pass must come from an actual judge turn
         returning one verdict per presented claim — not from an empty
@@ -449,7 +458,10 @@ class TestRunValidations:
         silently skips the judge call would also produce)."""
         con, node_id, node_path = _setup(
             tmp_path,
-            prose=f"# Note\n\nThis claim is fine. This one too.\n\n> Synthesis: inf\n\n{_PAD}",
+            prose=(
+                f"# Note\n\n{_PARENT_SENTENCE_2} {_PARENT_SENTENCE_3}.\n\n"
+                f"> Synthesis: inf\n\n{_PAD}"
+            ),
             statements=["inf"],
         )
         judge = _CountingJudge()
@@ -478,7 +490,7 @@ class TestRunValidations:
         assert any(f.startswith("V1:") and "SENTINEL" in f for f in result.failures)
 
     def test_unsupported_verdict_carries_negative_contract(self, tmp_path):
-        """UNSUPPORTED failures cite source_examined + absence_explanation."""
+        """UNSUPPORTED failures cite parent_key + absence_explanation."""
         con, node_id, node_path = _setup(
             tmp_path,
             prose=f"# Note\n\nThis claim states the SENTINEL figure.\n\n> Synthesis: inf\n\n{_PAD}",
@@ -526,7 +538,7 @@ class TestRunValidations:
             prose=(
                 "# S\n\n"
                 "Claim A mentions TOKEN-ALPHA [[p-a|A]]. "
-                "Claim B states TOKEN-BETA via [[p-a|A]].\n\n"
+                "Claim B states TOKEN-BETA [[p-a|A]].\n\n"
                 f"> Synthesis: inf\n\n{_PAD}"
             ),
             statements=["inf"],
@@ -540,39 +552,80 @@ class TestRunValidations:
         assert result.passed is False
         # The TOKEN-BETA claim (linked to p-a, which lacks it) is flagged…
         assert any(f.startswith("V1:") and "TOKEN-BETA" in f for f in result.failures)
-        # …while the TOKEN-ALPHA claim (linked to p-a, which has it) is not.
+        # …while the TOKEN-ALPHA claim (linked to p-a, which has it) is
+        # grounded and passes D7.
         assert not any("TOKEN-ALPHA" in f and "Unsupported" in f for f in result.failures)
+        assert not any(f.startswith("D7:") for f in result.failures)
 
-    def test_d7_fabricated_quote_goes_draft(self, tmp_path):
-        """D7: a SUPPORTED verdict citing a quote absent from the source →
-        fatal D7 failure."""
+    def test_d7_fabricated_hint_goes_draft(self, tmp_path):
+        """D7: a SUPPORTED verdict whose evidence_hint is fabricated (absent
+        from the source) cannot ground the claim → fatal D7 failure (I6)."""
         con, node_id, node_path = _setup(
             tmp_path,
-            prose=f"# Note\n\nThis claim is fine.\n\n> Synthesis: inf\n\n{_PAD}",
+            prose=(
+                f"# Note\n\n{_PARENT_SENTENCE_2}\n\n"
+                f"> Synthesis: inf\n"
+            ),
             statements=["inf"],
         )
-        result = run_validations(_FabricatedQuoteJudge(), con, node_id, node_path)
+        result = run_validations(_FabricatedHintJudge(), con, node_id, node_path)
         con.close()
         assert result.passed is False
         d7_failures = [f for f in result.failures if f.startswith("D7:")]
         assert d7_failures
         assert any("[severity=fatal]" in f for f in d7_failures)
-        assert any("Evidence anchor not found" in f for f in d7_failures)
+        assert any("not grounded" in f for f in d7_failures)
 
-    def test_d7_missing_quote_on_supported_goes_draft(self, tmp_path):
-        """D7: a SUPPORTED verdict without any evidence quote → failure."""
+    def test_d7_claim_absent_from_parent_goes_draft(self, tmp_path):
+        """I1: a SUPPORTED verdict on a claim the cited parent does not
+        state is D7-fatal (regression of today's D7 — the judge's yes is
+        not enough; the system must find the claim in the parent)."""
         con, node_id, node_path = _setup(
             tmp_path,
-            prose=f"# Note\n\nThis claim is fine.\n\n> Synthesis: inf\n\n{_PAD}",
+            prose=(
+                "# Note\n\n"
+                "The parser normalizes unicode entities aggressively.\n\n"
+                "> Synthesis: inf\n"
+            ),
             statements=["inf"],
+            parents={"parent.md": "The database exports the full ledger each evening. " * 4},
+        )
+        result = run_validations(_SupportedJudge(), con, node_id, node_path)
+        con.close()
+        assert result.passed is False
+        d7_failures = [f for f in result.failures if f.startswith("D7:")]
+        assert d7_failures
+        assert any("[severity=fatal]" in f for f in d7_failures)
+        assert any("not grounded" in f for f in d7_failures)
+
+    def test_d7_hint_in_parent_but_claim_absent_goes_draft(self, tmp_path):
+        """I1 regression of today's D7: the judge supplies an evidence_hint
+        that IS a verbatim parent sentence (the old anchor check would
+        auto-verify), yet the CLAIM itself is absent from the parent — the
+        grounding gate must still draft the node."""
+        con, node_id, node_path = _setup(
+            tmp_path,
+            prose=(
+                "# Note\n\n"
+                "The parser normalizes unicode entities aggressively.\n\n"
+                "> Synthesis: inf\n"
+            ),
+            statements=["inf"],
+            parents={"parent.md": "The database exports the full ledger each evening. " * 4},
         )
         judge = _SupportedJudge()
 
         def _call(prompt, *, allow_read=False):
+            # A genuine locator (it IS in the parent) — but the claim's
+            # words are not covered by the passage it points at.
             return json.dumps(
                 {
                     "verdicts": [
-                        {"claim_index": 1, "verdict": "SUPPORTED"}
+                        _supported(
+                            1,
+                            "P1",
+                            hint="The database exports the full ledger each evening.",
+                        )
                     ]
                 }
             )
@@ -581,21 +634,108 @@ class TestRunValidations:
         result = run_validations(judge, con, node_id, node_path)
         con.close()
         assert result.passed is False
-        assert any(
-            f.startswith("D7:") and "without an evidence anchor" in f
-            for f in result.failures
-        )
+        d7_failures = [f for f in result.failures if f.startswith("D7:")]
+        assert any("[severity=fatal]" in f and "not grounded" in f for f in d7_failures)
+        assert result.evidence == []
 
-    def test_d7_resolves_source_from_anchor_when_parent_key_invalid(self, tmp_path):
+    def test_supported_without_hint_grounds_claim(self, tmp_path):
+        """A SUPPORTED verdict without any evidence_hint is no longer a
+        failure by itself: the claim text becomes the candidate, so a claim
+        genuinely covered by the parent still auto-verifies."""
+        con, node_id, node_path = _setup(
+            tmp_path,
+            prose=f"# Note\n\n{_PARENT_SENTENCE_2}\n\n> Synthesis: inf\n",
+            statements=["inf"],
+        )
+        judge = _SupportedJudge()
+
+        def _call(prompt, *, allow_read=False):
+            return json.dumps({"verdicts": [_supported(1, "P1")]})
+
+        judge.call_llm = _call  # type: ignore[method-assign]
+        result = run_validations(judge, con, node_id, node_path)
+        con.close()
+        assert result.passed is True, result.failures
+        assert result.evidence, "a grounded SUPPORTED claim must record evidence"
+
+    def test_supported_with_real_hint_grounds_claim(self, tmp_path):
+        """A SUPPORTED verdict with a genuine evidence_hint locator grounds:
+        the hint points at the parent passage that token-covers the claim."""
+        con, node_id, node_path = _setup(
+            tmp_path,
+            prose=f"# Note\n\n{_PARENT_SENTENCE_1}\n\n> Synthesis: inf\n",
+            statements=["inf"],
+        )
+        judge = _SupportedJudge()
+
+        def _call(prompt, *, allow_read=False):
+            # The hint is a partial leading fragment of the parent passage
+            # that states the claim (a locator, not the evidence itself).
+            return json.dumps(
+                {
+                    "verdicts": [
+                        _supported(
+                            1,
+                            "P1",
+                            hint="The memex system derives notes",
+                        )
+                    ]
+                }
+            )
+
+        judge.call_llm = _call  # type: ignore[method-assign]
+        result = run_validations(judge, con, node_id, node_path)
+        con.close()
+        assert result.passed is True, result.failures
+        assert len(result.evidence) == 1
+        assert result.evidence[0]["claim_index"] == 1
+        assert result.evidence[0]["parent_key"] == "P1"
+        assert result.evidence[0]["resolver"] == "deterministic"
+
+    def test_d7_uncorrelated_claim_index_goes_draft_without_record(self, tmp_path):
+        """A SUPPORTED verdict whose claim_index does not correlate to a
+        presented slice has no claim text to gate → D7 fatal, no record
+        (never a crash)."""
+        con, node_id, node_path = _setup(
+            tmp_path,
+            prose=(
+                f"# Note\n\n{_PARENT_SENTENCE_2} {_PARENT_SENTENCE_3}.\n\n"
+                f"> Synthesis: inf\n"
+            ),
+            statements=["inf"],
+        )
+        judge = _SupportedJudge()
+
+        def _call(prompt, *, allow_read=False):
+            return json.dumps(
+                {
+                    "verdicts": [
+                        _supported(1, "P1"),
+                        _supported(999, "P1"),  # no such presented claim
+                    ]
+                }
+            )
+
+        judge.call_llm = _call  # type: ignore[method-assign]
+        result = run_validations(judge, con, node_id, node_path)
+        con.close()
+        assert result.passed is False
+        d7_failures = [f for f in result.failures if f.startswith("D7:")]
+        assert any("[severity=fatal]" in f and "no claim text" in f for f in d7_failures)
+        # The stray verdict produced no record; only the grounded claim did.
+        assert [r["claim_index"] for r in result.evidence] == [1]
+
+    def test_d7_resolves_source_when_parent_key_invalid(self, tmp_path):
         """D7 fallback: a SUPPORTED verdict with a bad parent_key is still
-        grounded when the evidence anchor is verbatim in some parent — the
-        anchor, not the key, resolves the cited source."""
+        grounded when the claim is genuinely covered by a readable parent —
+        the claim/hint, not the key, resolves the cited source."""
         con, node_id, node_path = _setup(
             tmp_path,
             tier="synthesis",
             prose=(
                 "# S\n\n"
-                "A linked fact [[p-a|A]].\n\n"
+                "The database exports the full ledger each evening "
+                "[[p-a|A]].\n\n"
                 "> Synthesis: inf\n"
             ),
             statements=["inf"],
@@ -606,16 +746,15 @@ class TestRunValidations:
         def _call(prompt, *, allow_read=False):
             if "Synthesis statements:" in prompt:
                 return json.dumps({"passes": True, "reason": "ok"})
-            # An out-of-range parent key; the anchor is the reliable pointer.
+            # An out-of-range parent key; the hint is the reliable pointer.
             return json.dumps(
                 {
                     "verdicts": [
-                        {
-                            "claim_index": 1,
-                            "verdict": "SUPPORTED",
-                            "parent_key": "P99",
-                            "evidence_anchor": "The database exports the full ledger each evening.",
-                        }
+                        _supported(
+                            1,
+                            "P99",
+                            hint="The database exports the full ledger each evening.",
+                        )
                     ]
                 }
             )
@@ -625,6 +764,7 @@ class TestRunValidations:
         con.close()
         assert result.passed is True, result.failures
         assert not any(f.startswith("D7:") for f in result.failures)
+        assert result.evidence[0]["parent_key"] == "P1"
 
     def test_v1_fatal_skips_v2(self, tmp_path):
         """DAG: V1 fatal failures → V2 never called (single judge turn)."""
@@ -645,7 +785,10 @@ class TestRunValidations:
         """DAG: V1 clean → V2 runs (two judge turns) and passes."""
         con, node_id, node_path = _setup(
             tmp_path,
-            prose=f"# Note\n\nThis claim is fine.\n\n> Synthesis: inf\n\n{_PAD}",
+            prose=(
+                f"# Note\n\n{_PARENT_SENTENCE_2}\n\n"
+                f"> Synthesis: inf\n"
+            ),
             statements=["inf"],
         )
         judge = _CountingJudge()
@@ -657,7 +800,7 @@ class TestRunValidations:
     def test_v2_boilerplate_fails_with_quality_severity(self, tmp_path):
         con, node_id, node_path = _setup(
             tmp_path,
-            prose=f"# Note\n\nThis claim is fine.\n\n> Synthesis: SENTINEL-BOILERPLATE restatement\n\n{_PAD}",
+            prose=f"# Note\n\n{_PARENT_SENTENCE_2}\n\n> Synthesis: SENTINEL-BOILERPLATE restatement\n",
             statements=["SENTINEL-BOILERPLATE restatement"],
         )
         result = run_validations(_BoilerplateJudge(), con, node_id, node_path)
@@ -670,7 +813,7 @@ class TestRunValidations:
     def test_judge_raising_warns_and_skips(self, tmp_path, capsys):
         con, node_id, node_path = _setup(
             tmp_path,
-            prose=f"# Note\n\nThis claim is fine.\n\n> Synthesis: inf\n\n{_PAD}",
+            prose=f"# Note\n\n{_PARENT_SENTENCE_2}\n\n> Synthesis: inf\n",
             statements=["inf"],
         )
         result = run_validations(_RaisingJudge(), con, node_id, node_path)
@@ -683,7 +826,7 @@ class TestRunValidations:
     def test_judge_garbage_warns_and_skips(self, tmp_path, capsys):
         con, node_id, node_path = _setup(
             tmp_path,
-            prose=f"# Note\n\nThis claim is fine.\n\n> Synthesis: inf\n\n{_PAD}",
+            prose=f"# Note\n\n{_PARENT_SENTENCE_2}\n\n> Synthesis: inf\n",
             statements=["inf"],
         )
         result = run_validations(_GarbageJudge(), con, node_id, node_path)
@@ -701,7 +844,7 @@ class TestRunValidations:
         passes."""
         con, node_id, node_path = _setup(
             tmp_path,
-            prose=f"# Note\n\nThis claim is fine.\n\n> Synthesis: inf\n\n{_PAD}",
+            prose=f"# Note\n\n{_PARENT_SENTENCE_2}\n\n> Synthesis: inf\n",
             statements=["inf"],
         )
         result = run_validations(DemoAgent(), con, node_id, node_path)
@@ -715,7 +858,7 @@ class TestRunValidations:
     def test_reader_judge_receives_path_references(self, tmp_path):
         con, node_id, node_path = _setup(
             tmp_path,
-            prose=f"# Note\n\nThis claim is fine.\n\n> Synthesis: inf\n\n{_PAD}",
+            prose=f"# Note\n\n{_PARENT_SENTENCE_2}\n\n> Synthesis: inf\n",
             statements=["inf"],
         )
         judge = _ReaderJudge()
@@ -729,7 +872,7 @@ class TestRunValidations:
         """No provenance parents → nothing to ground against (D1 gates it)."""
         con, node_id, node_path = _setup(
             tmp_path,
-            prose=f"# Note\n\nThis claim is fine.\n\n> Synthesis: inf\n\n{_PAD}",
+            prose=f"# Note\n\n{_PARENT_SENTENCE_2}\n\n> Synthesis: inf\n",
             statements=["inf"],
         )
         con.execute("DELETE FROM edge WHERE from_node = ?", (node_id,))
@@ -745,7 +888,7 @@ class TestRunValidations:
         passes a node whose evidence cannot be read."""
         con, node_id, node_path = _setup(
             tmp_path,
-            prose=f"# Note\n\nThis claim is fine.\n\n> Synthesis: inf\n\n{_PAD}",
+            prose=f"# Note\n\n{_PARENT_SENTENCE_2}\n\n> Synthesis: inf\n",
             statements=["inf"],
         )
         node_path.unlink()
@@ -761,12 +904,12 @@ class TestRunValidations:
         """F1: a parent content file with invalid UTF-8 bytes (latin-1
         scraped pages, binary blobs placed in the vault) must not raise
         UnicodeDecodeError out of run_validations — the parent degrades to
-        content=None ('content unavailable'), D7 cannot verify the quote
+        content=None ('content unavailable'), D7 cannot resolve the claim
         and drafts the node, and the derive/synthesize call completes with
         a normal CheckResult instead of a traceback."""
         con, node_id, node_path = _setup(
             tmp_path,
-            prose=f"# Note\n\nThis claim is fine.\n\n> Synthesis: inf\n\n{_PAD}",
+            prose=f"# Note\n\n{_PARENT_SENTENCE_2}\n\n> Synthesis: inf\n",
             statements=["inf"],
             parents={"parent.md": "placeholder"},
         )
@@ -774,11 +917,11 @@ class TestRunValidations:
         result = run_validations(_SupportedJudge(), con, node_id, node_path)
         con.close()
         # No UnicodeDecodeError propagates; the failure is a normal
-        # deterministic D7 draft (quote unverifiable against missing
+        # deterministic D7 draft (claim unresolvable against missing
         # content) — never an exception that aborts the derive.
         assert result.passed is False
         assert any(
-            "D7:" in f and "Evidence anchor not found" in f
+            "D7:" in f and "[severity=fatal]" in f
             for f in result.failures
         )
 
@@ -788,7 +931,7 @@ class TestRunValidations:
         a fatal 'content read failed' CheckResult, never a crash."""
         con, node_id, node_path = _setup(
             tmp_path,
-            prose=f"# Note\n\nThis claim is fine.\n\n> Synthesis: inf\n\n{_PAD}",
+            prose=f"# Note\n\n{_PARENT_SENTENCE_2}\n\n> Synthesis: inf\n",
             statements=["inf"],
         )
         node_path.write_bytes(b"# Note\n\nThis claim has \xff\x80 invalid bytes.\n")
@@ -799,6 +942,136 @@ class TestRunValidations:
             "[severity=fatal]" in f and "Validation content read failed" in f
             for f in result.failures
         )
+
+
+class TestEvidenceRecords:
+    """I3 + I5 at the DAG level: records exist exactly for grounded
+    SUPPORTED claims, with verbatim spans (I4)."""
+
+    def test_all_supported_records_one_evidence_per_claim(self, tmp_path):
+        from memex.validators.evidence import normalize_surface
+
+        prose = (
+            "# Note\n\n"
+            f"{_PARENT_SENTENCE_1} {_PARENT_SENTENCE_2} "
+            f"{_PARENT_SENTENCE_3}.\n\n"
+            "> Synthesis: inf\n"
+        )
+        con, node_id, node_path = _setup(
+            tmp_path, prose=prose, statements=["inf"],
+        )
+        result = run_validations(_SupportedJudge(), con, node_id, node_path)
+        con.close()
+        assert result.passed is True, result.failures
+        # One record per grounded SUPPORTED claim (3 claims, 3 records).
+        assert [r["claim_index"] for r in result.evidence] == [1, 2, 3]
+        norm = normalize_surface(_DEFAULT_PARENT)
+        for record in result.evidence:
+            assert set(record) == {
+                "claim_index", "parent_key", "span_text", "confidence", "resolver",
+            }
+            assert record["parent_key"] == "P1"
+            assert record["resolver"] == "deterministic"
+            assert record["confidence"] == 1.0
+            # I4: the persisted span is a verbatim substring of the
+            # normalized parent content — the resolver selects, never
+            # generates.
+            assert record["span_text"] in norm
+
+    def test_unsupported_never_produces_evidence_record(self, tmp_path):
+        """I3: an UNSUPPORTED verdict is never resolved and never produces
+        an evidence record; its failure is V1's negative-verdict contract
+        only."""
+        prose = (
+            "# Note\n\n"
+            "This claim states the SENTINEL figure. "
+            f"{_PARENT_SENTENCE_2}\n\n"
+            "> Synthesis: inf\n"
+        )
+        con, node_id, node_path = _setup(
+            tmp_path, prose=prose, statements=["inf"],
+        )
+        result = run_validations(_UnsupportedJudge(), con, node_id, node_path)
+        con.close()
+        assert result.passed is False
+        assert any(f.startswith("V1:") for f in result.failures)
+        # Only the grounded SUPPORTED claim (index 2) recorded evidence.
+        assert [r["claim_index"] for r in result.evidence] == [2]
+
+    def test_unsupported_groundable_claim_never_records(self, tmp_path):
+        """I3 anti-vacuity: the UNSUPPORTED verdict here cites a claim the
+        parent token-covers (the deterministic resolver WOULD ground and
+        record it if the verdict were SUPPORTED — 6 of the claim's 7
+        content tokens sit in the parent). The record list must stay empty
+        because the verdict is UNSUPPORTED, not because the claim is
+        ungroundable: this test FAILS if UNSUPPORTED verdicts were ever
+        resolved/recorded."""
+        prose = (
+            "# Note\n\n"
+            "The memex system derives SENTINEL notes from source documents.\n\n"
+            "> Synthesis: inf\n"
+        )
+        con, node_id, node_path = _setup(
+            tmp_path, prose=prose, statements=["inf"],
+        )
+        result = run_validations(_UnsupportedJudge(), con, node_id, node_path)
+        con.close()
+        assert result.passed is False
+        assert any(f.startswith("V1:") for f in result.failures)
+        assert result.evidence == []
+
+    def test_common_knowledge_pass_records_nothing(self, tmp_path):
+        """I5 negative arm: a COMMON_KNOWLEDGE verdict is never resolved —
+        a passing node whose claim text the parent token-covers still
+        records no evidence (the deterministic resolver would ground it if
+        the verdict were SUPPORTED)."""
+        prose = (
+            "# Note\n\n"
+            f"{_PARENT_SENTENCE_2}\n\n"
+            "> Synthesis: inf\n"
+        )
+        con, node_id, node_path = _setup(
+            tmp_path, prose=prose, statements=["inf"],
+        )
+        result = run_validations(_CommonKnowledgeJudge(), con, node_id, node_path)
+        con.close()
+        assert result.passed is True, result.failures
+        assert result.evidence == []
+
+    def test_duplicate_supported_verdict_records_once(self, tmp_path):
+        """I5: a judge emitting TWO SUPPORTED verdicts for the same
+        claim_index (both groundable) yields exactly ONE evidence record
+        for that claim — duplicate verdicts never multiply records for a
+        single grounded claim."""
+        prose = (
+            "# Note\n\n"
+            f"{_PARENT_SENTENCE_2}\n\n"
+            "> Synthesis: inf\n"
+        )
+        con, node_id, node_path = _setup(
+            tmp_path, prose=prose, statements=["inf"],
+        )
+        result = run_validations(_DuplicateVerdictJudge(), con, node_id, node_path)
+        con.close()
+        assert result.passed is True, result.failures
+        assert [r["claim_index"] for r in result.evidence] == [1]
+
+    def test_ungrounded_supported_never_records(self, tmp_path):
+        """A SUPPORTED verdict that fails the gate records nothing."""
+        con, node_id, node_path = _setup(
+            tmp_path,
+            prose=(
+                "# Note\n\n"
+                "The parser normalizes unicode entities aggressively.\n\n"
+                "> Synthesis: inf\n"
+            ),
+            statements=["inf"],
+            parents={"parent.md": "The database exports the full ledger each evening. " * 4},
+        )
+        result = run_validations(_SupportedJudge(), con, node_id, node_path)
+        con.close()
+        assert result.passed is False
+        assert result.evidence == []
 
 
 class _EmptyVerdictsJudge(_SupportedJudge):
@@ -820,19 +1093,7 @@ class _PartialVerdictsJudge(_SupportedJudge):
         if not slices:
             return json.dumps({"verdicts": []})
         s = slices[0]
-        parents = self._parse_parents(prompt)
-        return json.dumps(
-            {
-                "verdicts": [
-                    {
-                        "claim_index": s["index"],
-                        "verdict": "SUPPORTED",
-                        "parent_key": s["key"],
-                        "evidence_anchor": self._excerpt(s["key"], parents),
-                    }
-                ]
-            }
-        )
+        return json.dumps({"verdicts": [_supported(s["index"], s["key"])]})
 
 
 class _BoolishPassJudge(_SupportedJudge):
@@ -924,7 +1185,7 @@ class TestVerdictShortfallWarning:
     def test_empty_verdict_set_warns_not_silent(self, tmp_path, capsys):
         con, node_id, node_path = _setup(
             tmp_path,
-            prose=f"# Note\n\nThis claim is fine.\n\n> Synthesis: inf\n\n{_PAD}",
+            prose=f"# Note\n\n{_PARENT_SENTENCE_2}\n\n> Synthesis: inf\n",
             statements=["inf"],
         )
         result = run_validations(_EmptyVerdictsJudge(), con, node_id, node_path)
@@ -940,8 +1201,8 @@ class TestVerdictShortfallWarning:
             tmp_path,
             prose=(
                 "# Note\n\n"
-                "First claim here. Second claim here.\n\n"
-                f"> Synthesis: inf\n\n{_PAD}"
+                f"{_PARENT_SENTENCE_2} {_PARENT_SENTENCE_3}.\n\n"
+                f"> Synthesis: inf\n"
             ),
             statements=["inf"],
         )
@@ -1005,8 +1266,9 @@ class TestTemplateFillingImmuneToPlaceholderText:
             tmp_path,
             prose=(
                 "# Note\n\n"
-                "This claim is fine. The body also says {parents} literally.\n\n"
-                f"> Synthesis: inf\n\n{_PAD}"
+                "The file mentions the literal placeholder text. "
+                "{v1_verdicts} and {parents} appear as literal text.\n\n"
+                "> Synthesis: inf\n"
             ),
             statements=["inf"],
             parents={"parent.md": parent_content},
@@ -1029,7 +1291,7 @@ class TestTemplateFillingImmuneToPlaceholderText:
             "mentions {v1_verdicts} and {slices} and {parents} as literal text"
             in judge.v2_prompt
         )
-        assert "The body also says {parents} literally." in judge.v2_prompt
+        assert "{v1_verdicts} and {parents} appear as literal text." in judge.v2_prompt
         # The judge still judged normally — preservation, not corruption.
         assert result.passed is True, result.failures
 
@@ -1046,8 +1308,9 @@ class TestV1PromptNotesExemption:
             tmp_path,
             prose=(
                 "# Note\n\n"
-                "This note states the fact and carries a stray [[ghost|Ghost]] link.\n\n"
-                f"> Synthesis: inf\n\n{_PAD}"
+                f"{_PARENT_SENTENCE_2} The source material covers the "
+                "subject thoroughly [[ghost|Ghost]].\n\n"
+                f"> Synthesis: inf\n"
             ),
             statements=["inf"],
         )
@@ -1056,53 +1319,59 @@ class TestV1PromptNotesExemption:
         con.close()
         assert judge.v1_prompt is not None
         assert "regardless of any inline links" in judge.v1_prompt
-        # The judge follows the exemption: the note's claim — despite its
-        # stray link — is SUPPORTED against the single parent, so the node
+        # The judge follows the exemption: every claim — despite its stray
+        # link — is SUPPORTED against the single parent, so the node
         # auto-verifies (no ghost parent exists to judge against).
         assert result.passed is True, result.failures
 
 
 class TestParentPromptCap:
     """F5: parent content inlined into judge prompts is NUL-stripped and
-    size-capped like the derive path's source content; D7's local quote
-    comparison still sees the FULL content."""
+    size-capped like the derive path's source content; D7's evidence
+    resolution still sees the FULL content (the resolver runs on the full
+    local content, not the capped prompt copy)."""
 
     def test_oversized_parent_inline_is_capped_but_d7_sees_full(self, tmp_path):
         from memex.utils.parsing import _MAX_PROMPT_CHARS
 
         parent_content = (
-            "Parent prefix. " + "\x00" * 10 + "x" * 300_000 + " TAIL-MARKER-QUOTE"
+            "Parent content prefix. " + "\x00" * 10 + "x" * 300_000
+            + " TAIL-MARKER-QUOTE caps the file."
         )
         con, node_id, node_path = _setup(
             tmp_path,
-            prose=f"# Note\n\nThis claim is fine.\n\n> Synthesis: inf\n\n{_PAD}",
+            prose=(
+                "# Note\n\n"
+                "Parent content prefix. TAIL-MARKER-QUOTE caps the file.\n\n"
+                "> Synthesis: inf\n"
+            ),
             statements=["inf"],
             parents={"parent.md": parent_content},
         )
-        judge = _TailQuoteCapturingJudge()
+        judge = _TailMarkerJudge()
         result = run_validations(judge, con, node_id, node_path)
         con.close()
         assert judge.v1_prompt is not None
+        parents_block = judge.v1_prompt.split("Parent P1:", 1)[1]
         # Inlined parent content is capped: the tail beyond the cap and the
         # NUL bytes never reach the judge.
-        assert "TAIL-MARKER-QUOTE" not in judge.v1_prompt
-        assert "\x00" not in judge.v1_prompt
-        assert "[source content truncated" in judge.v1_prompt
+        assert "TAIL-MARKER-QUOTE" not in parents_block
+        assert "\x00" not in parents_block
+        assert "[source content truncated" in parents_block
         assert len(judge.v1_prompt) < _MAX_PROMPT_CHARS + 5_000
-        # D7 verifies against the full local content: the tail quote is
-        # found, so the node still auto-verifies.
+        # D7 resolves against the full local content: the tail claim is
+        # token-covered there, so the node still auto-verifies.
         assert result.passed is True, result.failures
 
 
-class TestD7NulByteQuoteVerification:
+class TestD7NulByteResolution:
     """F3: parent content is NUL-stripped at load (_load_parents), so D7's
-    local quote comparison verifies against the same surface the judge saw
-    (the prompt copy is NUL-stripped by _cap_prompt_content). A judge
-    verbatim-quoting a passage that spans a NUL byte (PDF ToUnicode
-    artifact) in the raw file must not produce a spurious fatal 'Evidence
-    quote not found' — the NUL-free quote matches the NUL-stripped parent."""
+    evidence resolution runs against the same surface the judge saw (the
+    prompt copy is NUL-stripped by _cap_prompt_content). A judge whose
+    claim/hint spans a NUL byte (PDF ToUnicode artifact) in the raw file
+    must still ground — the NUL-stripped surface carries the words."""
 
-    def test_quote_spanning_nul_byte_verifies_against_stripped_parent(
+    def test_claim_spanning_nul_byte_grounds_against_stripped_parent(
         self, tmp_path
     ):
         raw = b"NUL \x00 parent content supporting the claim text. " * 4
@@ -1111,7 +1380,7 @@ class TestD7NulByteQuoteVerification:
             prose=(
                 "# Note\n\n"
                 "NUL parent content supporting the claim text.\n\n"
-                f"> Synthesis: inf\n\n{_PAD}"
+                "> Synthesis: inf\n"
             ),
             statements=["inf"],
             parents={"parent.md": "placeholder"},
@@ -1120,13 +1389,40 @@ class TestD7NulByteQuoteVerification:
         result = run_validations(_SupportedJudge(), con, node_id, node_path)
         con.close()
         assert result.passed is True, result.failures
-        assert not any("Evidence quote not found" in f for f in result.failures)
-    """F6: COMMON_KNOWLEDGE is the third verdict path — the deterministic
-    net backstops it: a link-free synthesis claim marked COMMON_KNOWLEDGE
-    is a missing declaration and fails; notes-tier CK (no link contract)
-    still passes."""
+        assert not any(f.startswith("D7:") for f in result.failures)
+
+    def test_reader_judge_nul_spanning_hint_grounds(self, tmp_path):
+        """F3: D7 is surface-invariant for READER judges — the default
+        production judge reads the RAW parent file, so a SUPPORTED verdict
+        whose evidence_hint spans a PDF ToUnicode NUL byte (echoed from the
+        raw read) must still resolve against the NUL-stripped local content
+        with no spurious fatal."""
+        raw = b"NUL \x00 parent content supporting the claim text. " * 4
+        con, node_id, node_path = _setup(
+            tmp_path,
+            prose=(
+                "# Note\n\n"
+                "NUL parent content supporting the claim text.\n\n"
+                "> Synthesis: inf\n"
+            ),
+            statements=["inf"],
+            parents={"parent.md": "placeholder"},
+        )
+        (tmp_path / "parent.md").write_bytes(raw)
+        judge = _NulEchoingReaderJudge()
+        result = run_validations(judge, con, node_id, node_path)
+        con.close()
+        # The reader surface was exercised: path references, not inlined
+        # content — the judge echoed the raw file's NUL byte in its hint.
+        assert judge.reader_surface is True
+        assert result.passed is True, result.failures
+        assert not any(f.startswith("D7:") for f in result.failures)
 
     def test_common_knowledge_on_link_free_synthesis_fails(self, tmp_path):
+        """F6: COMMON_KNOWLEDGE is the third verdict path — the deterministic
+        net backstops it: a link-free synthesis claim marked COMMON_KNOWLEDGE
+        is a missing declaration and fails; notes-tier CK (no link contract)
+        still passes."""
         con, node_id, node_path = _setup(
             tmp_path,
             tier="synthesis",
@@ -1148,7 +1444,7 @@ class TestD7NulByteQuoteVerification:
     def test_common_knowledge_on_notes_passes(self, tmp_path):
         con, node_id, node_path = _setup(
             tmp_path,
-            prose=f"# Note\n\nThis claim is fine.\n\n> Synthesis: inf\n\n{_PAD}",
+            prose=f"# Note\n\n{_PARENT_SENTENCE_2}\n\n> Synthesis: inf\n",
             statements=["inf"],
         )
         result = run_validations(_CommonKnowledgeJudge(), con, node_id, node_path)
@@ -1156,51 +1452,35 @@ class TestD7NulByteQuoteVerification:
         assert result.passed is True, result.failures
 
 
-class TestQuoteInSourceTolerantMatching:
-    """D7 quote verification tolerates extraction spacing artifacts and
-    ellipsis-joined (non-contiguous) verbatim quotes — without ever
-    accepting a fabricated fragment."""
+class TestNormalizedSurfaceTolerance:
+    """D7's resolver is surface-invariant: extraction spacing/unicode/entity
+    artifacts fold away before token comparison — the old literal-quote
+    helpers' guarantees now live in normalize_surface/content_tokens
+    (unit-tested in test_evidence_resolution.py); these pin the behavior at
+    the DAG level."""
 
-    def test_spacing_artifact_around_punctuation(self):
-        # Web extraction inserts a space before the colon; the judge's quote
-        # does not. The whitespace-stripped surface must still match.
-        content = "context rot : as the number of tokens increases."
-        assert _quote_in_source(
-            "context rot: as the number of tokens", content
-        )
+    def test_claim_with_lookalike_surface_grounds(self, tmp_path):
+        # The parent carries a curly apostrophe and a math-italic 'w'; the
+        # claim writes the straight forms — same folded surface.
+        from memex.validators.evidence import normalize_surface
 
-    def test_ellipsis_joined_verbatim_fragments(self):
-        content = (
-            "Alpha is the first letter. Beta follows it. Gamma closes the set."
+        parent = "the model\u2019s ability to recall, with weight \U0001d464 " * 4
+        con, node_id, node_path = _setup(
+            tmp_path,
+            prose=(
+                "# Note\n\n"
+                "The model's ability to recall is measured by weight.\n\n"
+                "> Synthesis: inf\n"
+            ),
+            statements=["inf"],
+            parents={"parent.md": parent},
         )
-        assert _quote_in_source(
-            "Alpha is the first letter ... Gamma closes the set", content
-        )
-
-    def test_ellipsis_fabricated_fragment_rejected(self):
-        content = "Alpha is the first letter. Beta follows it."
-        assert not _quote_in_source(
-            "Alpha is the first letter ... Omega is nowhere", content
-        )
-
-    def test_whitespace_insensitive_ellipsis_fragments(self):
-        content = "context rot : as tokens rise. recall drops."
-        assert _quote_in_source(
-            "context rot: as tokens rise ... recall drops", content
-        )
-
-    def test_curly_apostrophe_and_math_symbols_normalize(self):
-        # The extracted source uses a curly apostrophe (U+2019) and a math
-        # italic 'w' (U+1D464); the judge echoes the straight apostrophe and
-        # the ASCII letter. Both fold to the same surface.
-        content = "the model\u2019s ability to recall, with weight \U0001d464"
-        assert _quote_in_source(
-            "the model's ability to recall, with weight w", content
-        )
-
-    def test_em_dash_folds_to_hyphen(self):
-        content = "the model\u2014as expected\u2014recalls"
-        assert _quote_in_source("the model-as expected-recalls", content)
+        judge = _SupportedJudge()
+        result = run_validations(judge, con, node_id, node_path)
+        con.close()
+        assert result.passed is True, result.failures
+        norm = normalize_surface(parent)
+        assert result.evidence[0]["span_text"] in norm
 
 
 class TestParentPromptAggregateCap:
@@ -1220,8 +1500,8 @@ class TestParentPromptAggregateCap:
             tier="synthesis",
             prose=(
                 "# S\n\n"
-                "Alpha lives in [[p-a|A]].\n"
-                "Beta lives in [[p-b|B]].\n\n"
+                "Parent content prefix appears in [[p-a|A]].\n"
+                "Parent content prefix appears in [[p-b|B]].\n\n"
                 "> Synthesis: inf\n"
             ),
             statements=["inf"],
@@ -1265,8 +1545,8 @@ class TestNodeSidePromptBudget:
         # ~120k + parents ~178k ≈ 300k) overflowed the judge's window.
         body = (
             "# S\n\n"
-            "Alpha lives in [[p-a|A]].\n"
-            "Beta lives in [[p-b|B]].\n\n"
+            "Parent content prefix appears in [[p-a|A]].\n"
+            "Parent content prefix appears in [[p-b|B]].\n\n"
             "> Synthesis: inf\n\n"
             "```\n"
             + "filler-line\n" * 10_000
@@ -1391,38 +1671,6 @@ class TestSharedSynthesisStatementsParse:
             assert _decode_statements(raw) == parse_synthesis_statements(raw)
 
 
-class TestD7ReaderJudgeNulQuote:
-    """F3: D7's quote comparison is surface-invariant for READER judges —
-    the default production judge reads the RAW parent file, so a SUPPORTED
-    verdict whose evidence_quote spans a PDF ToUnicode NUL byte (echoed
-    from the raw read) must verify against the NUL-stripped local content
-    — stripping NUL from the quote (the whitespace-collapse fallback alone
-    cannot remove \\x00) — with no spurious fatal 'Evidence quote not
-    found'."""
-
-    def test_reader_judge_nul_spanning_quote_verifies(self, tmp_path):
-        raw = b"NUL \x00 parent content supporting the claim text. " * 4
-        con, node_id, node_path = _setup(
-            tmp_path,
-            prose=(
-                "# Note\n\n"
-                "NUL parent content supporting the claim text.\n\n"
-                f"> Synthesis: inf\n\n{_PAD}"
-            ),
-            statements=["inf"],
-            parents={"parent.md": "placeholder"},
-        )
-        (tmp_path / "parent.md").write_bytes(raw)
-        judge = _NulEchoingReaderJudge()
-        result = run_validations(judge, con, node_id, node_path)
-        con.close()
-        # The reader surface was exercised: path references, not inlined
-        # content — the judge echoed the raw file's NUL byte.
-        assert judge.reader_surface is True
-        assert result.passed is True, result.failures
-        assert not any("Evidence quote not found" in f for f in result.failures)
-
-
 class TestSliceClaimTextEmbeddedQuotes:
     """F2: _slice_claim_text extracts the claim by its TRAILING delimiter —
     embedded double quotes inside the claim text are part of the claim, not
@@ -1472,7 +1720,7 @@ class TestV2PassesCoercion:
         for value in ("true", "TRUE", "1", 1, 1.0, True, "yes", "on"):
             con, node_id, node_path = _setup(
                 tmp_path,
-                prose=f"# Note\n\nThis claim is fine.\n\n> Synthesis: inf\n\n{_PAD}",
+                prose=f"# Note\n\n{_PARENT_SENTENCE_2}\n\n> Synthesis: inf\n\n{_PAD}",
                 statements=["inf"],
             )
             result = run_validations(_BoolishPassJudge(value), con, node_id, node_path)
@@ -1483,7 +1731,7 @@ class TestV2PassesCoercion:
         for value in (False, "false", 0, 0.0, "0"):
             con, node_id, node_path = _setup(
                 tmp_path,
-                prose=f"# Note\n\nThis claim is fine.\n\n> Synthesis: inf\n\n{_PAD}",
+                prose=f"# Note\n\n{_PARENT_SENTENCE_2}\n\n> Synthesis: inf\n\n{_PAD}",
                 statements=["inf"],
             )
             result = run_validations(_BoolishPassJudge(value), con, node_id, node_path)
@@ -1527,7 +1775,7 @@ class TestDeclarativeDag:
 
 
 class TestNegativeVerdictContract:
-    """F11: UNSUPPORTED verdicts must cite source_examined +
+    """F11: UNSUPPORTED verdicts must cite parent_key +
     absence_explanation — a judge omitting either fails deterministically."""
 
     def test_unsupported_without_contract_fields_fails_deterministically(
@@ -1535,7 +1783,7 @@ class TestNegativeVerdictContract:
     ):
         con, node_id, node_path = _setup(
             tmp_path,
-            prose=f"# Note\n\nThis claim is fine.\n\n> Synthesis: inf\n\n{_PAD}",
+            prose=f"# Note\n\n{_PARENT_SENTENCE_2}\n\n> Synthesis: inf\n\n{_PAD}",
             statements=["inf"],
         )
         judge = _SupportedJudge()
