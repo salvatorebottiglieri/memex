@@ -327,6 +327,8 @@ class DeriverService:
             trust_state=trust_state,
             check_failures=failures,
         )
+        if validation_result is not None:
+            self._store.update_evidence(deriv_id, validation_result.evidence)
 
         return DeriveResult(
             id=deriv_id,

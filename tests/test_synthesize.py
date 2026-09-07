@@ -329,8 +329,8 @@ class TestSynthesizeValidationFamily:
         assert not any("Link validity" in f for f in result["check_failures"])
 
     def test_synthesis_all_pass_auto_verified(self, store, monkeypatch):
-        """V1/V2 + D1–D6 all pass (every claim linked, no sentinels) ->
-        auto-verified with no failures."""
+        """V1/V2 + D1–D6 all pass (every claim linked and token-covered by
+        its cited parent, no sentinels) -> auto-verified with no failures."""
         from memex.services.synthesize import SynthesizerService
         from tests.fake_llm_client import FakeAgentDivergent
 
@@ -340,10 +340,11 @@ class TestSynthesizeValidationFamily:
         agent = FakeAgentDivergent(
             prose=(
                 "# Combined\n\n"
-                "This synthesis aggregates the topic across both sources "
-                "[[article-a|A]] and [[article-b|B]].\n\n"
-                "> Synthesis: The combined inference holds.\n\n"
-                "The shared basis is documented in [[article-a|A]]."
+                "The article body exceeds the minimum character threshold of "
+                "one hundred characters [[article-a|A]] and [[article-b|B]]. "
+                "The L0 markdown file is created for the tests "
+                "[[article-a|A]].\n\n"
+                "> Synthesis: The combined inference holds.\n"
             ),
             statements=["The combined inference holds."],
         )

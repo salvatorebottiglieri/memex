@@ -576,7 +576,8 @@ CHECK_RULES: list[Rule] = [
 # checks. They run POST-creation (the node and its provenance edges exist),
 # so evidence is the node's own content plus its parents' contents (read
 # from the parents' content_path files). Every verdict is structured and
-# cites the claim plus a supporting/refuting excerpt. A judge call or
+# cites the claim plus an optional evidence_hint locator (the system
+# resolves the evidence span itself, D7). A judge call or
 # verdict-parse failure degrades to pass-with-warning — it never crashes
 # the derive.
 
@@ -611,7 +612,7 @@ class ValidationRule:
       JSON-in-text); return failure messages (empty = pass), an optional
       warning string when the verdict was unusable, and the normalized
       structured verdicts (consumed by downstream DAG members, e.g. D7
-      verifies V1's evidence quotes).
+      resolves V1's grounding).
 
     DAG placement fields (``run_validations`` executes waves in ascending
     ``order``; nothing else in the registry is hardcoded):
@@ -756,14 +757,15 @@ Judge each claim below and submit one verdict per claim, referencing the
 claim by its index (claim_index = the N in "Claim N:") — do NOT re-type the
 claim text; the system correlates by index:
   - SUPPORTED: the relevant parent content states the claim, or directly
-    implies it. evidence_anchor MUST be a SHORT verbatim substring (5-15
-    consecutive words) copied character-for-character from that parent
-    content — it is verified deterministically against the exact source
-    text. Copy it EXACTLY as it appears: keep any odd spacing, punctuation,
-    or symbols; do NOT reword, normalize, correct, or "clean up" the span
-    (a paraphrased or corrected span fails verification). If you cannot
-    find an exact verbatim substring to copy, the verdict is UNSUPPORTED —
-    never paraphrase or summarize a span as evidence.
+    implies it. Optionally provide evidence_hint — an OPTIONAL short
+    locator (at most ~30 words, MAY be paraphrased) pointing at the
+    supporting span; the system LOCATES the evidence span in the cited
+    parent deterministically and verifies the claim's content tokens
+    against it. Prefer a short verbatim fragment copied from the parent:
+    the deterministic resolver is not paraphrase-tolerant. Never fabricate
+    a hint — a fabricated hint grounds nothing and drafts the node. If the
+    cited parent does not state or imply the claim, the verdict is
+    UNSUPPORTED: never paraphrase or summarize a span as evidence.
   - COMMON_KNOWLEDGE: the claim is a generic, uncontroversial fact that needs
     no source. Quantitative claims about specific entities are NEVER exempt
     from evidence — never mark those COMMON_KNOWLEDGE.
@@ -783,7 +785,7 @@ Rules:
 
 Submit your verdicts by calling the submit_verdicts tool with a JSON payload:
 {"verdicts": [
-  {"claim_index": 1, "verdict": "SUPPORTED", "parent_key": "P3", "evidence_anchor": "<5-15 consecutive words copied exactly from that parent>"},
+  {"claim_index": 1, "verdict": "SUPPORTED", "parent_key": "P3", "evidence_hint": "<optional short locator (~30 words max), may be paraphrased>"},
   {"claim_index": 2, "verdict": "COMMON_KNOWLEDGE"},
   {"claim_index": 3, "verdict": "UNSUPPORTED", "parent_key": "P3", "absence_explanation": "<why the source does not contain the claim>"}
 ]}
@@ -802,7 +804,7 @@ def _v1_verdict_parser(
     """V1 verdicts: per-claim SUPPORTED / COMMON_KNOWLEDGE / UNSUPPORTED.
 
     Returns (failures, warning, verdicts) — the normalized verdicts feed the
-    downstream DAG members (D7 quote verification, V2's grounding block).
+    downstream DAG members (D7 grounding resolution, V2's grounding block).
     """
     data = payload if isinstance(payload, dict) else _parse_json_verdict(raw)
     if not isinstance(data, dict) or not isinstance(data.get("verdicts"), list):
@@ -823,10 +825,10 @@ def _v1_verdict_parser(
             "verdict": verdict,
         }
         if verdict == "SUPPORTED":
-            anchor = v.get("evidence_anchor")
+            hint = v.get("evidence_hint")
             parent_key = v.get("parent_key")
-            normalized["evidence_anchor"] = (
-                anchor if isinstance(anchor, str) else ""
+            normalized["evidence_hint"] = (
+                hint if isinstance(hint, str) else ""
             )
             normalized["parent_key"] = (
                 parent_key if isinstance(parent_key, str) else ""
@@ -850,7 +852,7 @@ def _v1_verdict_parser(
             # Negative-verdict contract: an UNSUPPORTED verdict MUST cite the
             # parent examined and why the source lacks the claim. A judge
             # omitting either field violates the contract — deterministic
-            # failure, symmetric to D7's SUPPORTED-without-anchor treatment.
+            # failure, symmetric to D7's ungrounded-SUPPORTED treatment.
             if not normalized["parent_key"] or not normalized[
                 "absence_explanation"
             ]:
@@ -971,7 +973,7 @@ VALIDATION_RULES: list[ValidationRule] = [
         slicer=_v2_evidence_slicer,
         prompt_template=_V2_PROMPT_TEMPLATE,
         verdict_parser=_v2_verdict_parser,
-        # Runs after V1 (and D7, which verifies V1's quotes inside V1's
+        # Runs after V1 (and D7, which resolves V1's grounding inside V1's
         # wave); skipped when V1 produced fatal failures — the node is
         # draft already and the judge call is saved.
         order=2,
@@ -1231,8 +1233,8 @@ def render_ontology() -> str:
         + "```\n"
         + "Rule D0 \u2014 Auto-verified gate\n"
         + "  A node passes from 'draft' to 'auto-verified' ONLY if all checks D1\u2013D6 pass\n"
-        + "  AND the validation DAG passes: V1 (grounding) \u2192 D7 (quote\n"
-        + "  verification over V1's verdicts) \u2192 V2 (re-elaboration quality,\n"
+        + "  AND the validation DAG passes: V1 (grounding) \u2192 D7 (grounding\n"
+        + "  resolution over V1's verdicts) \u2192 V2 (re-elaboration quality,\n"
         + "  consuming V1's verdicts; skipped when V1 is fatal).\n"
         + "  MEMEX_VALIDATION=off disables the DAG (deterministic D1\u2013D7 never opt\n"
         + "  out \u2014 D7 runs over V1's verdicts and is vacuous without them).\n"
@@ -1294,7 +1296,7 @@ def render_ontology() -> str:
         "Rule V1 \u2014 Evidence support (LLM-judged, DAG root)\n"
         "  Every unadorned claim in the body is judged SUPPORTED /\n"
         "  COMMON_KNOWLEDGE / UNSUPPORTED against the parent content, with an\n"
-        "  evidence quote. COMMON_KNOWLEDGE covers generic uncontroversial\n"
+        "  optional evidence_hint locator. COMMON_KNOWLEDGE covers generic uncontroversial\n"
         "  facts only; quantitative claims about specific entities are NEVER\n"
         "  exempt. In syntheses, a source-derived fact WITHOUT a link is\n"
         "  UNSUPPORTED (missing declaration); a claim WITH a link is judged\n"
@@ -1304,9 +1306,9 @@ def render_ontology() -> str:
         "  never redirects the judgment to a parent that does not exist).\n"
         + "  Negative-verdict contract: every UNSUPPORTED verdict cites the\n"
         + "  claim, the source examined, and why the source does not contain it\n"
-        + "  (source_examined, absence_explanation). An UNSUPPORTED verdict\n"
+        + "  (parent_key, absence_explanation). An UNSUPPORTED verdict\n"
         + "  lacking either field produces a deterministic contract-violation\n"
-        + "  failure (symmetric to D7's SUPPORTED-without-quote failure). A\n"
+        + "  failure (symmetric to D7's ungrounded-SUPPORTED failure). A\n"
         + "  verdict shortfall (a presented claim with no matching verdict,\n"
         + "  including an empty set) emits a warning \u2014 coverage is\n"
         + "  correlated per presented claim INSTANCE (whitespace-normalized\n"
@@ -1318,16 +1320,25 @@ def render_ontology() -> str:
         + "  are coverage gaps, never a clean pass; grounding coverage is\n"
         + "  then incomplete, never silently clean.\n"
         "\n"
-        + "Rule D7 \u2014 Evidence-quote verification (deterministic, over V1's output)\n"
-        + "  Every evidence_quote V1 cites for a SUPPORTED verdict must appear\n"
+        + "Rule D7 \u2014 Grounding resolution (deterministic, over V1's output)\n"
+        + "  For every SUPPORTED verdict the system RESOLVES the evidence span\n"
         + "  in the cited source (linked parent for syntheses, single parent\n"
-        + "  for notes). Matching is a literal substring with a\n"
-        + "  whitespace-collapsed fallback: quote and source are compared with\n"
-        + "  every run of whitespace collapsed to a single space (LLMs re-wrap\n"
-        + "  line breaks; a fabricated quote differs in words, not whitespace).\n"
-        + "  Quote not found \u2192 failure D7. This keeps\n"
-        + "  LLM-judged evidence honest: an LLM that hallucinates a claim can\n"
-        + "  hallucinate the supporting quote. COMMON_KNOWLEDGE is backstopped\n"
+        + "  for notes) instead of trusting judge-supplied text: candidate =\n"
+        + "  evidence_hint (an optional short locator the judge MAY paraphrase)\n"
+        + "  or the claim itself; a sliding window over sentence-aligned\n"
+        + "  passages of the NORMALIZED source (NUL-stripped, NFKC +\n"
+        + "  look-alike folded, HTML-entity-decoded) picks the tightest\n"
+        + "  passage with the best candidate content-token coverage;\n"
+        + "  confidence = coverage; the span is verbatim by construction.\n"
+        + "  Grounding gate (fail-closed): the claim is grounded only if it\n"
+        + "  carries at least MIN_CONTENT_TOKENS (2) content tokens (numbers +\n"
+        + "  non-stopword words, len >= 3) and >= GROUNDING_THRESHOLD (0.6) of\n"
+        + "  them appear in the resolved span. Not grounded \u2192 failure D7:\n"
+        + "  the system overrides the judge (SUPPORTED + no grounded span =\n"
+        + "  draft). This keeps LLM-judged evidence honest: an LLM that\n"
+        + "  hallucinates a claim can fabricate a hint, and a fabricated or\n"
+        + "  paraphrased hint whose content does not co-occur with the claim\n"
+        + "  in a tight passage grounds nothing. COMMON_KNOWLEDGE is backstopped\n"
         + "  too: a COMMON_KNOWLEDGE verdict on a link-free synthesis claim is\n"
         + "  a missing declaration (a source-derived fact without an inline\n"
         + "  link is UNSUPPORTED) and fails deterministically. The cited\n"
@@ -1345,7 +1356,7 @@ def render_ontology() -> str:
         "  carries V1's per-claim verdicts (the body as V1 saw it).\n"
         "\n"
         + "DAG execution: waves run in ascending registry order (V1 first; D7\n"
-        + "  verifies V1's quotes inside V1's wave; V2 declares\n"
+        + "  resolves V1's grounding inside V1's wave; V2 declares\n"
         + "  depends_on=(\"V1\",) + skip_when_fatal, so it runs after D7 and is\n"
         + "  SKIPPED when V1 has fatal failures \u2014 the node is draft already,\n"
         + "  re-derive re-runs both). The DAG is declarative: VALIDATION_RULES\n"
@@ -1363,7 +1374,7 @@ def render_ontology() -> str:
         "  N overlapping mini-judges.\n"
         "```\n"
         "\n"
-        "Implementation: agent system prompts (factual fidelity), `validators.validate.run_validations()` + `VALIDATION_RULES` in `rules.py` (V1\u2013V2) with D7 quote verification in `validate.py`. Judge = `MEMEX_JUDGE` or the derive agent; `submit_verdicts` host tool (pi.py) carries structured verdicts.\n"
+        "Implementation: agent system prompts (factual fidelity), `validators.validate.run_validations()` + `VALIDATION_RULES` in `rules.py` (V1\u2013V2) with D7 grounding resolution in `validate.py`. Judge = `MEMEX_JUDGE` or the derive agent; `submit_verdicts` host tool (pi.py) carries structured verdicts.\n"
         "\n"
         "---\n"
         "\n"
