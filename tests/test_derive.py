@@ -784,9 +784,10 @@ class TestDeriveValidationFamily:
         agent = FakeAgentDivergent(
             prose=(
                 "# Note Title\n\n"
-                "This note states the SENTINEL-UNSUPPORTED figure.\n\n"
-                "> Synthesis: The broader pattern follows.\n\n"
-                "The source material covers the subject thoroughly."
+                "This note states the SENTINEL-UNSUPPORTED figure in the "
+                "article body. "
+                "The article body exceeds the minimum character threshold.\n\n"
+                "> Synthesis: The broader pattern follows.\n"
             ),
             statements=["The broader pattern follows."],
         )
@@ -838,12 +839,12 @@ class TestDeriveValidationFamily:
         )
 
     def test_notes_dangling_link_autoverifies_with_real_judge(self, store, monkeypatch):
-        """F1: with a judge that HAS call_llm and honestly quotes the single
-        parent, a notes derivation carrying a stray [[non-parent|...]]
-        wikilink still AUTO-VERIFIES — D6's notes-tier exemption is not
-        defeated by D7 (a real judge quoting the single parent must not hit
-        a 'has no cited source' fatal because the stray link names no
-        parent), and the stray link produces no V1 UNSUPPORTED."""
+        """F1: with a judge that HAS call_llm and grounds the single parent,
+        a notes derivation carrying a stray [[non-parent|...]] wikilink
+        still AUTO-VERIFIES — D6's notes-tier exemption is not defeated by
+        D7 (a real judge supporting claims that ARE grounded in the single
+        parent must not draft because the stray link names no parent), and
+        the stray link produces no V1 UNSUPPORTED."""
         from memex.services.derive import DeriverService
         from tests.fake_llm_client import FakeAgentDivergent
 
@@ -854,9 +855,10 @@ class TestDeriveValidationFamily:
         agent = FakeAgentDivergent(
             prose=(
                 "# Note Title\n\n"
-                "This note carries a dangling [[ghost|Ghost]] link without issue.\n\n"
-                "> Synthesis: The broader pattern follows.\n\n"
-                "The source material covers the subject thoroughly."
+                "The article body exceeds the minimum character threshold of "
+                "one hundred characters and carries a stray [[ghost|Ghost]] "
+                "link.\n\n"
+                "> Synthesis: The broader pattern follows.\n"
             ),
             statements=["The broader pattern follows."],
         )
@@ -895,6 +897,84 @@ class TestDeriveValidationFamily:
         assert result.status == "derived"
         assert result.trust_state == "auto-verified"
         assert result.check_failures == []
+
+    def test_derive_persists_one_evidence_record_per_grounded_claim(
+        self, store, monkeypatch
+    ):
+        """I5 (derive): with validation enabled, an auto-verified node's
+        evidence column holds exactly one record per grounded SUPPORTED
+        claim (claim_index, parent_key, verbatim span_text, confidence,
+        resolver) — wired from _do_derive after the gate."""
+        from memex.services.derive import DeriverService
+        from tests.fake_llm_client import FakeAgentDivergent
+        from memex.validators.evidence import normalize_surface
+
+        monkeypatch.setenv("MEMEX_JUDGE", self.FAKE_JUDGE)
+        ingested = self._ingest(store, "https://example.com/article")
+        agent = FakeAgentDivergent(
+            prose=(
+                "# Note Title\n\n"
+                "The article body exceeds the minimum character threshold of "
+                "one hundred characters. "
+                "The L0 markdown file is created for tests.\n\n"
+                "> Synthesis: The broader pattern follows.\n"
+            ),
+            statements=["The broader pattern follows."],
+        )
+        with _Store.open(store["db"]) as s:
+            result = DeriverService(s, Path(store["vault"]), agent).derive(
+                ingested["id"]
+            )
+            assert result.trust_state == "auto-verified"
+            assert result.check_failures == []
+            node = s.get_node(result.id)
+            records = node["evidence"]
+            # Exactly one record per grounded SUPPORTED claim (2 claims).
+            assert [r["claim_index"] for r in records] == [1, 2]
+            for record in records:
+                assert set(record) == {
+                    "claim_index", "parent_key", "span_text",
+                    "confidence", "resolver",
+                }
+                assert record["parent_key"] == "P1"
+                assert record["resolver"] == "deterministic"
+                assert record["confidence"] == 1.0
+            # I4: the persisted spans are verbatim substrings of the
+            # normalized parent (the L0 content the note derived from).
+            row = s._con.execute(
+                "SELECT content_path FROM node WHERE id = ?",
+                (result.l0_node_id,),
+            ).fetchone()
+        parent_content = Path(row[0]).read_text(encoding="utf-8")
+        norm = normalize_surface(parent_content)
+        for record in records:
+            assert record["span_text"] in norm
+
+    def test_derive_validation_off_writes_no_evidence(self, store, monkeypatch):
+        """I5 (derive): MEMEX_VALIDATION=off skips the whole DAG — no
+        evidence records are written (the column stays NULL)."""
+        from memex.services.derive import DeriverService
+        from tests.fake_llm_client import FakeAgentDivergent
+
+        monkeypatch.setenv("MEMEX_JUDGE", self.FAKE_JUDGE)
+        monkeypatch.setenv("MEMEX_VALIDATION", "off")
+        ingested = self._ingest(store, "https://example.com/article")
+        agent = FakeAgentDivergent(
+            prose=(
+                "# Note Title\n\n"
+                "The article body exceeds the minimum character threshold of "
+                "one hundred characters. "
+                "The L0 markdown file is created for tests.\n\n"
+                "> Synthesis: The broader pattern follows.\n"
+            ),
+            statements=["The broader pattern follows."],
+        )
+        with _Store.open(store["db"]) as s:
+            result = DeriverService(s, Path(store["vault"]), agent).derive(
+                ingested["id"]
+            )
+            assert result.trust_state == "auto-verified"
+            assert s.get_node(result.id)["evidence"] is None
 
 
 class TestParseDeriveResponse:

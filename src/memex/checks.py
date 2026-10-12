@@ -7,6 +7,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from memex.rules import CHECK_RULES, MAX_CHARS, MIN_CHARS  # noqa: F401 — re-exported for backward compat
 
@@ -17,6 +18,11 @@ class CheckResult:
 
     passed: bool
     failures: list[str] = field(default_factory=list)
+    # Grounded evidence records from the validation DAG (D7's resolution
+    # stage): one {claim_index, parent_key, span_text, confidence, resolver}
+    # dict per grounded SUPPORTED claim, persisted onto the node's
+    # `evidence` column by the derive/synthesize services.
+    evidence: list[dict[str, Any]] = field(default_factory=list)
 
 
 def run_checks(con: sqlite3.Connection, node_id: str, content_path: Path | str) -> CheckResult:

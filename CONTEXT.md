@@ -72,6 +72,17 @@ marker is presentation (markdown).
 
 _Avoid_: export, sync
 
+**Evidence record**:
+The persisted grounding artifact for a SUPPORTED claim —
+``{claim_index, parent_key, span_text (verbatim from the normalized
+parent), confidence, resolver}`` — stored as JSON on the node row
+(``node.evidence``), one record per grounded SUPPORTED claim, written by
+the derive/synthesize services after the validation DAG. The system
+resolves the span deterministically; the judge never supplies it. Contrast
+with the judge-supplied locator (``evidence_hint``), which the system
+resolves and which is never stored as evidence.
+_Avoid_: quote, anchor
+
 ### Review and contestation
 
 **Contested**:

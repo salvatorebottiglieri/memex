@@ -23,10 +23,13 @@ trust state on the same model that produced the derivation (no independent
 signal)". The validation family **reverses that rejection, deliberately and
 bounded**: the judge is the derivation agent by default (`MEMEX_JUDGE` can
 point elsewhere), because an LLM is still the only check that can read a
-claim against its source. The bound is D7: V1's evidence quotes are verified
-*deterministically* — an LLM that hallucinates a claim can hallucinate the
-supporting quote, so the quote is checked against the parent content by
-code, not by the model.
+claim against its source. The bound is D7: the judge never emits evidence
+text — V1 verdicts cite their parent by reference plus an optional
+`evidence_hint` locator, and the system resolves the supporting span from
+the parent content *deterministically* and token-gates the claim against
+it. An LLM that hallucinates a claim can fabricate a hint, but a fabricated
+or paraphrased hint whose words do not co-occur with the claim in a tight
+passage grounds nothing — grounding is decided by code, not by the model.
 
 ## Decision
 
@@ -34,7 +37,7 @@ A validation **family** of small, orthogonal LLM-judged criteria runs after
 node creation, on every derive and synthesize, as a dependency-ordered DAG:
 
 ```
-V1 (grounding) ──> D7 (deterministic quote verification over V1's verdicts)
+V1 (grounding) ──> D7 (deterministic grounding resolution over V1's verdicts)
     │
     └──> V2 (re-elaboration quality; consumes V1's verdicts;
            SKIPPED when V1 produced fatal failures)
@@ -54,16 +57,26 @@ V1 (grounding) ──> D7 (deterministic quote verification over V1's verdicts)
   order through one shared `_run_wave` helper. D7 is a deterministic stage
   keyed to the V1 wave. Adding a criterion is one new `ValidationRule`
   entry — no `run_validations` edit.
+- **Deterministic grounding**: SUPPORTED verdicts carry only references —
+  the cited parent (`parent_key`) plus an optional `evidence_hint` locator
+  the judge MAY paraphrase (a locator, never evidence text). D7 resolves
+  the evidence span itself — candidate = hint or claim — against the
+  normalized parent content, with a fail-closed token-coverage gate
+  (≥ 2 content tokens and ≥ 0.6 coverage). D7 can falsify SUPPORTED
+  (ungrounded → fatal; the system overrides the judge) but never overturns
+  UNSUPPORTED, which stays the judge's semantic call. Each grounded
+  SUPPORTED claim persists one evidence record (`{claim_index, parent_key,
+  span_text, confidence, resolver}`) in the node's `evidence` JSON column.
 - **Two-level severity**: every gate failure carries a tag — fatal (D6, D7,
   V1-UNSUPPORTED; one is enough → draft) vs quality (V2 → draft). Both
   severities gate to `draft`; the tag is an **informational annotation** in
   `check_failures` guiding human review. There is no separate
   `quality_failed` state: status stays `derived`/`synthesized`, the node is
   stored, and draft nodes are human-promotable via the existing review flow.
-- **Contract enforcement**: an UNSUPPORTED verdict must cite
-  `source_examined` + `absence_explanation` — a judge omitting either
+- **Contract enforcement**: an UNSUPPORTED verdict must cite the parent it
+  examined (`parent_key`) + `absence_explanation` — a judge omitting either
   produces a deterministic contract-violation failure (symmetric to D7's
-  SUPPORTED-without-quote failure). V1 verdict shortfalls (fewer verdicts
+  ungrounded-SUPPORTED failure). V1 verdict shortfalls (fewer verdicts
   than claims, including an empty set) emit a warning. V2 `passes` is
   coerced bool-ish ('true', 1, 'yes', …) like V1 normalizes verdict strings.
 - **Graceful degradation**: judge-call or verdict-parse failures degrade to
@@ -72,7 +85,8 @@ V1 (grounding) ──> D7 (deterministic quote verification over V1's verdicts)
 ## Consequences
 
 - **Positive**: every derivation is checked for grounding and re-elaboration
-  quality, with the LLM's evidence quotes verified deterministically.
+  quality; supporting evidence is resolved and token-gated deterministically
+  and persists with the node, never trusted from the LLM.
 - **Positive**: always-on means no silently-skipped quality gate.
 - **Positive**: annotations (check_failures with severity tags) persist with
   the node for human review; nothing is destroyed pre-persistence.
@@ -82,4 +96,4 @@ V1 (grounding) ──> D7 (deterministic quote verification over V1's verdicts)
   was fatal).
 - **Negative**: the judge is the derivation agent by default — the
   ADR-0011 rejection of "same model that produced the derivation" is
-  explicitly reversed (bounded by D7's deterministic quote verification).
+  explicitly reversed (bounded by D7's deterministic grounding resolution).

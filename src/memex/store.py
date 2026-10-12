@@ -186,7 +186,12 @@ class Store:
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             )
         }
-        if "fetcher_type" not in cols or "cursor" not in tables or "inbox" not in tables:
+        if (
+            "fetcher_type" not in cols
+            or "cursor" not in tables
+            or "inbox" not in tables
+            or "evidence" not in cols
+        ):
             self.init_schema()
 
     # ── Schema ────────────────────────────────────────────────────
@@ -243,6 +248,12 @@ class Store:
                 try:
                     self._con.execute(
                         "ALTER TABLE node ADD COLUMN synthesis_statements TEXT"
+                    )
+                except sqlite3.OperationalError:
+                    pass  # column already exists
+                try:
+                    self._con.execute(
+                        "ALTER TABLE node ADD COLUMN evidence TEXT"
                     )
                 except sqlite3.OperationalError:
                     pass  # column already exists
@@ -303,6 +314,7 @@ class Store:
                 contested_at         TEXT,
                 confidence           TEXT CHECK (confidence IN ('high','medium','low')),
                 synthesis_statements TEXT,
+                evidence             TEXT,
                 fetcher_type         TEXT
             )
             """
@@ -310,7 +322,7 @@ class Store:
         copy_cols = [name for name in (
             "id", "kind", "tier", "trust_state", "depth", "content_path",
             "created_at", "check_failures", "is_contested", "contested_at",
-            "confidence", "synthesis_statements", "fetcher_type",
+            "confidence", "synthesis_statements", "evidence", "fetcher_type",
         ) if name in existing]
         collist = ", ".join(copy_cols)
         self._con.execute(
@@ -543,7 +555,7 @@ class Store:
 
         Returns the same per-node fields as ``get_node``: ``{id, kind, tier,
         trust_state, depth, content_path, created_at, confidence, check_failures,
-        synthesis_statements, is_contested, contested_at, fetcher_type,
+        synthesis_statements, evidence, is_contested, contested_at, fetcher_type,
         canonical_key, source_url, title, fetched_at, failed}``.
         """
         clauses: list[str] = []
@@ -570,7 +582,7 @@ class Store:
             SELECT
                 n.id, n.kind, n.tier, n.trust_state, n.depth,
                 n.content_path, n.created_at, n.check_failures,
-                n.synthesis_statements,
+                n.synthesis_statements, n.evidence,
                 n.is_contested, n.contested_at, n.confidence, n.fetcher_type,
                 s.canonical_key, s.source_url, s.title, s.fetched_at, s.failed
             FROM node n
@@ -598,6 +610,11 @@ class Store:
                 d["synthesis_statements"] = json.loads(ss_json)
             else:
                 d["synthesis_statements"] = None
+            ev_json = d.pop("evidence", None)
+            if ev_json is not None:
+                d["evidence"] = json.loads(ev_json)
+            else:
+                d["evidence"] = None
             # is_contested and contested_at are plain int/TEXT — no JSON decoding needed
             d["is_contested"] = bool(d["is_contested"])
             result.append(d)
@@ -606,7 +623,7 @@ class Store:
     def get_node(self, node_id: str) -> dict[str, Any] | None:
         """Full node + source by id.
         Returns ``{id, kind, tier, trust_state, depth, content_path, created_at,
-        confidence, check_failures, synthesis_statements, is_contested, contested_at,
+        confidence, check_failures, synthesis_statements, evidence, is_contested, contested_at,
         fetcher_type, canonical_key, source_url, title, fetched_at, failed}`` or ``None``.
         """
         row = self._con.execute(
@@ -614,7 +631,7 @@ class Store:
             SELECT
                 n.id, n.kind, n.tier, n.trust_state, n.depth, n.content_path, n.created_at,
                 n.check_failures,
-                n.synthesis_statements,
+                n.synthesis_statements, n.evidence,
                 n.is_contested, n.contested_at, n.confidence, n.fetcher_type,
                 s.canonical_key, s.source_url, s.title, s.fetched_at, s.failed
             FROM node n
@@ -641,6 +658,13 @@ class Store:
             d["synthesis_statements"] = json.loads(ss_json)
         else:
             d["synthesis_statements"] = None
+        # Decode evidence: JSON list of grounded-evidence records; None when
+        # no validation pass wrote records (L0 nodes / validation off).
+        ev_json = d.pop("evidence", None)
+        if ev_json is not None:
+            d["evidence"] = json.loads(ev_json)
+        else:
+            d["evidence"] = None
         # is_contested and contested_at are plain int/TEXT — no JSON decoding needed
         d["is_contested"] = bool(d["is_contested"])
         return d
@@ -1193,6 +1217,24 @@ class Store:
         self._con.execute(
             "UPDATE node SET trust_state = ?, check_failures = ? WHERE id = ?",
             (trust_state, failures_json, node_id),
+        )
+
+    def update_evidence(
+        self, node_id: str, records: list[dict[str, Any]]
+    ) -> None:
+        """Persist the node's grounded-evidence records (JSON), or NULL when
+        empty.
+
+        ``records`` is the validation DAG's evidence list — one
+        ``{claim_index, parent_key, span_text, confidence, resolver}`` dict
+        per grounded SUPPORTED claim. Empty (or no validation pass at all)
+        writes NULL, mirroring ``update_trust_state``'s null-on-empty JSON
+        convention.
+        """
+        evidence_json = json.dumps(records) if records else None
+        self._con.execute(
+            "UPDATE node SET evidence = ? WHERE id = ?",
+            (evidence_json, node_id),
         )
 
     def update_extracted_fetcher(

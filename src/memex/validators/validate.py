@@ -5,7 +5,9 @@ evidence is the node's own content plus its parents' contents (read from the
 parents' content_path files). The family is a dependency-ordered DAG, not a
 flat fan-out:
 
-    V1 (grounding) ──> D7 (quote verification over V1's verdicts)
+    V1 (grounding) ──> D7 (deterministic grounding resolution over V1's
+        verdicts: the system locates the evidence span in the cited parent
+        and token-gates the claim)
         │
         └──> V2 (re-elaboration quality; consumes V1's verdicts;
                SKIPPED when V1 has fatal failures — the node is draft
@@ -28,13 +30,9 @@ without V1's verdicts).
 
 from __future__ import annotations
 
-import html
-import json as _json
 import os
 import re
 import sqlite3
-import sys as _sys
-import unicodedata
 from pathlib import Path
 from typing import Any, Callable
 
@@ -53,33 +51,7 @@ from memex.utils.parsing import (
     _cap_prompt_content,
     parse_synthesis_statements,
 )
-
-# Quote match: literal substring, with a whitespace-collapsed fallback (LLMs
-# re-wrap line breaks; a fabricated quote differs in words, not whitespace).
-_WS_RE = re.compile(r"\s+")
-
-# Look-alike graphemes folded to ASCII before quote comparison (NFKC alone
-# leaves curly quotes untouched): a judge's echo and an extracted source must
-# compare on the same surface even when one writes ' and the other '.
-_LOOKALIKE_TRANSLATION = str.maketrans({
-    "\u2018": "'", "\u2019": "'", "\u201a": "'", "\u201b": "'",
-    "\u201c": '"', "\u201d": '"', "\u201e": '"', "\u201f": '"',
-    "\u00ab": '"', "\u00bb": '"',
-    "\u2032": "'", "\u2033": '"',
-    "\u00b4": "'", "\u0060": "'",
-    "\u2010": "-", "\u2011": "-", "\u2012": "-",
-    "\u2013": "-", "\u2014": "-", "\u2212": "-",
-})
-
-
-def _unicode_norm(text: str) -> str:
-    """NFKC (math alphanumerics, superscripts, fullwidth) plus folding of
-    look-alike quotes/dashes to ASCII, so a judge's echo and the extracted
-    source compare on the same grapheme surface. HTML entities left behind
-    by the web extractor (``&#x27;``) are decoded first."""
-    return unicodedata.normalize("NFKC", html.unescape(text)).translate(
-        _LOOKALIKE_TRANSLATION
-    )
+from memex.validators.evidence import _warn, grounding_gate, resolve_evidence
 
 
 def _decode_statements(raw: str | None) -> list[str]:
@@ -129,7 +101,7 @@ def _load_parents(
             else:
                 # NUL bytes (PDF ToUnicode artifacts) never reach the judge
                 # (``_cap_prompt_content`` strips them from the prompt copy);
-                # strip them at load so D7's local quote comparison verifies
+                # strip them at load so D7's local evidence resolution runs
                 # against the same surface the judge actually saw.
                 content = content.replace("\x00", "")
         parents.append(
@@ -154,7 +126,7 @@ def _parent_block(
 
     Reader judges (``allow_read``) get path references and read the files
     themselves; other judges get the contents inlined, keyed by filename —
-    the resolution V1's link rule and D7's quote verification rely on.
+    the resolution V1's link rule and D7's grounding resolution rely on.
     ``budget`` (default ``_MAX_PROMPT_CHARS``) bounds the WHOLE block —
     ``_run_wave`` passes the remainder of the total prompt budget so the
     parents plus the template, slices and body fit the judge's window.
@@ -174,8 +146,8 @@ def _parent_block(
     the reservation itself reaches the budget (content budget clamped to
     0), the joined block is clamped as a whole, so an extreme parent count
     can never overflow the judge's window either. Parent content is
-    NUL-stripped at load (``_load_parents``), so D7's local quote
-    comparison verifies against the same surface the judge saw; only the
+    NUL-stripped at load (``_load_parents``), so D7's local evidence
+    resolution runs against the same surface the judge saw; only the
     size cap is prompt-side — D7 keeps the full content.
     """
     blocks: list[str] = []
@@ -260,10 +232,6 @@ def _fill_template(template: str, **kwargs: str) -> str:
     )
 
 
-def _warn(message: str) -> None:
-    _sys.stderr.write(_json.dumps({"validation_warning": message}) + "\n")
-
-
 def validation_environment(agent: Agent) -> tuple[Agent, bool]:
     """Resolve the validation judge and enabled flag for a service.
 
@@ -317,126 +285,115 @@ def _call_judge(
     return raw, payload
 
 
-def _quote_in_source(quote: str, content: str) -> bool:
-    """Literal match, with progressively more tolerant fallbacks.
-
-    Surface-invariant across judge surfaces: an inline judge sees the
-    NUL-stripped prompt copy, but a READER judge echoes the RAW parent file
-    (which may carry PDF ToUnicode NUL bytes) — strip NUL from the quote so
-    both surfaces verify against the same NUL-stripped local content (the
-    whitespace-collapse fallback alone cannot remove ``\\x00``).
-
-    The three comparison surfaces, applied to both quote and content:
-      1. exact substring;
-      2. whitespace-collapsed substring;
-      3. whitespace-stripped substring — extraction can insert spacing
-         artifacts around punctuation (``context rot : as`` vs ``context
-         rot: as``) that a human reads as identical but break literal
-         comparison.
-
-    Ellipsis-joined quotes (a judge quoting non-contiguous verbatim spans
-    separated by ``...``) are verified fragment-by-fragment: every
-    non-empty fragment must be found on one of the three surfaces. The
-    guarantee "the quote's substance is verbatim from the source" holds at
-    every level — a fabricated fragment is still rejected.
-    """
-    quote = quote.replace("\x00", "").strip()
-    if not quote:
-        return False
-
-    content = _unicode_norm(content)
-
-    def _surfaces(text: str) -> list[str]:
-        norm = _unicode_norm(text)
-        return [norm, _WS_RE.sub(" ", norm), "".join(norm.split())]
-
-    content_surfaces = _surfaces(content)
-
-    def _fragment_found(fragment: str) -> bool:
-        for qs in _surfaces(fragment):
-            if qs and any(qs in cs for cs in content_surfaces):
-                return True
-        return False
-
-    if _fragment_found(quote):
-        return True
-    fragments = [f for f in quote.split("...") if f.strip()]
-    if len(fragments) > 1:
-        return all(_fragment_found(f) for f in fragments)
-    return False
-
-
-def _d7_verify_quotes(
+def _d7_resolve_grounding(
     verdicts: list[dict[str, Any]],
     node: dict[str, Any],
     parents: list[dict[str, Any]],
     slices: list[str] | None = None,
-) -> list[str]:
-    """D7 (deterministic): every evidence_anchor a SUPPORTED verdict cites
-    must appear literally in the parent the verdict names by parent_key.
-    Anchor not found → failure.
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """D7 (deterministic): resolve every SUPPORTED verdict's evidence.
 
-    The parent is resolved from the judge's parent_key reference (P1..Pn),
-    never by re-parsing claim text; the claim text is recovered from the
-    slice by claim_index. COMMON_KNOWLEDGE on a synthesis claim whose slice
+    The judge emits only references plus an optional ``evidence_hint``
+    locator; the system LOCATES the supporting span in the cited parent
+    (``resolve_evidence``: sliding-window token coverage over the
+    normalized source) and the grounding gate decides whether the CLAIM's
+    content tokens are covered by that span. Not grounded → D7 fatal (the
+    system overrides the judge); grounded → one evidence record
+    ``{claim_index, parent_key, span_text, confidence, resolver}`` per
+    claim (I5). UNSUPPORTED verdicts are never resolved and never produce
+    a record (I3); COMMON_KNOWLEDGE on a synthesis claim whose slice
     carries no inline link is backstopped as a missing declaration.
+
+    The parent is resolved from the judge's parent_key reference (P1..Pn)
+    — a missing/invalid key falls back to any readable parent (today's
+    bad-key rule) — and the claim text is recovered from the slice by
+    claim_index. A SUPPORTED verdict whose claim_index does not correlate
+    to a presented slice has no claim text to gate → D7 fatal, no record.
+    Unreadable parent content → cannot resolve → D7 fatal (same draft
+    outcome as the old anchor-not-found path).
     """
     tier = node.get("tier")
     key_to_parent = {p["key"]: p for p in parents}
     failures: list[str] = []
+    records: list[dict[str, Any]] = []
+    resolved: set[int] = set()
     matched = _correlate_verdicts(slices or [], verdicts)
     for v, match in zip(verdicts, matched):
         idx = v.get("claim_index")
-        claim = (
-            _slice_claim_text(slices[match]) if match is not None else f"#{idx}"
-        )
+        if match is None or not slices:
+            claim = None
+        else:
+            claim = _slice_claim_text(slices[match])
         if v.get("verdict") == "COMMON_KNOWLEDGE":
-            if tier == "synthesis" and not _WIKILINK_RE.search(claim):
+            claim_text = claim if claim is not None else f"#{idx}"
+            if tier == "synthesis" and not _WIKILINK_RE.search(claim_text):
                 failures.append(
                     f"{SEVERITY_FATAL} COMMON_KNOWLEDGE verdict on a link-free "
-                    f"synthesis claim is a missing declaration: {claim!r} — a "
+                    f"synthesis claim is a missing declaration: {claim_text!r} — a "
                     "source-derived fact without an inline link is UNSUPPORTED"
                 )
             continue
         if v.get("verdict") != "SUPPORTED":
             continue
-        anchor = v.get("evidence_anchor", "")
-        if not anchor.strip():
+        if isinstance(idx, int) and idx in resolved:
+            # Duplicate SUPPORTED verdict for an already-handled
+            # claim_index (the V1 coverage machinery already counts
+            # duplicate references as a coverage gap): I5 wants exactly one
+            # record per grounded claim — only the first verdict resolves.
+            continue
+        if isinstance(idx, int):
+            resolved.add(idx)
+        hint = v.get("evidence_hint")
+        hint_text = hint if isinstance(hint, str) else ""
+        if claim is None:
+            # No presented slice for this claim_index: there is no claim
+            # text to token-gate against — cannot resolve, must not crash.
             failures.append(
-                f"{SEVERITY_FATAL} SUPPORTED verdict without an evidence "
-                f"anchor (claim: {claim!r})"
+                f"{SEVERITY_FATAL} SUPPORTED verdict claims #{idx}, which does "
+                "not correlate to any presented claim; no claim text to ground"
             )
             continue
+        # candidate = evidence_hint or the claim itself (PRD cascade).
+        candidate = hint_text.strip() or claim
         if tier == "synthesis":
             pk = v.get("parent_key", "")
             sources = [key_to_parent[pk]] if pk in key_to_parent else []
+            if not sources:
+                # parent_key missing/invalid: fall back to any readable
+                # parent, so a genuinely grounded claim is never drafted on
+                # a bad key.
+                sources = list(parents)
         else:
-            sources = parents
-        if not sources:
-            # parent_key missing/invalid: fall back to any parent containing
-            # the anchor verbatim, so a genuine anchor is never drafted on a
-            # bad key.
-            sources = [
-                p for p in parents
-                if p.get("content") is not None
-                and _quote_in_source(anchor, p["content"])
-            ]
-        if not sources:
-            failures.append(
-                f"{SEVERITY_FATAL} Evidence anchor {anchor!r} has no cited "
-                f"source to verify against (claim: {claim!r})"
-            )
+            # Notes tier: judged against the single parent regardless of
+            # any inline links the claim carries.
+            sources = list(parents)
+        grounded: dict[str, Any] | None = None
+        for source in sources:
+            content = source.get("content")
+            if content is None:
+                continue
+            evidence = resolve_evidence(candidate, content)
+            if evidence is not None and grounding_gate(claim, evidence):
+                grounded = {
+                    "claim_index": idx,
+                    "parent_key": source["key"],
+                    "span_text": evidence.span_text,
+                    "confidence": evidence.confidence,
+                    "resolver": evidence.resolver,
+                }
+                break
+        if grounded is not None:
+            records.append(grounded)
             continue
-        if not any(
-            s.get("content") is not None
-            and _quote_in_source(anchor, s["content"])
-            for s in sources
-        ):
-            names = ", ".join(s["key"] for s in sources)
-            failures.append(
-                f"{SEVERITY_FATAL} Evidence anchor not found in {names}: {anchor!r}"
-            )
-    return failures
+        names = ", ".join(s["key"] for s in sources) or "(no parents)"
+        message = (
+            f"{SEVERITY_FATAL} SUPPORTED claim not grounded in the cited "
+            f"source content (claim: {claim!r}; parents examined: {names})"
+        )
+        if hint_text:
+            message += f" [evidence_hint: {hint_text!r}]"
+        failures.append(message)
+    return failures, records
 
 
 def _render_v1_verdicts(verdicts: list[dict[str, Any]]) -> str:
@@ -446,21 +403,22 @@ def _render_v1_verdicts(verdicts: list[dict[str, Any]]) -> str:
         line = f'- #{v.get("claim_index", "?")} \u2192 {v.get("verdict", "")}'
         if v.get("parent_key"):
             line += f" (parent: {v['parent_key']})"
-        if v.get("evidence_anchor"):
-            line += f" (anchor: {v['evidence_anchor']})"
+        if v.get("evidence_hint"):
+            line += f" (hint: {v['evidence_hint']})"
         if v.get("absence_explanation"):
             line += f" (absence: {v['absence_explanation']})"
         lines.append(line)
     return "\n".join(lines) if lines else "(no verdicts)"
 
 
-# Deterministic DAG stages keyed by the wave whose verdicts they verify:
-# D7 runs immediately after V1's wave and checks V1's evidence quotes. This
-# is the only hardcoded stage — LLM-judged criteria live in VALIDATION_RULES
-# with order/depends_on/skip_when_fatal fields (adding a criterion never
+# Deterministic DAG stages keyed by the wave whose verdicts they resolve:
+# D7 runs immediately after V1's wave and resolves V1's grounding over its
+# verdicts (failures + evidence records). This is the only hardcoded stage
+# — LLM-judged criteria live in VALIDATION_RULES with
+# order/depends_on/skip_when_fatal fields (adding a criterion never
 # touches run_validations).
-_DETERMINISTIC_STAGES: dict[str, Callable[..., list[str]]] = {
-    "V1": _d7_verify_quotes,
+_DETERMINISTIC_STAGES: dict[str, Callable[..., tuple[list[str], list[dict[str, Any]]]]] = {
+    "V1": _d7_resolve_grounding,
 }
 
 
@@ -685,6 +643,8 @@ def run_validations(
     Returns:
         CheckResult with .passed=True and .failures=[] if all rules pass,
         or .passed=False and .failures carrying per-criterion messages.
+        .evidence carries one grounded-evidence record per grounded
+        SUPPORTED claim (empty when nothing grounded).
     """
     content_path = Path(content_path)
     try:
@@ -737,11 +697,12 @@ def run_validations(
     )
 
     failures: list[str] = []
+    evidence_records: list[dict[str, Any]] = []
     verdicts_by_rule: dict[str, list[dict[str, Any]]] = {}
 
     # Waves execute in ascending order; each rule declares its dependencies
-    # and skip condition in the registry. D7 (deterministic) verifies V1's
-    # quotes inside V1's wave via _DETERMINISTIC_STAGES; V2 declares
+    # and skip condition in the registry. D7 (deterministic) resolves V1's
+    # grounding inside V1's wave via _DETERMINISTIC_STAGES; V2 declares
     # depends_on=("V1",) + skip_when_fatal, so it always runs after D7.
     for rule in sorted(VALIDATION_RULES, key=lambda r: r.order):
         missing = [d for d in rule.depends_on if d not in verdicts_by_rule]
@@ -770,10 +731,15 @@ def run_validations(
         stage = _DETERMINISTIC_STAGES.get(rule.id)
         if stage is not None:
             try:
-                d7_failures = stage(verdicts, node, parents, slices=slices)
+                d7_failures, d7_records = stage(
+                    verdicts, node, parents, slices=slices
+                )
             except Exception as exc:  # noqa: BLE001
-                _warn(f"D7 verification failed, skipped: {exc}")
-                d7_failures = []
+                _warn(f"D7 resolution failed, skipped: {exc}")
+                d7_failures, d7_records = [], []
             failures.extend(f"D7: {f}" for f in d7_failures)
+            evidence_records.extend(d7_records)
 
-    return CheckResult(passed=len(failures) == 0, failures=failures)
+    return CheckResult(
+        passed=len(failures) == 0, failures=failures, evidence=evidence_records
+    )

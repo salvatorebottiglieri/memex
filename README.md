@@ -114,12 +114,15 @@ Tests inject fake collaborators without touching network or paying for LLM calls
 | `MEMEX_AGENT` | `memex derive`, `extract-ideas`, `synthesize`, `review` | Replaces the default `DemoAgent` with a module:Class string (e.g. `tests.fake_llm_client:FakeAgent`, `memex.derivers.pi:OMPRpcAgent`, or `memex.derivers.claude_code:ClaudeCodeAgent`). Omit to use `DemoAgent` (no API key needed, hardcoded output). |
 | `MEMEX_JUDGE` | `memex derive`, `synthesize` | Judge agent for the always-on LLM validations (V1 evidence support, V2 re-elaboration quality). Defaults to the derive agent; set to a stronger model via `module:Class`. |
 | `MEMEX_VALIDATION` | `memex derive`, `synthesize` | `off` disables only the LLM-judged criteria (V1–V2); the deterministic checks D1–D6 never opt out. |
+| `MEMEX_RESOLVER` | `memex derive`, `synthesize` | Evidence resolver mode for deterministic grounding of SUPPORTED claims: `deterministic` (default, zero dependencies; token-coverage gate ≥ 0.6 over ≥ 2 content tokens). `auto` and `extractive:<model>` are accepted but warn loudly and degrade to deterministic until the extractive slice ships. |
 | `MEMEX_TELEGRAM_API_ID` | `memex capture` | Required Telegram API id for the real Telethon source |
 | `MEMEX_TELEGRAM_API_HASH` | `memex capture` | Required Telegram API hash for the real Telethon source |
 | `MEMEX_TELEGRAM_SESSION` | `memex capture` | Telethon session file (default `~/.memex/telegram.session`) |
 | `MEMEX_TELEGRAM_SOURCE` | `memex capture` | Telegram source as module:Class override (e.g. `tests.fake_telegram_source:FakeTelegramSource`); falls back to the real Telethon source |
 
 All agent, validator, and source overrides follow the `module:Class` import-string convention so the seam is a one-line change with no monkeypatching.
+
+Note: `MEMEX_RESOLVER` (evidence grounding, above) is unrelated to `MEMEX_RESOLVER_CMD`, the external command `memex resolve-agent` shells out to for browser-assisted URL resolution.
 
 ## Sharing between devices
 

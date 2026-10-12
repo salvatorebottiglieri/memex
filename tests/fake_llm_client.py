@@ -127,12 +127,13 @@ class FakeJudge(Agent):
       - V1: a claim containing ``unsupported`` (default
         'SENTINEL-UNSUPPORTED') → UNSUPPORTED; in a synthesis (context line
         'Node tier: synthesis') a claim with no inline link → UNSUPPORTED
-        (missing declaration); otherwise SUPPORTED. SUPPORTED verdicts cite
-        a literal excerpt of the cited source's content (parsed from the
-        prompt's parent block), UNSUPPORTED verdicts carry
-        source_examined + absence_explanation. ``fabricate`` (default False)
-        makes SUPPORTED verdicts cite a quote that is NOT in the source —
-        exercising D7.
+        (missing declaration); otherwise SUPPORTED. SUPPORTED verdicts
+        carry no evidence_hint by default (the system grounds the CLAIM
+        text itself, exercising the claim-fallback cascade);
+        ``fabricate`` (default False) makes SUPPORTED verdicts carry a
+        fabricated hint that is NOT in the source — exercising D7's
+        anti-fabrication grounding gate. UNSUPPORTED verdicts carry
+        parent_key + absence_explanation.
       - V2: passes=True unless a synthesis statement contains ``boilerplate``
         (default 'SENTINEL-BOILERPLATE').
     """
@@ -186,13 +187,6 @@ class FakeJudge(Agent):
         return slices
 
     @staticmethod
-    def _excerpt(key: str | None, parents: dict[str, str]) -> str:
-        # Notes tier: a None key (no link) grounds on the single parent.
-        k = key if key and key in parents else next(iter(parents), None)
-        content = re.sub(r"\s+", " ", parents.get(k or "", "")).strip()
-        return content[:80]
-
-    @staticmethod
     def _presented_claims(prompt: str) -> list[str]:
         """Legacy helper: claim texts only (presented order)."""
         return [s["claim"] for s in FakeJudge._presented_slices(prompt)]
@@ -234,18 +228,18 @@ class FakeJudge(Agent):
                     }
                 )
             else:
-                verdicts.append(
-                    {
-                        "claim_index": s["index"],
-                        "verdict": "SUPPORTED",
-                        "parent_key": key,
-                        "evidence_anchor": (
-                            "this fabricated quote appears nowhere in the source"
-                            if self.fabricate
-                            else self._excerpt(key, parents)
-                        ),
-                    }
-                )
+                verdict = {
+                    "claim_index": s["index"],
+                    "verdict": "SUPPORTED",
+                    "parent_key": key,
+                }
+                if self.fabricate:
+                    # A fabricated locator: nothing in the source carries
+                    # these words — the grounding gate must draft the node.
+                    verdict["evidence_hint"] = (
+                        "this fabricated quote appears nowhere in the source"
+                    )
+                verdicts.append(verdict)
         return json.dumps({"verdicts": verdicts})
 
     def derive(

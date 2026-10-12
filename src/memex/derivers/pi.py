@@ -205,7 +205,8 @@ _HOST_TOOLS: list[dict] = [
         "description": (
             "Submit the adversarial-validation verdicts: V1 evidence checks "
             "carry a per-claim verdicts array (claim_index, verdict, and "
-            "parent_key + evidence_anchor for SUPPORTED; parent_key + "
+            "parent_key + optional evidence_hint (a short locator, may be "
+            "paraphrased) for SUPPORTED; parent_key + "
             "absence_explanation for UNSUPPORTED); V2 re-elaboration carries "
             "a single passes/reason pair. This is the authoritative answer "
             "— do not also print the payload as plain text."
@@ -224,7 +225,16 @@ _HOST_TOOLS: list[dict] = [
                                 "enum": ["SUPPORTED", "COMMON_KNOWLEDGE", "UNSUPPORTED"],
                             },
                             "parent_key": {"type": "string"},
-                            "evidence_anchor": {"type": "string"},
+                            "evidence_hint": {
+                                "type": "string",
+                                "description": (
+                                    "OPTIONAL short locator for a SUPPORTED "
+                                    "verdict (~30 words max); MAY be "
+                                    "paraphrased. The system locates the "
+                                    "supporting span in the cited parent "
+                                    "deterministically; never fabricate."
+                                ),
+                            },
                             "absence_explanation": {"type": "string"},
                         },
                     },

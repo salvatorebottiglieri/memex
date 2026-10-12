@@ -18,6 +18,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MEMEX_VALIDATOR` gate and
   the `quality_failed` status are replaced by draft + annotations
   (supersedes ADR-0016, see ADR-0018).
+- Deterministic evidence resolution (issue #152): judges emit only
+  references — V1 verdicts cite the parent (`parent_key`) plus an optional
+  `evidence_hint` locator that MAY be paraphrased, never evidence text —
+  and the system resolves the grounding span deterministically (sliding
+  window + token coverage over the normalized source; fail-closed gate:
+  ≥ 0.6 coverage over ≥ 2 content tokens). Grounded SUPPORTED claims
+  persist one evidence record each (`{claim_index, parent_key, span_text,
+  confidence, resolver}`) in a new `evidence` JSON column on the node
+  (open-time migration). D7 can falsify SUPPORTED (ungrounded → fatal,
+  system overrides judge) but never overturns UNSUPPORTED. `MEMEX_RESOLVER`
+  selects the mode: `deterministic` (default, zero dependencies); `auto` /
+  `extractive:<model>` warn loudly and degrade to deterministic until the
+  extractive slice ships. Completes the reference-based principle of #151
+  for evidence (LLMs reference, the system inserts/resolves).
 - Telegram capture: `memex capture` polls Telegram Saved Messages (Telethon) and appends one inbox row per URL, advancing a per-source cursor (ADR-0006) so re-runs only fetch new messages. Backed by new cursor/inbox store tables (open-time migration).
 - Inbox ingest: `memex ingest --from-inbox` runs pending inbox items through the shared extract path; canonical-key dedup makes it idempotent and non-destructive (ADR-0007), with failed fetches left pending for retry.
 

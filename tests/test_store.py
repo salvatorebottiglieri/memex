@@ -1110,6 +1110,72 @@ class TestList:
         assert nodes[1]["id"] == "n2"
 
 
+class TestNodeEvidence:
+    """The node.evidence JSON column (ticket #152): schema migration, the
+    update_evidence write path (NULL on empty) and the get_node/list_nodes
+    decode."""
+
+    def test_init_schema_adds_evidence_column(self):
+        store = _store()
+        cols = {
+            r[1] for r in store._con.execute("PRAGMA table_info(node)").fetchall()
+        }
+        assert "evidence" in cols
+
+    def test_evidence_none_by_default(self):
+        store = _store()
+        store.create_node(node_id="n1", kind="summary", depth=1)
+        assert store.get_node("n1")["evidence"] is None
+
+    def test_update_evidence_roundtrip_via_get_node_and_list_nodes(self):
+        store = _store()
+        store.create_node(node_id="n1", kind="summary", tier="notes", depth=1)
+        records = [
+            {
+                "claim_index": 1,
+                "parent_key": "P1",
+                "span_text": "The database exports the full ledger each evening.",
+                "confidence": 1.0,
+                "resolver": "deterministic",
+            },
+            {
+                "claim_index": 2,
+                "parent_key": "P1",
+                "span_text": "Export jobs run unattended overnight.",
+                "confidence": 0.75,
+                "resolver": "deterministic",
+            },
+        ]
+        store.update_evidence("n1", records)
+        assert store.get_node("n1")["evidence"] == records
+        listed = [n for n in store.list_nodes() if n["id"] == "n1"][0]
+        assert listed["evidence"] == records
+        # The column stores JSON text.
+        raw = store._con.execute(
+            "SELECT evidence FROM node WHERE id = ?", ("n1",)
+        ).fetchone()[0]
+        assert json.loads(raw) == records
+
+    def test_update_evidence_empty_records_writes_null(self):
+        store = _store()
+        store.create_node(node_id="n1", kind="summary", depth=1)
+        store.update_evidence("n1", [{"claim_index": 1, "parent_key": "P1"}])
+        assert store.get_node("n1")["evidence"] == [
+            {"claim_index": 1, "parent_key": "P1"}
+        ]
+        # Empty list -> NULL (mirrors update_trust_state's null-on-empty).
+        store.update_evidence("n1", [])
+        node = store.get_node("n1")
+        assert node["evidence"] is None
+        assert store._con.execute(
+            "SELECT evidence FROM node WHERE id = ?", ("n1",)
+        ).fetchone()[0] is None
+
+    def test_unknown_node_update_evidence_is_noop(self):
+        store = _store()
+        store.update_evidence("nonexistent", [{"claim_index": 1}])  # no raise
+
+
 class TestGetNodeOpenEvents:
     def test_returns_empty_for_unknown_node(self):
         """A node with no events returns an empty list."""
@@ -1403,6 +1469,48 @@ class TestMigrateOnOpen:
             for r in sqlite3.connect(db).execute("PRAGMA table_info(node)").fetchall()
         }
         assert "fetcher_type" in cols
+        assert "evidence" in cols
+
+    def test_open_migrates_pre_152_db_missing_evidence_column(self, tmp_path):
+        """A DB that already has fetcher_type (post-#95) but predates the
+        #152 evidence column is migrated on open: the ALTER adds evidence,
+        reads keep working, and existing rows decode evidence as None."""
+        db = tmp_path / "legacy.db"
+        con = sqlite3.connect(db)
+        con.execute(
+            "CREATE TABLE node ("
+            " id           TEXT PRIMARY KEY,"
+            " kind         TEXT NOT NULL,"
+            " tier         TEXT,"
+            " trust_state  TEXT,"
+            " depth        INTEGER NOT NULL,"
+            " content_path TEXT,"
+            " created_at   TEXT NOT NULL,"
+            " check_failures       TEXT,"
+            " is_contested         INTEGER NOT NULL DEFAULT 0,"
+            " contested_at         TEXT,"
+            " confidence           TEXT,"
+            " synthesis_statements TEXT,"
+            " fetcher_type         TEXT)"
+        )
+        con.execute(
+            "INSERT INTO node VALUES ("
+            " 'n1', 'raw_source', NULL, 'auto-verified', 0, '/tmp/n1.md',"
+            " '2024-01-01T00:00:00', NULL, 0, NULL, NULL, NULL, NULL)"
+        )
+        con.commit()
+        con.close()
+
+        with Store.open(db) as store:
+            node = store.get_node("n1")
+            assert node is not None
+            assert node["evidence"] is None
+
+        cols = {
+            r[1]
+            for r in sqlite3.connect(db).execute("PRAGMA table_info(node)").fetchall()
+        }
+        assert "evidence" in cols
 
     def test_open_leaves_fresh_db_alone(self, tmp_path):
         """A brand-new empty DB is not schema-created by open (init owns it)."""
