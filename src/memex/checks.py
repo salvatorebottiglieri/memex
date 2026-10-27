@@ -45,8 +45,7 @@ def run_checks(con: sqlite3.Connection, node_id: str, content_path: Path | str) 
     try:
         content = content_path.read_text(encoding="utf-8")
     except OSError as exc:
-        failures: list[str] = [f"Content read failed: {exc}"]
-        return CheckResult(passed=False, failures=failures)
+        return CheckResult(passed=False, failures=[f"Content read failed: {exc}"])
 
     failures: list[str] = []
     for rule in CHECK_RULES:

@@ -3,9 +3,10 @@
 Used by load_fetcher, load_agent, load_telegram_source, and any
 future test-injectable seam.
 """
+from typing import Any
 
 
-def load_class(module_path: str) -> object:
+def load_class(module_path: str) -> Any:
     """Import and instantiate a class from a ``module:ClassName`` string.
 
     Args:

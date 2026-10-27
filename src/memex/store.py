@@ -407,7 +407,7 @@ class Store:
             if parent is None or parent["kind"] != "url":
                 raise ValueError("extracted nodes must derive from a URL node")
             if confidence is None:
-                confidence = EXTRACTED_CONFIDENCE.get(fetcher_type)
+                confidence = EXTRACTED_CONFIDENCE.get(fetcher_type) if fetcher_type else None
         if created_at is None:
             created_at = datetime.now(timezone.utc).isoformat()
         if confidence is None and kind not in ("url", "extracted"):
@@ -430,7 +430,7 @@ class Store:
         except sqlite3.Error as e:
             raise StoreError(str(e)) from e
 
-        if kind == "extracted":
+        if kind == "extracted" and derived_from:
             self.create_edge(
                 edge_id=str(uuid.uuid4()),
                 type="provenance",
@@ -503,7 +503,7 @@ class Store:
             c4 = next(rule for rule in CONFIDENCE_RULES if rule.id == "C4")
             if c4.condition(self, node_id):
                 return c4.consequence
-            return EXTRACTED_CONFIDENCE.get(node.get("fetcher_type"))
+            return EXTRACTED_CONFIDENCE.get(node.get("fetcher_type") or "")
 
         for rule in CONFIDENCE_RULES:
             if rule.condition(self, node_id):
@@ -812,6 +812,7 @@ class Store:
                 """,
                 (edge_id, target_node_id, now),
             )
+            assert cur.lastrowid is not None
             return cur.lastrowid
         except sqlite3.Error as e:
             raise StoreError(str(e)) from e
@@ -861,6 +862,7 @@ class Store:
                 (event_id, affected_json, damage_boundary_node_id,
                  rationale_md, confidence, now),
             )
+            assert cur.lastrowid is not None
             return cur.lastrowid
         except sqlite3.Error as e:
             raise StoreError(str(e)) from e

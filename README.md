@@ -6,8 +6,6 @@ A personal wiki / second brain.
 
 Inspired by Andrej Karpathy's personal-wiki approach and by `iusztinpaul/ai-research-os-workshop`. Obsidian is a view-only window onto the knowledge, not the engine.
 
-> Status: **ingestion + derivation + adversarial validation + rendering + staleness propagation + review + resolution implemented.** Core CLI operational.
-
 ## CLI
 
 memex exposes a JSON-only CLI (one command per operation, all output is structured).

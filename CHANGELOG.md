@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- CI now enforces `mypy` on `src` and a coverage gate (`--cov`, fail under
+  85%; subprocess CLI runs are measured). Fixed the 57 type errors this
+  surfaced; no behaviour change except `parse_derive_response`, which now
+  falls back to the regex path when the JSON `prose` is not a string.
+- Removed the work-in-progress `Status` line from the README.
+
 ## [0.2.0] — 2026-10-27
 
 ### Added
