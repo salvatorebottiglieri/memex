@@ -37,6 +37,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Telegram capture: `memex capture` polls Telegram Saved Messages (Telethon) and appends one inbox row per URL, advancing a per-source cursor (ADR-0006) so re-runs only fetch new messages. Backed by new cursor/inbox store tables (open-time migration).
 - Inbox ingest: `memex ingest --from-inbox` runs pending inbox items through the shared extract path; canonical-key dedup makes it idempotent and non-destructive (ADR-0007), with failed fetches left pending for retry.
 
+### Removed
+
+- **Breaking:** the opt-in adversarial validation gate (ADR-0016) is gone:
+  the `MEMEX_VALIDATOR` env var, `validate_derivation()`, and the
+  `quality_failed` status. Quality is now checked by the always-on
+  validation family (see ADR-0018): nodes that fail land as `draft` with
+  per-criterion annotations in `check_failures`. Use `MEMEX_JUDGE` to pick
+  the judge agent and `MEMEX_VALIDATION=off` to disable only the LLM
+  criteria.
+
 ## [0.1.0] — 2026-08-06
 
 ### Added
