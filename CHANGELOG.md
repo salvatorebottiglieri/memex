@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-10-27
+
 ### Added
 
 - Validation family (issue #145): always-on LLM-judged criteria (V1 evidence
@@ -44,7 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Ingestion: `register` creates a URL-node + extracted-node pair; `extract` fetches URLs via per-type fetchers (web, YouTube transcripts, reference-based document reading).
 - Idea extraction (`extract-ideas`) with batch mode and idea search (`ideas`).
 - Derivation: notes-tier (`derive`) and synthesis-tier (`synthesize`) via pluggable LLM agents (demo, OMP RPC, Claude Code), with `derive --all` batching.
-- Adversarial quality validation of derivations via a separate validator agent (`MEMEX_VALIDATOR`). *(Superseded in [Unreleased] by the always-on validation family — see the validation-family entry above and ADR-0018.)*
+- Adversarial quality validation of derivations via a separate validator agent (`MEMEX_VALIDATOR`). *(Superseded in [0.2.0] by the always-on validation family — see the validation-family entry above and ADR-0018.)*
 - Contested propagation and review workflow: `contradict`, `relate`, `review` accept/reject/dismiss, with staleness propagation.
 - Obsidian rendering: `render` projects the SQLite graph into markdown frontmatter and wikilinks (ADR-0008), with vault auto-detection.
 - Git sync: `sync` commits vault state and pushes in one shot; post-merge hook auto-renders on pull.
