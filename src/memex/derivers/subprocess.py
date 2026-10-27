@@ -80,7 +80,7 @@ class SubprocessClient:
         argv: Callable[[], list[str]],
         is_ready: Callable[[dict], bool],  # classifies the readiness event
         send_prompt: Callable[[Turn, str], None],  # writes the prompt frame (uses turn.id)
-        on_event: Callable[[dict, Turn], None],  # interprets events; sets done/error/stop_reason
+        on_event: Callable[[dict, Turn | None], None],  # interprets events; sets done/error/stop_reason
         after_ready: Callable[[], None] | None = None,
         abort: Callable[[Turn], None] | None = None,  # default: kill the process
         clean_stop_reasons: frozenset[str],
@@ -273,6 +273,8 @@ class SubprocessClient:
     # ------------------------------------------------------------------
 
     def _stderr_reader(self, proc: subprocess.Popen) -> None:
+        if proc.stderr is None:
+            return
         try:
             for line in proc.stderr:
                 self._stderr_tail.append(line.rstrip("\n"))
@@ -282,6 +284,8 @@ class SubprocessClient:
             pass
 
     def _reader(self, proc: subprocess.Popen) -> None:
+        if proc.stdout is None:
+            return
         try:
             try:
                 for line in proc.stdout:

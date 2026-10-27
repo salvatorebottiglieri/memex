@@ -19,5 +19,8 @@ jobs:
       - name: Lint (ruff)
         run: uv run ruff check src tests
 
-      - name: Test (pytest)
-        run: uv run pytest tests/
+      - name: Typecheck (mypy)
+        run: uv run mypy
+
+      - name: Test (pytest + coverage gate)
+        run: uv run pytest tests/ --cov

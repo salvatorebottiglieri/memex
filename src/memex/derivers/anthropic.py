@@ -3,7 +3,7 @@
 import json as _json
 
 from memex.agent import Agent
-from memex.schemas import DerivationResult, ReviewProposal
+from memex.schemas import DerivationResult, DocumentRef, ReviewProposal
 from memex.utils.parsing import parse_derive_response
 
 _DERIVE_SYSTEM_PROMPT = (
@@ -32,7 +32,14 @@ _DERIVE_USER_TEMPLATE = "# Source material\n\n{content}\n"
 class AnthropicAgent(Agent):
     """Real Anthropic-backed agent using structured JSON output."""
 
-    def derive(self, content: str) -> DerivationResult:
+    def derive(
+        self,
+        content: str | None = None,
+        *,
+        reference: DocumentRef | None = None,
+    ) -> DerivationResult:
+        if content is None:
+            raise ValueError("AnthropicAgent requires inline content")
         import anthropic
 
         client = anthropic.Anthropic()
@@ -141,8 +148,16 @@ class AnthropicAgent(Agent):
         except Exception:
             return None
 
-    def extract_ideas(self, content: str) -> list[str]:
+    def extract_ideas(
+        self,
+        content: str | None = None,
+        source_url: str | None = None,
+        *,
+        reference: DocumentRef | None = None,
+    ) -> list[str]:
         """Extract 3-5 key ideas via Anthropic LLM."""
+        if content is None:
+            raise ValueError("AnthropicAgent requires inline content")
         import anthropic
 
         client = anthropic.Anthropic()

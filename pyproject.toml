@@ -32,7 +32,31 @@ dev = [
     "pytest>=9.1.1",
     "pypdf>=5.4.0",
     "ruff>=0.15.0,<0.16",
+    "pytest-cov>=7.0",
+    "mypy>=1.10",
+    "types-pyyaml>=6.0.12.20260906",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["src/memex"]
+branch = false
+parallel = true
+patch = ["subprocess"]
+
+[tool.coverage.report]
+fail_under = 85
+show_missing = false
+skip_covered = true
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src"]
+warn_unused_ignores = true
+
+# Optional extras: not installed in the dev env, so no stubs to check against.
+[[tool.mypy.overrides]]
+module = ["anthropic", "telethon", "telethon.*", "youtube_transcript_api"]
+ignore_missing_imports = true

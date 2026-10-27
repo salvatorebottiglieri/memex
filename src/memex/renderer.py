@@ -125,11 +125,12 @@ def _build_frontmatter(node: dict[str, Any], body: str, store: Store) -> dict[st
         e for e in store.list_edges(node_id=node_id)
         if e["from_node"] == node_id
     ]
-    rel_groups: dict[str, list[str]] = []
+    rel_groups: list[tuple[str, str]] = []
     for e in edges:
         rel = e["relation"]
         # The URL parent was already fetched above (find_url_parent); reuse it
         # instead of re-querying for the derived_from edge target.
+        target: dict[str, Any] | None
         if url_parent is not None and e["to_node"] == url_parent["id"]:
             target = url_parent
         else:

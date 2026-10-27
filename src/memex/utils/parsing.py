@@ -66,7 +66,7 @@ def parse_derive_response(raw: str) -> tuple[str, list[str]]:
         if isinstance(data, dict):
             prose = data.get("prose", data.get("content", raw))
             statements = data.get("synthesis_statements", [])
-            if isinstance(statements, list):
+            if isinstance(prose, str) and isinstance(statements, list):
                 return prose, statements
     except (json.JSONDecodeError, AttributeError, TypeError):
         pass

@@ -1,13 +1,18 @@
 """Built-in demo deriver — returns hardcoded content. No API key needed."""
 
-from memex.schemas import DerivationResult, ReviewProposal
+from memex.schemas import DerivationResult, DocumentRef, ReviewProposal
 from memex.agent import Agent
 
 
 class DemoAgent(Agent):
     """Built-in demo agent — returns hardcoded content. No API key needed."""
 
-    def derive(self, content: str) -> DerivationResult:
+    def derive(
+        self,
+        content: str | None = None,
+        *,
+        reference: DocumentRef | None = None,
+    ) -> DerivationResult:
         prose = (
             "This article discusses the topic at hand.\n\n"
             "> Synthesis: The author implies a broader pattern beyond what is stated directly.\n\n"
@@ -34,7 +39,13 @@ class DemoAgent(Agent):
         """Demo: no title generation."""
         return None
 
-    def extract_ideas(self, content: str) -> list[str]:
+    def extract_ideas(
+        self,
+        content: str | None = None,
+        source_url: str | None = None,
+        *,
+        reference: DocumentRef | None = None,
+    ) -> list[str]:
         """Demo: return 3 hardcoded ideas."""
         return [
             "Key idea one from the source material",

@@ -12,7 +12,7 @@ import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import click
 
@@ -82,10 +82,16 @@ def _resolve_paths(db_path, vault_path):
     )
     return dp, vp
 
-def _fail(error: str, **kwargs: Any) -> None:
+def _fail(error: str, **kwargs: Any) -> NoReturn:
     """Emit a JSON error to stderr and exit with code 1."""
     click.echo(json.dumps({"error": error, **kwargs}), err=True)
     raise SystemExit(1)
+
+
+def _group_db_path(ctx: click.Context) -> Path:
+    """The ``--db`` value of the parent command group."""
+    assert ctx.parent is not None
+    return ctx.parent.params["db_path"]
 
 
 def _require_db(db_path: Path) -> None:
@@ -446,16 +452,16 @@ def _extract_url(store, vault_path: Path, url: str, *, force: bool = False) -> d
     # is discarded (fresh and --force alike): a fresh extract leaves no
     # orphan, a re-extract leaves the previous file untouched.
     fetcher_wrote_file = result.content_path is not None
-    if fetcher_wrote_file:
+    if result.content_path is not None:
         md_path = Path(result.content_path)
     tmp_path = (
         None
         if fetcher_wrote_file
         else md_path.with_name(f"{md_path.name}.{uuid.uuid4().hex}.tmp")
     )
-    check_path = md_path if fetcher_wrote_file else tmp_path
+    check_path = tmp_path or md_path
     try:
-        if not fetcher_wrote_file:
+        if tmp_path is not None:
             tmp_path.write_text(result.content, encoding="utf-8")
 
         if existing is None:
@@ -498,7 +504,7 @@ def _extract_url(store, vault_path: Path, url: str, *, force: bool = False) -> d
             check_failures=check_result.failures,
         )
 
-        if not fetcher_wrote_file:
+        if tmp_path is not None:
             # Final step before commit: atomically move the temp file
             # into place so the on-disk content always matches the DB
             # state. Fetcher-written artifacts (cache files) are already
@@ -1146,8 +1152,8 @@ def review_list(ctx: click.Context) -> None:
     """Return JSON list of the review queue (pending events + pending proposals)."""
     from memex.store import Store
 
-    db_path = ctx.parent.params["db_path"]
-    
+    db_path = _group_db_path(ctx)
+
     with Store.open(db_path) as store:
         queue = store.get_review_queue()
     click.echo(json.dumps(queue))
@@ -1160,8 +1166,8 @@ def review_list(ctx: click.Context) -> None:
 def review_accept(ctx: click.Context, proposal_id: int, note: str | None) -> None:
     """Accept a review proposal — mark affected nodes as stale, close event."""
     from memex.store import Store
-    db_path = ctx.parent.params["db_path"]
-    
+    db_path = _group_db_path(ctx)
+
     with Store.open(db_path) as store:
         result = store.accept_proposal(proposal_id, human_note=note)
     click.echo(json.dumps(result))
@@ -1174,8 +1180,8 @@ def review_accept(ctx: click.Context, proposal_id: int, note: str | None) -> Non
 def review_reject(ctx: click.Context, proposal_id: int, note: str | None) -> None:
     """Reject a review proposal — close event, no trust_state changes."""
     from memex.store import Store
-    db_path = ctx.parent.params["db_path"]
-    
+    db_path = _group_db_path(ctx)
+
     with Store.open(db_path) as store:
         result = store.reject_proposal(proposal_id, human_note=note)
     click.echo(json.dumps(result))
@@ -1188,8 +1194,8 @@ def review_reject(ctx: click.Context, proposal_id: int, note: str | None) -> Non
 def review_dismiss(ctx: click.Context, proposal_id: int, note: str | None) -> None:
     """Dismiss a review proposal — close event, no trust_state changes."""
     from memex.store import Store
-    db_path = ctx.parent.params["db_path"]
-    
+    db_path = _group_db_path(ctx)
+
     with Store.open(db_path) as store:
         result = store.dismiss_proposal(proposal_id, human_note=note)
     click.echo(json.dumps(result))
