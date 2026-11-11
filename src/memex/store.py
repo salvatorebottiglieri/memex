@@ -49,7 +49,9 @@ CREATE TABLE IF NOT EXISTS node (
     depth        INTEGER NOT NULL,
     content_path TEXT,
     created_at   TEXT NOT NULL,
-    fetcher_type TEXT
+    fetcher_type TEXT,
+    frozen_at     TEXT,
+    frozen_reason TEXT
 );
 
 CREATE TABLE IF NOT EXISTS source (
@@ -131,6 +133,12 @@ CREATE INDEX IF NOT EXISTS idx_node_idea_node ON node_idea(node_id);
 """
 
 
+# A frozen node stays in the graph as historical reference (ADR-0019) but is
+# excluded from every active surface. `frozen` is orthogonal to trust_state —
+# like `is_contested`, it is a flag, not a fifth ordinal value.
+ACTIVE_PREDICATE = "n.frozen_at IS NULL"
+
+
 class Store:
     """SQLite-backed persistence for Nodes, Sources, and the Ledger.
 
@@ -191,6 +199,7 @@ class Store:
             or "cursor" not in tables
             or "inbox" not in tables
             or "evidence" not in cols
+            or "frozen_at" not in cols
         ):
             self.init_schema()
 
@@ -257,6 +266,18 @@ class Store:
                     )
                 except sqlite3.OperationalError:
                     pass  # column already exists
+                try:
+                    self._con.execute(
+                        "ALTER TABLE node ADD COLUMN frozen_at TEXT"
+                    )
+                except sqlite3.OperationalError:
+                    pass  # column already exists
+                try:
+                    self._con.execute(
+                        "ALTER TABLE node ADD COLUMN frozen_reason TEXT"
+                    )
+                except sqlite3.OperationalError:
+                    pass  # column already exists
                 self._rebuild_node_table_for_url_kind()
                 self._backfill_confidence()
             except BaseException:
@@ -315,7 +336,9 @@ class Store:
                 confidence           TEXT CHECK (confidence IN ('high','medium','low')),
                 synthesis_statements TEXT,
                 evidence             TEXT,
-                fetcher_type         TEXT
+                fetcher_type         TEXT,
+                frozen_at            TEXT,
+                frozen_reason        TEXT
             )
             """
         )
@@ -323,6 +346,7 @@ class Store:
             "id", "kind", "tier", "trust_state", "depth", "content_path",
             "created_at", "check_failures", "is_contested", "contested_at",
             "confidence", "synthesis_statements", "evidence", "fetcher_type",
+            "frozen_at", "frozen_reason",
         ) if name in existing]
         collist = ", ".join(copy_cols)
         self._con.execute(
@@ -542,12 +566,14 @@ class Store:
         tier: str | None = None,
         trust_state: str | None = None,
         confidence: str | None = None,
+        include_frozen: bool = False,
         limit: int | None = None,
         offset: int | None = None,
     ) -> list[dict[str, Any]]:
         """All nodes with full metadata, ordered by created_at.
 
-        Optional filters: kind, tier, trust_state, confidence, limit, offset.
+        Optional filters: kind, tier, trust_state, confidence, include_frozen,
+        limit, offset. Frozen nodes are excluded by default (ADR-0019).
 
         ``kind`` defaults to excluding URL nodes (they are roots, not viewing
         surfaces); pass ``kind='url'`` to include them. The exclusion happens
@@ -556,7 +582,8 @@ class Store:
         Returns the same per-node fields as ``get_node``: ``{id, kind, tier,
         trust_state, depth, content_path, created_at, confidence, check_failures,
         synthesis_statements, evidence, is_contested, contested_at, fetcher_type,
-        canonical_key, source_url, title, fetched_at, failed}``.
+        frozen_at, frozen_reason, canonical_key, source_url, title, fetched_at,
+        failed}``.
         """
         clauses: list[str] = []
         params: list[Any] = []
@@ -577,6 +604,8 @@ class Store:
             else:
                 clauses.append("n.confidence = ?")
                 params.append(confidence)
+        if not include_frozen:
+            clauses.append(ACTIVE_PREDICATE)
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         sql = f"""
             SELECT
@@ -584,6 +613,7 @@ class Store:
                 n.content_path, n.created_at, n.check_failures,
                 n.synthesis_statements, n.evidence,
                 n.is_contested, n.contested_at, n.confidence, n.fetcher_type,
+                n.frozen_at, n.frozen_reason,
                 s.canonical_key, s.source_url, s.title, s.fetched_at, s.failed
             FROM node n
             LEFT JOIN source s ON s.node_id = n.id
@@ -624,7 +654,8 @@ class Store:
         """Full node + source by id.
         Returns ``{id, kind, tier, trust_state, depth, content_path, created_at,
         confidence, check_failures, synthesis_statements, evidence, is_contested, contested_at,
-        fetcher_type, canonical_key, source_url, title, fetched_at, failed}`` or ``None``.
+        fetcher_type, frozen_at, frozen_reason, canonical_key, source_url, title,
+        fetched_at, failed}`` or ``None``.
         """
         row = self._con.execute(
             """
@@ -633,6 +664,7 @@ class Store:
                 n.check_failures,
                 n.synthesis_statements, n.evidence,
                 n.is_contested, n.contested_at, n.confidence, n.fetcher_type,
+                n.frozen_at, n.frozen_reason,
                 s.canonical_key, s.source_url, s.title, s.fetched_at, s.failed
             FROM node n
             LEFT JOIN source s ON s.node_id = n.id
@@ -1127,6 +1159,20 @@ class Store:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def list_content_locations(self) -> list[tuple[str, str | None]]:
+        """Return (node_id, content_path) for every node in the graph."""
+        rows = self._con.execute(
+            "SELECT id, content_path FROM node ORDER BY created_at, id"
+        ).fetchall()
+        return [(r["id"], r["content_path"]) for r in rows]
+
+    def list_sources(self) -> list[tuple[str, bool]]:
+        """Return (node_id, failed) for every source row."""
+        rows = self._con.execute(
+            "SELECT node_id, failed FROM source ORDER BY node_id"
+        ).fetchall()
+        return [(r["node_id"], bool(r["failed"])) for r in rows]
+
     def find_derived_from(self, l0_node_id: str) -> dict | None:
         """Return the first derivation node with a derived_from edge to ``l0_node_id``."""
         row = self._con.execute(
@@ -1210,6 +1256,32 @@ class Store:
         return self.get_node(row["from_node"])
 
     # ── Trust state + check failures ───────────────────────────────
+
+    def mark_frozen(self, *, node_id: str, reason: str, at: str) -> int:
+        """Freeze a node: keep it in the graph but exclude it from active views.
+
+        Returns the number of rows touched (0 when the node does not exist).
+        """
+        try:
+            cur = self._con.execute(
+                "UPDATE node SET frozen_at = ?, frozen_reason = ? WHERE id = ?",
+                (at, reason, node_id),
+            )
+            return cur.rowcount
+        except sqlite3.Error as e:
+            raise StoreError(str(e)) from e
+
+    def clear_frozen(self, *, node_id: str) -> int:
+        """Thaw a frozen node. Returns rows touched: 0 when it was not frozen."""
+        try:
+            cur = self._con.execute(
+                "UPDATE node SET frozen_at = NULL, frozen_reason = NULL "
+                "WHERE id = ? AND frozen_at IS NOT NULL",
+                (node_id,),
+            )
+            return cur.rowcount
+        except sqlite3.Error as e:
+            raise StoreError(str(e)) from e
 
     def update_trust_state(
         self, *, node_id: str, trust_state: str, check_failures: list[str] | None = None
@@ -1508,6 +1580,10 @@ class Store:
                 "SELECT COALESCE(confidence, 'unset'), COUNT(*) FROM node GROUP BY confidence"
             ).fetchall())
 
+            frozen = self._con.execute(
+                "SELECT COUNT(*) FROM node WHERE frozen_at IS NOT NULL"
+            ).fetchone()[0]
+
             # Roots are URL nodes; coverage measures how many content-bearing
             # L0 nodes (legacy raw_source or extracted) have at least one
             # derivation resting on them. Count over e.to_node — the L0 target
@@ -1545,6 +1621,7 @@ class Store:
                 "by_confidence": by_conf,
                 "derivation_coverage_pct": coverage,
                 "pending_reviews": pending_reviews,
+                "frozen": frozen,
             }
         except sqlite3.Error as e:
             raise StoreError(str(e)) from e
