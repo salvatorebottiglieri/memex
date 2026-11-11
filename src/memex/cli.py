@@ -12,9 +12,12 @@ import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import click
+
+if TYPE_CHECKING:
+    from memex.store import Store
 
 from memex.canonical_key import canonical_key
 
@@ -99,6 +102,27 @@ def _require_db(db_path: Path) -> None:
     if not db_path.exists():
         _fail("db_not_found", path=str(db_path))
 
+
+def _integrity_inputs(
+    store: Store,
+) -> tuple[
+    list[tuple[str, str | None]],
+    list[tuple[str, str]],
+    list[tuple[str, bool]],
+]:
+    """The three reads the integrity check needs, in one place.
+
+    The CLI owns the Store/SQL capability; ``integrity.check_integrity``
+    receives only data, so it stays pure and testable with three lists.
+    """
+    locations = store.list_content_locations()
+    provenance = [
+        (edge["from_node"], edge["to_node"])
+        for edge in store.list_edges(type="provenance", relation="derived_from")
+    ]
+    sources = store.list_sources()
+    return locations, provenance, sources
+
 @click.group()
 @click.version_option(version=_PKG_VERSION, prog_name="memex", message="%(prog)s %(version)s")
 def cli() -> None:
@@ -172,6 +196,71 @@ def status(db_path: Path, vault_path: Path) -> None:
         "vault_exists": vault_path.exists(),
     }
     click.echo(json.dumps(result))
+
+@cli.command()
+@_db_options
+def check(db_path: Path, vault_path: Path) -> None:
+    """Re-validate every locator between SQLite and markdown (read-only).
+
+    Reports missing/not-a-file content paths, dangling ``derived_from``
+    targets, and dead sources. Exit code 1 when there is at least one
+    finding; nothing is frozen automatically — use ``memex freeze``.
+    """
+    from memex.integrity import check_integrity
+    from memex.store import Store
+
+    _require_db(db_path)
+    with Store.open(db_path) as store:
+        findings = check_integrity(*_integrity_inputs(store))
+
+    click.echo(json.dumps([dataclasses.asdict(f) for f in findings]))
+    if findings:
+        raise SystemExit(1)
+
+
+@cli.command()
+@_db_options
+@click.argument("node_id")
+@click.option("--reason", required=True, help="Why the node is being frozen.")
+def freeze(db_path: Path, vault_path: Path, node_id: str, reason: str) -> None:
+    """Mark a node frozen: kept in the graph, excluded from active views."""
+    from memex.store import Store
+
+    _require_db(db_path)
+    at = datetime.now(timezone.utc).isoformat()
+    with Store.open(db_path) as store:
+        touched = store.mark_frozen(node_id=node_id, reason=reason, at=at)
+
+    if touched == 0:
+        _fail("not_found", id=node_id)
+
+    click.echo(json.dumps({
+        "status": "frozen",
+        "node_id": node_id,
+        "frozen_at": at,
+        "reason": reason,
+    }))
+
+
+@cli.command()
+@_db_options
+@click.argument("node_id")
+def thaw(db_path: Path, vault_path: Path, node_id: str) -> None:
+    """Return a frozen node to active views (explicit, never automatic)."""
+    from memex.store import Store
+
+    _require_db(db_path)
+    with Store.open(db_path) as store:
+        node = store.get_node(node_id)
+        if node is None:
+            _fail("not_found", id=node_id)
+        touched = store.clear_frozen(node_id=node_id)
+
+    click.echo(json.dumps({
+        "status": "thawed" if touched else "not_frozen",
+        "node_id": node_id,
+    }))
+
 
 @cli.command()
 @_db_options
@@ -757,12 +846,14 @@ def cookies_export(domain: str, output: str | None) -> None:
     default=None,
     help="Substring match against any synthesis statement (uses the structured column).",
 )
+@click.option("--include-frozen", is_flag=True, default=False,
+              help="Include frozen nodes (excluded by default).")
 @click.option("--limit", default=None, type=int, help="Max results.")
 @click.option("--offset", default=None, type=int, help="Result offset for pagination.")
 def list_nodes(db_path: Path, vault_path: Path,
                kind: str | None, tier: str | None, trust_state: str | None,
                confidence: str | None, synthesis_statement: str | None,
-               limit: int | None, offset: int | None) -> None:
+               include_frozen: bool, limit: int | None, offset: int | None) -> None:
     """Return JSON array of nodes (URL nodes hidden unless --kind url is given)."""
     from memex.store import Store
 
@@ -770,7 +861,8 @@ def list_nodes(db_path: Path, vault_path: Path,
     with Store.open(db_path) as store:
         results = store.list_nodes(
             kind=kind, tier=tier, trust_state=trust_state,
-            confidence=confidence, limit=limit, offset=offset,
+            confidence=confidence, include_frozen=include_frozen,
+            limit=limit, offset=offset,
         )
         if synthesis_statement:
             needle = synthesis_statement.lower()
@@ -908,7 +1000,10 @@ def synthesize(db_path: Path, vault_path: Path, node_ids: tuple[str, ...]) -> No
 @cli.command()
 @_db_options
 @click.argument("query")
-def search(db_path: Path, vault_path: Path, query: str) -> None:
+@click.option("--include-frozen", is_flag=True, default=False,
+              help="Include frozen nodes (excluded by default).")
+def search(db_path: Path, vault_path: Path, query: str,
+           include_frozen: bool) -> None:
     """Keyword search over derivation content and L0 metadata. Returns JSON array (read-only).
 
     Each result has: id, snippet, canonical_key, l0_node_id, match_type.
@@ -928,7 +1023,11 @@ def search(db_path: Path, vault_path: Path, query: str) -> None:
         for edge in rows:
             deriv_id = edge["from_node"]
             deriv = store.get_node(deriv_id)
-            if deriv is None or not deriv.get("content_path"):
+            if deriv is None:
+                continue
+            if deriv.get("frozen_at") and not include_frozen:
+                continue
+            if not deriv.get("content_path"):
                 continue
             p = Path(deriv["content_path"])
             if not p.exists():
@@ -959,14 +1058,16 @@ def search(db_path: Path, vault_path: Path, query: str) -> None:
             }
 
         # ── Second pass: L0 metadata (SQL) ────────────────────
-        meta_rows = store._con.execute(
-            """
+        meta_sql = """
             SELECT n.id, s.title, s.source_url, s.canonical_key
             FROM node n
             JOIN source s ON s.node_id = n.id
             WHERE s.title LIKE ? OR s.source_url LIKE ? OR s.canonical_key LIKE ?
-            """,
-            (query_param, query_param, query_param),
+        """
+        if not include_frozen:
+            meta_sql += " AND n.frozen_at IS NULL"
+        meta_rows = store._con.execute(
+            meta_sql, (query_param, query_param, query_param)
         ).fetchall()
 
         for row in meta_rows:
@@ -1388,6 +1489,11 @@ def sync(db_path: Path, vault_path: Path, push: bool, install_hooks: bool) -> No
     results = render(db_path, vault_path)
     rendered = sum(1 for r in results if r["status"] == "rendered")
 
+    from memex.store import Store
+
+    with Store.open(db_path) as store:
+        frozen = store.get_stats().get("frozen", 0)
+
     # 2. Git add + commit — ponytail: subprocess for 3 calls, not a library
     r = subprocess.run(["git", "add", "-A"], cwd=vault_path, capture_output=True, text=True)
     if r.returncode != 0:
@@ -1408,6 +1514,7 @@ def sync(db_path: Path, vault_path: Path, push: bool, install_hooks: bool) -> No
         "rendered": rendered,
         "committed": committed,
         "pushed": pushed,
+        "frozen": frozen,
     }))
 
 
