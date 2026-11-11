@@ -19,6 +19,8 @@ Every rule here has a concrete implementation.
 | `confidence` | enum | 1 | `high` > `medium` > `low`. Inherited from parents |
 | `is_contested` | bool | 1 | Orthogonal to trust_state. `1` if any open `event_node_link` exists |
 | `contested_at` | ISO-8601 | null | 0–1 | When first contested |
+| `frozen_at` | ISO-8601 | null | 0–1 | When the node was frozen (excluded from active views, ADR-0019) |
+| `frozen_reason` | string | null | 0–1 | Why the node was frozen |
 | `content_path` | path | 1 | Filesystem path to markdown file |
 | `synthesis_statements` | JSON array | null | 0–1 | Structured list of inferences |
 | `check_failures` | JSON array | null | 0–1 | Deterministic (D1–D6) + adversarial (V1–V2) gate failures (if any) |
@@ -379,11 +381,14 @@ Rule A1 — Agent stop condition
   An agent may stop on a node during top-down navigation ONLY IF:
     trust_state ∈ {'auto-verified', 'human-approved'}
     AND is_contested = 0
-  (ADR-0004, enforced in architecture — no code check currently since
-   graph retrieval is not yet implemented.)
+    AND frozen_at IS NULL
+  (ADR-0004, ADR-0019. The frozen half is enforced by
+   Store.ACTIVE_PREDICATE; graph retrieval itself is not yet
+   implemented, so the trust/contested half remains architectural.)
 
-Rule A2 — Contested nodes require descent
+Rule A2 — Non-active nodes require descent
   IF is_contested = 1 OR trust_state = 'draft' OR trust_state = 'stale'
+     OR frozen_at IS NOT NULL
     THEN the agent MUST descend to provenance children.
 
 Rule A3 — L0 nodes are always terminal
@@ -448,5 +453,5 @@ Constraint SC8 — Provenance consistency (FK)
 | D7 | `validators/validate.py` (deterministic, over V1's verdicts) | Code |
 | S1–S6 | agent system prompts, `_parse_derive_response()` | Code |
 | V1–V2 | `validators/validate.py` `run_validations()`, `rules.py` `VALIDATION_RULES` (curated: one disjoint defect class per member, see Rule V3) | Code |
-| A1–A3 | ADR-0004, ADR-0001 | Architectural (not yet enforced in code) |
+| A1–A3 | ADR-0004, ADR-0019, ADR-0001 | Architectural; A1/A2 frozen predicate enforced by `Store.ACTIVE_PREDICATE`, graph retrieval not yet implemented |
 | SC1–SC8 | `store.py` `init_schema()` | DB |
