@@ -1,7 +1,7 @@
 [project]
 name = "memex"
 version = "0.2.0"
-description = "Add your description here"
+description = "A personal wiki / second brain."
 readme = "README.md"
 authors = [
     { name = "Salvatore Bottiglieri", email = "sasibottiglieri0@gmail.com" }
