@@ -112,6 +112,24 @@ def test_freeze_hides_from_list_and_search_then_thaw_restores(store):
     assert node_id in {r["id"] for r in json.loads(search_again.stdout)}
 
 
+def test_search_excludes_frozen_l0_metadata_match(store):
+    node = _registered_node(store)
+    url_id = node["url_node_id"]
+    # The token lives only in the source row, never in markdown, so only the
+    # L0-metadata SQL pass of search can match it.
+    _q(store, "UPDATE source SET title = ? WHERE node_id = ?", ("zz-l0-meta-only", url_id))
+    frozen = _memex(store, "freeze", url_id, "--reason", "source gone")
+    assert frozen.returncode == 0, frozen.stderr
+
+    search = _memex(store, "search", "zz-l0-meta-only")
+    assert search.returncode == 0, search.stderr
+    assert json.loads(search.stdout) == []
+
+    with_frozen = _memex(store, "search", "zz-l0-meta-only", "--include-frozen")
+    assert with_frozen.returncode == 0, with_frozen.stderr
+    assert url_id in {r["l0_node_id"] for r in json.loads(with_frozen.stdout)}
+
+
 def test_freeze_unknown_node_fails(store):
     result = _memex(store, "freeze", "no-such-node", "--reason", "missing")
 

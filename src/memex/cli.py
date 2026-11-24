@@ -1062,7 +1062,7 @@ def search(db_path: Path, vault_path: Path, query: str,
             SELECT n.id, s.title, s.source_url, s.canonical_key
             FROM node n
             JOIN source s ON s.node_id = n.id
-            WHERE s.title LIKE ? OR s.source_url LIKE ? OR s.canonical_key LIKE ?
+            WHERE (s.title LIKE ? OR s.source_url LIKE ? OR s.canonical_key LIKE ?)
         """
         if not include_frozen:
             meta_sql += " AND " + ACTIVE_PREDICATE
