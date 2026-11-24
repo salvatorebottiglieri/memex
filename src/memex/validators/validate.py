@@ -18,8 +18,10 @@ V1-UNSUPPORTED — one is enough → draft) vs quality (V2 — draft, annotated
 severity=quality, human-promotable). The tag is an informational annotation
 for human review: both severities gate to draft (no separate
 quality_failed state) and draft nodes are human-promotable via the review
-flow. A judge call or verdict-parse failure degrades to pass-with-warning —
-it never crashes the derive.
+flow. The one non-gating failure kind is D7's tolerated prose annotation
+(#169): it is tagged quality, listed in ``CheckResult.tolerated``, and the
+gate subtracts exactly that list. A judge call or verdict-parse failure
+degrades to pass-with-warning — it never crashes the derive.
 
 The judge is the agent that produced the derivation (RPC process reuse;
 --no-session keeps each judge call a stateless single turn), or the agent
@@ -40,6 +42,7 @@ from memex.agent import Agent, load_agent
 from memex.checks import CheckResult
 from memex.rules import (
     SEVERITY_FATAL,
+    SEVERITY_QUALITY,
     VALIDATION_RULES,
     ValidationRule,
     _WIKILINK_RE,
@@ -51,7 +54,13 @@ from memex.utils.parsing import (
     _cap_prompt_content,
     parse_synthesis_statements,
 )
-from memex.validators.evidence import _warn, grounding_gate, resolve_evidence
+from memex.validators.evidence import (
+    TOLERATED_SHARE,
+    _warn,
+    content_tokens,
+    grounding_gate,
+    resolve_evidence,
+)
 
 
 def _decode_statements(raw: str | None) -> list[str]:
@@ -256,13 +265,18 @@ def merge_gate_failures(
 
     Gate contract: D + V failures accumulate into a single list — V
     failures are appended after D failures (the deterministic checks and D7
-    run first; V2 quality annotations ride after them) — and any failure
-    at all gates to ``draft``. Returns (failures, trust_state).
+    run first; V2 quality annotations ride after them) — and any blocking
+    failure gates to ``draft``. Blocking = every failure except the D7 prose
+    annotations the proportional ratio explicitly excused (#169): those ride
+    along in the list, visible with their non-fatal tag, and never gate.
+    Returns (failures, trust_state).
     """
     failures = list(check_result.failures)
     if validation_result is not None:
         failures.extend(validation_result.failures)
-    trust_state = "auto-verified" if not failures else "draft"
+    tolerated = validation_result.tolerated if validation_result else []
+    blocking = [f for f in failures if f not in tolerated]
+    trust_state = "auto-verified" if not blocking else "draft"
     return failures, trust_state
 
 
@@ -290,19 +304,30 @@ def _d7_resolve_grounding(
     node: dict[str, Any],
     parents: list[dict[str, Any]],
     slices: list[str] | None = None,
-) -> tuple[list[str], list[dict[str, Any]]]:
+) -> tuple[list[str], list[dict[str, Any]], list[str]]:
     """D7 (deterministic): resolve every SUPPORTED verdict's evidence.
 
     The judge emits only references plus an optional ``evidence_hint``
     locator; the system LOCATES the supporting span in the cited parent
     (``resolve_evidence``: sliding-window token coverage over the
     normalized source) and the grounding gate decides whether the CLAIM's
-    content tokens are covered by that span. Not grounded → D7 fatal (the
+    content tokens are covered by that span. Not grounded → D7 failure (the
     system overrides the judge); grounded → one evidence record
     ``{claim_index, parent_key, span_text, confidence, resolver}`` per
     claim (I5). UNSUPPORTED verdicts are never resolved and never produce
     a record (I3); COMMON_KNOWLEDGE on a synthesis claim whose slice
     carries no inline link is backstopped as a missing declaration.
+
+    Not grounded is fatal, with one proportional exception (#169): an
+    ungrounded claim is **numeric** when one of its content tokens carries a
+    digit and does not appear in the content of any checked parent, else
+    **prose**; the node stays fatal when any ungrounded claim is numeric or
+    when the ungrounded prose claims exceed ``ceil(TOLERATED_SHARE ×
+    gated_claims)`` — = ``max(1, …)`` for any positive share, 0 (the
+    pre-#169 gate) when the share is 0. Within the share, the prose claims
+    are tolerated: they stay in ``failures`` tagged ``quality`` (never
+    dropped) and are returned separately as the excused list the gate
+    subtracts.
 
     The parent is resolved from the judge's parent_key reference (P1..Pn)
     — a missing/invalid key falls back to any readable parent (today's
@@ -311,12 +336,24 @@ def _d7_resolve_grounding(
     to a presented slice has no claim text to gate → D7 fatal, no record.
     Unreadable parent content → cannot resolve → D7 fatal (same draft
     outcome as the old anchor-not-found path).
+
+    Returns (failures, evidence records, tolerated failure messages).
     """
     tier = node.get("tier")
     key_to_parent = {p["key"]: p for p in parents}
     failures: list[str] = []
     records: list[dict[str, Any]] = []
     resolved: set[int] = set()
+    # Ungrounded claims, in verdict order: (is_numeric, tag-less message).
+    # Tagged only after the whole claim population is known: the tolerance is
+    # a property of the node, not of one claim.
+    ungrounded: list[tuple[bool, str]] = []
+    # Denominator of the tolerance: the SUPPORTED verdicts that reached the
+    # token gate — the claims D7 actually examined. Duplicate and uncorrelated
+    # verdicts are excluded: they carry no claim text to ground, are their own
+    # fatal failures above, and would inflate the tolerated budget without
+    # adding a claim that could be grounded.
+    gated_claims = 0
     matched = _correlate_verdicts(slices or [], verdicts)
     for v, match in zip(verdicts, matched):
         idx = v.get("claim_index")
@@ -356,6 +393,7 @@ def _d7_resolve_grounding(
         # The gate judges the CLAIM; the evidence_hint is only the preferred
         # locator — tried first because its span is the tightest (best
         # provenance), the claim's own span second (#164).
+        gated_claims += 1
         candidates = [hint_text.strip(), claim]
         if tier == "synthesis":
             pk = v.get("parent_key", "")
@@ -395,13 +433,41 @@ def _d7_resolve_grounding(
             continue
         names = ", ".join(s["key"] for s in sources) or "(no parents)"
         message = (
-            f"{SEVERITY_FATAL} SUPPORTED claim not grounded in the cited "
+            "SUPPORTED claim not grounded in the cited "
             f"source content (claim: {claim!r}; parents examined: {names})"
         )
         if hint_text:
             message += f" [evidence_hint: {hint_text!r}]"
-        failures.append(message)
-    return failures, records
+        # Numeric: a digit-bearing content token absent from every checked
+        # parent — an invented figure is the defect the gate exists for
+        # (#145), never tolerated.
+        parent_tokens = {
+            t
+            for s in sources
+            if s.get("content") is not None
+            for t in content_tokens(s["content"])
+        }
+        numeric = any(
+            any(c.isdigit() for c in token) and token not in parent_tokens
+            for token in content_tokens(claim)
+        )
+        ungrounded.append((numeric, message))
+    # Integer percent: the ceiling is exact (0.1 * 30 is 3.0000000000000004
+    # in binary floating point) and 0 disables the bridge — the pre-#169
+    # all-or-nothing gate. For any positive share the ceiling is >= 1, so this
+    # is max(1, ceil(share * claims)) for every population D7 gates.
+    limit = -(-round(TOLERATED_SHARE * 100) * gated_claims // 100)
+    excused = (
+        not any(numeric for numeric, _ in ungrounded)
+        and len(ungrounded) <= limit
+    )
+    tolerated: list[str] = []
+    for _, message in ungrounded:
+        tagged = f"{SEVERITY_QUALITY if excused else SEVERITY_FATAL} {message}"
+        failures.append(tagged)
+        if excused:
+            tolerated.append(tagged)
+    return failures, records, tolerated
 
 
 def _render_v1_verdicts(verdicts: list[dict[str, Any]]) -> str:
@@ -425,7 +491,9 @@ def _render_v1_verdicts(verdicts: list[dict[str, Any]]) -> str:
 # — LLM-judged criteria live in VALIDATION_RULES with
 # order/depends_on/skip_when_fatal fields (adding a criterion never
 # touches run_validations).
-_DETERMINISTIC_STAGES: dict[str, Callable[..., tuple[list[str], list[dict[str, Any]]]]] = {
+_DETERMINISTIC_STAGES: dict[
+    str, Callable[..., tuple[list[str], list[dict[str, Any]], list[str]]]
+] = {
     "V1": _d7_resolve_grounding,
 }
 
@@ -649,10 +717,12 @@ def run_validations(
         content_path: Path to the derivation's markdown file.
 
     Returns:
-        CheckResult with .passed=True and .failures=[] if all rules pass,
-        or .passed=False and .failures carrying per-criterion messages.
-        .evidence carries one grounded-evidence record per grounded
-        SUPPORTED claim (empty when nothing grounded).
+        CheckResult with .passed=True when no failure blocks (every rule
+        passes, or only the D7 prose annotations the #169 tolerance excused
+        are present — those ride in .failures and .tolerated, visible and
+        non-blocking), or .passed=False and .failures carrying per-criterion
+        messages. .evidence carries one grounded-evidence record per
+        grounded SUPPORTED claim (empty when nothing grounded).
     """
     content_path = Path(content_path)
     try:
@@ -706,6 +776,7 @@ def run_validations(
 
     failures: list[str] = []
     evidence_records: list[dict[str, Any]] = []
+    tolerated: list[str] = []
     verdicts_by_rule: dict[str, list[dict[str, Any]]] = {}
 
     # Waves execute in ascending order; each rule declares its dependencies
@@ -739,15 +810,20 @@ def run_validations(
         stage = _DETERMINISTIC_STAGES.get(rule.id)
         if stage is not None:
             try:
-                d7_failures, d7_records = stage(
+                d7_failures, d7_records, d7_tolerated = stage(
                     verdicts, node, parents, slices=slices
                 )
             except Exception as exc:  # noqa: BLE001
                 _warn(f"D7 resolution failed, skipped: {exc}")
-                d7_failures, d7_records = [], []
+                d7_failures, d7_records, d7_tolerated = [], [], []
             failures.extend(f"D7: {f}" for f in d7_failures)
             evidence_records.extend(d7_records)
+            tolerated.extend(f"D7: {f}" for f in d7_tolerated)
 
+    blocking = [f for f in failures if f not in tolerated]
     return CheckResult(
-        passed=len(failures) == 0, failures=failures, evidence=evidence_records
+        passed=not blocking,
+        failures=failures,
+        evidence=evidence_records,
+        tolerated=tolerated,
     )

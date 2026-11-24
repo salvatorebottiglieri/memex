@@ -23,6 +23,11 @@ class CheckResult:
     # dict per grounded SUPPORTED claim, persisted onto the node's
     # `evidence` column by the derive/synthesize services.
     evidence: list[dict[str, Any]] = field(default_factory=list)
+    # D7 failures the proportional tolerance excused (#169): the same
+    # messages are present in `failures` with their non-fatal tag; the trust
+    # gate subtracts this list, so a tolerated claim is annotated, measurable
+    # and never blocking.
+    tolerated: list[str] = field(default_factory=list)
 
 
 def run_checks(con: sqlite3.Connection, node_id: str, content_path: Path | str) -> CheckResult:

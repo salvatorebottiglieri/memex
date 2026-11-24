@@ -19,6 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- D7 tolerates a proportional share of ungrounded *prose* claims (issue
+  #169): up to `max(1, 10%)` of the claims D7 examined — `TOLERATED_SHARE` —
+  ride `check_failures` with the non-fatal `quality` tag instead of drafting
+  the node, while a claim carrying a number absent from its parent stays
+  fatal. The bridge is reversible: `TOLERATED_SHARE = 0` restores the
+  pre-#169 all-or-nothing gate.
+
 - The derivation prompt asks for the source's own words: every body sentence
   must be a quote or near-quote, anything in the model's own words belongs in
   `## Synthesis` (issue #167). All five derivation prompts (three inline, two

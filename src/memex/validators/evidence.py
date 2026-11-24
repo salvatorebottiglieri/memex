@@ -43,6 +43,12 @@ from memex.rules import _WIKILINK_RE
 GROUNDING_THRESHOLD = 0.6
 MIN_CONTENT_TOKENS = 2
 
+# Share of a derivation's grounded-claim population whose ungrounded PROSE
+# claims D7 tolerates as annotations (#169). Claims carrying a number absent
+# from the parent are never tolerated (the anti-fabrication rule of #145),
+# and 0 restores the pre-#169 all-or-nothing gate.
+TOLERATED_SHARE = 0.10
+
 # Largest contiguous sentence window the deterministic resolver considers.
 # A locator is <= ~30 words and a claim a sentence or two; capping the
 # window keeps the "tight passage" guarantee honest — tokens that only
