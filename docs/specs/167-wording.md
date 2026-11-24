@@ -67,6 +67,13 @@ l'unico contenuto che cambia il comportamento.
 voluto, approvato dall'owner); le regole specifiche di consegna del risultato (JSON puro per due,
 `submit_derivation` per `pi`) restano per-deriver e non vengono unificate.
 
+**Quarto cambiamento, meccanico e dichiarato (2026-11-24, dopo la review)**: nei due reader prompt la
+numerazione scivola — synthesis `7→6`, fidelity/link `6→7` — perché il core condiviso fissa l'ordine
+heading → body → synthesis → fidelity. Le cross-reference interne sono interpolate e quindi si muovono
+con i numeri (`inline: regola 3 = Synthesis, 4 = link` · `reader: 6 = Synthesis, 7 = link`), e un test
+le pinna (`test_derive_rules_renumbers_with_the_cross_references`). Nessun testo va perso: è lo scambio
+imposto dal single-sourcing, registrato qui perché la decisione dichiarava tre cambi e non quattro.
+
 **Amendamento 2026-11-24 (in corso di implementazione, deciso dall'owner in chat)**: anche la frase
 sui link della regola 4 diverge — `anthropic`/`claude_code` dicono `[[filename|alias]]` e "exact link
 targets", `pi` dice `[[link_key|alias]]` e "exact link keys, e.g. [[P1|alias]]". Poiché
