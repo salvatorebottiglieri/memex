@@ -43,6 +43,12 @@ from memex.rules import _WIKILINK_RE
 GROUNDING_THRESHOLD = 0.6
 MIN_CONTENT_TOKENS = 2
 
+# Share of a derivation's grounded-claim population whose ungrounded PROSE
+# claims D7 tolerates as annotations (#169). Claims carrying a number absent
+# from the parent are never tolerated (the anti-fabrication rule of #145),
+# and 0 restores the pre-#169 all-or-nothing gate.
+TOLERATED_SHARE = 0.10
+
 # Largest contiguous sentence window the deterministic resolver considers.
 # A locator is <= ~30 words and a claim a sentence or two; capping the
 # window keeps the "tight passage" guarantee honest — tokens that only
@@ -129,6 +135,22 @@ def content_tokens(text: str) -> list[str]:
             seen.add(word)
             tokens.append(word)
     return tokens
+
+
+def digit_tokens(text: str) -> set[str]:
+    """Every word carrying a digit, normalized; wikilink markup dropped.
+
+    The numeric half of D7's tolerance (#169) classifies at WORD level, not on
+    ``content_tokens``: that helper drops non-numeric words shorter than 3
+    characters, so a fabricated ``5G``/``V2``/``A4`` would read as toleratable
+    prose. A digit-bearing word absent from the parents is always fatal.
+    """
+    surface = _WIKILINK_RE.sub(" ", normalize_surface(text or ""))
+    return {
+        word
+        for word in _WORD_RE.findall(surface.lower())
+        if any(c.isdigit() for c in word)
+    }
 
 
 def _sentence_spans(text: str) -> list[tuple[int, int]]:

@@ -10,6 +10,10 @@ Covers the dispatch paths of the always-on adversarial validations:
   - D7: SUPPORTED verdict whose claim is not grounded in the cited parent
     (claim absent from the parent — the evidence_hint is only a locator,
     tried first and never the text that is gated) → draft (I1, I6)
+  - D7 (#169): ungrounded prose claims within max(1, TOLERATED_SHARE ×
+    examined claims) are annotated with the non-fatal quality tag and do not
+    gate; an ungrounded claim carrying a number absent from the parent, or
+    more ungrounded prose than the share, stays fatal
   - D7: a SUPPORTED verdict without an evidence_hint still grounds when the
     claim itself is token-covered by the parent (missing hint alone is no
     longer a failure)
@@ -38,8 +42,9 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from memex.checks import CheckResult
 from memex.derivers.demo import DemoAgent
-from memex.validators.validate import run_validations
+from memex.validators.validate import merge_gate_failures, run_validations
 from tests.fake_llm_client import FakeJudge
 
 
@@ -494,6 +499,31 @@ class _DuplicateVerdictJudge(_SupportedJudge):
         return json.dumps({"verdicts": [verdict, dict(verdict)]})
 
 
+# ── #169 tolerance fixtures ─────────────────────────────────────────
+
+# The tolerance denominator fixture: one presented claim per parent sentence
+# drawn verbatim (grounded by D7's token gate), so only the explicitly
+# ungrounded sentences below can fail.
+_GROUNDED_CLAIMS = (
+    _PARENT_SENTENCE_1,
+    _PARENT_SENTENCE_2,
+    _PARENT_SENTENCE_3,
+)
+_UNGROUNDED_PROSE = "The parser normalizes unicode entities aggressively."
+_UNGROUNDED_PROSE_2 = "The toolchain rewrites every heading during export."
+_UNGROUNDED_NUMERIC = "The ledger records 42 anomalous events this quarter."
+
+
+def _claims_prose(*ungrounded: str, grounded: int = 9) -> str:
+    """Body prose with ``grounded`` verbatim parent sentences plus the given
+    ungrounded claims — one V1 claim per sentence."""
+    sentences = [
+        _GROUNDED_CLAIMS[i % len(_GROUNDED_CLAIMS)] for i in range(grounded)
+    ]
+    body = " ".join(sentences + list(ungrounded))
+    return f"# Note\n\n{body}\n\n> Synthesis: inf\n"
+
+
 # ── Tests ───────────────────────────────────────────────────────────
 
 class TestRunValidations:
@@ -631,7 +661,10 @@ class TestRunValidations:
             tmp_path,
             prose=(
                 "# Note\n\n"
-                "The parser normalizes unicode entities aggressively.\n\n"
+                "The parser normalizes unicode entities aggressively. "
+                # #169: two ungrounded prose claims exceed the tolerated
+                # share (max(1, 10%)), so D7 stays fatal here.
+                "The toolchain rewrites every heading during export.\n\n"
                 "> Synthesis: inf\n"
             ),
             statements=["inf"],
@@ -645,6 +678,145 @@ class TestRunValidations:
         assert any("[severity=fatal]" in f for f in d7_failures)
         assert any("not grounded" in f for f in d7_failures)
 
+    def test_one_ungrounded_prose_claim_is_tolerated_and_annotated(self, tmp_path):
+        """#169: one ungrounded prose claim among ten presented claims is
+        inside max(1, 10%) — the node passes and the claim stays visible in
+        the failures carrying the non-fatal quality tag (never dropped)."""
+        con, node_id, node_path = _setup(
+            tmp_path, prose=_claims_prose(_UNGROUNDED_PROSE), statements=["inf"]
+        )
+        result = run_validations(_SupportedJudge(), con, node_id, node_path)
+        con.close()
+        assert result.passed is True, result.failures
+        tolerated = [
+            f
+            for f in result.failures
+            if f.startswith("D7:")
+            and "not grounded" in f
+            and _UNGROUNDED_PROSE in f
+        ]
+        assert len(tolerated) == 1, result.failures
+        assert "[severity=quality]" in tolerated[0]
+        assert len(result.tolerated) == 1
+
+    def test_ungrounded_numeric_claim_stays_fatal_despite_the_ratio(self, tmp_path):
+        """#169: a claim whose digit-bearing token is absent from every
+        checked parent is numeric — fatal even though the ratio would
+        tolerate one ungrounded claim (#145 must not be bought back)."""
+        con, node_id, node_path = _setup(
+            tmp_path,
+            prose=_claims_prose(_UNGROUNDED_NUMERIC),
+            statements=["inf"],
+        )
+        result = run_validations(_SupportedJudge(), con, node_id, node_path)
+        con.close()
+        assert result.passed is False
+        assert any(
+            "[severity=fatal]" in f and "42 anomalous" in f
+            for f in result.failures
+        )
+        assert result.tolerated == []
+
+    def test_ungrounded_prose_above_the_share_stays_fatal(self, tmp_path):
+        """#169: two ungrounded prose claims exceed max(1, 10% of 10) — the
+        node stays draft and no claim is excused."""
+        con, node_id, node_path = _setup(
+            tmp_path,
+            prose=_claims_prose(
+                _UNGROUNDED_PROSE, _UNGROUNDED_PROSE_2, grounded=8
+            ),
+            statements=["inf"],
+        )
+        result = run_validations(_SupportedJudge(), con, node_id, node_path)
+        con.close()
+        assert result.passed is False
+        ungrounded = [f for f in result.failures if "not grounded" in f]
+        assert len(ungrounded) == 2, result.failures
+        assert all("[severity=fatal]" in f for f in ungrounded)
+        assert result.tolerated == []
+
+    def test_tolerated_claim_does_not_gate_the_node(self, tmp_path):
+        """#169: merge_gate_failures subtracts exactly the excused D7
+        claims — an annotated prose claim persists in the failures and the
+        node reaches auto-verified."""
+        con, node_id, node_path = _setup(
+            tmp_path, prose=_claims_prose(_UNGROUNDED_PROSE), statements=["inf"]
+        )
+        result = run_validations(_SupportedJudge(), con, node_id, node_path)
+        con.close()
+        failures, trust_state = merge_gate_failures(
+            CheckResult(passed=True), result
+        )
+        assert trust_state == "auto-verified"
+        assert failures == result.tolerated
+        assert len(failures) == 1
+
+    def test_v2_quality_failure_still_gates_the_node(self, tmp_path):
+        """#169: the exclusion is the excused D7 list only — V2's
+        quality-tagged failure keeps its documented draft outcome."""
+        con, node_id, node_path = _setup(
+            tmp_path,
+            prose=f"# Note\n\n{_PARENT_SENTENCE_2}\n\n> Synthesis: SENTINEL-BOILERPLATE restatement\n",
+            statements=["SENTINEL-BOILERPLATE restatement"],
+        )
+        result = run_validations(_BoilerplateJudge(), con, node_id, node_path)
+        con.close()
+        assert result.tolerated == []
+        _, trust_state = merge_gate_failures(CheckResult(passed=True), result)
+        assert trust_state == "draft"
+
+    def test_zero_share_restores_the_all_or_nothing_gate(self, tmp_path, monkeypatch):
+        """#169: the bridge is reversible — TOLERATED_SHARE = 0 excuses nothing
+        and one ungrounded prose claim drafts again."""
+        monkeypatch.setattr("memex.validators.validate.TOLERATED_SHARE", 0.0)
+        con, node_id, node_path = _setup(
+            tmp_path, prose=_claims_prose(_UNGROUNDED_PROSE), statements=["inf"]
+        )
+        result = run_validations(_SupportedJudge(), con, node_id, node_path)
+        con.close()
+        assert result.passed is False
+        assert result.tolerated == []
+        assert any("[severity=fatal]" in f for f in result.failures)
+
+    def test_ungrounded_short_mixed_token_stays_fatal(self, tmp_path):
+        """#169: a digit-bearing word shorter than content_tokens' 3-char floor
+        (``5G``) is still numeric — a fabricated short token must never read
+        as toleratable prose."""
+        con, node_id, node_path = _setup(
+            tmp_path,
+            prose=_claims_prose(
+                "The rollout brings 5G coverage to the whole region."
+            ),
+            statements=["inf"],
+        )
+        result = run_validations(_SupportedJudge(), con, node_id, node_path)
+        con.close()
+        assert result.passed is False
+        assert result.tolerated == []
+        assert any(
+            "[severity=fatal]" in f and "5G coverage" in f
+            for f in result.failures
+        )
+
+    def test_tolerance_ceiling_is_exact_at_a_ten_multiple(self, tmp_path):
+        """#169: 3 ungrounded prose claims of 30 examined sit exactly on the
+        10% budget — the ceiling is computed exactly (0.1 * 30 is
+        3.0000000000000004 in binary floating point)."""
+        con, node_id, node_path = _setup(
+            tmp_path,
+            prose=_claims_prose(
+                _UNGROUNDED_PROSE,
+                _UNGROUNDED_PROSE_2,
+                "The exporter flattens every footnote into inline text.",
+                grounded=27,
+            ),
+            statements=["inf"],
+        )
+        result = run_validations(_SupportedJudge(), con, node_id, node_path)
+        con.close()
+        assert result.passed is True, result.failures
+        assert len(result.tolerated) == 3
+
     def test_d7_hint_in_parent_but_claim_absent_goes_draft(self, tmp_path):
         """I1 regression of today's D7: the judge supplies an evidence_hint
         that IS a verbatim parent sentence (the old anchor check would
@@ -654,7 +826,10 @@ class TestRunValidations:
             tmp_path,
             prose=(
                 "# Note\n\n"
-                "The parser normalizes unicode entities aggressively.\n\n"
+                "The parser normalizes unicode entities aggressively. "
+                # #169: two ungrounded prose claims exceed the tolerated
+                # share (max(1, 10%)), so D7 stays fatal here.
+                "The toolchain rewrites every heading during export.\n\n"
                 "> Synthesis: inf\n"
             ),
             statements=["inf"],
@@ -672,7 +847,12 @@ class TestRunValidations:
                             1,
                             "P1",
                             hint="The database exports the full ledger each evening.",
-                        )
+                        ),
+                        _supported(
+                            2,
+                            "P1",
+                            hint="The database exports the full ledger each evening.",
+                        ),
                     ]
                 }
             )
@@ -1040,7 +1220,9 @@ class TestRunValidations:
         a normal CheckResult instead of a traceback."""
         con, node_id, node_path = _setup(
             tmp_path,
-            prose=f"# Note\n\n{_PARENT_SENTENCE_2}\n\n> Synthesis: inf\n",
+            # #169: two ungrounded prose claims exceed the tolerated share
+            # (max(1, 10%)), so D7 stays fatal here.
+            prose=f"# Note\n\n{_PARENT_SENTENCE_2} {_PARENT_SENTENCE_3}.\n\n> Synthesis: inf\n",
             statements=["inf"],
             parents={"parent.md": "placeholder"},
         )
@@ -1193,7 +1375,10 @@ class TestEvidenceRecords:
             tmp_path,
             prose=(
                 "# Note\n\n"
-                "The parser normalizes unicode entities aggressively.\n\n"
+                "The parser normalizes unicode entities aggressively. "
+                # #169: two ungrounded prose claims exceed the tolerated
+                # share (max(1, 10%)), so D7 stays fatal here.
+                "The toolchain rewrites every heading during export.\n\n"
                 "> Synthesis: inf\n"
             ),
             statements=["inf"],

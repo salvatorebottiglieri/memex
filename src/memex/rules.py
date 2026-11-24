@@ -586,8 +586,10 @@ CHECK_RULES: list[Rule] = [
 # severity=quality, human-promotable. The tags are an informational
 # annotation guiding human review: both severities gate to draft (there is
 # no separate quality_failed state) and draft nodes are human-promotable via
-# the existing review flow. auto-verified ⇒ every unadorned claim is
-# grounded.
+# the existing review flow — except D7's tolerated prose claims (ADR-0018
+# amendment 2026-11-24, TOLERATED_SHARE), which are quality-tagged and
+# subtracted by the gate. auto-verified ⇒ every unadorned claim is grounded,
+# or is ungrounded prose inside the tolerated share.
 SEVERITY_FATAL = "[severity=fatal]"
 SEVERITY_QUALITY = "[severity=quality]"
 
@@ -1249,8 +1251,14 @@ def render_ontology() -> str:
         + "  tag is an informational annotation guiding human review: both\n"
         + "  severities gate to draft (there is no separate quality_failed\n"
         + "  state) and draft nodes are human-promotable via the existing\n"
-        + "  review flow.\n"
-        + "  Invariant: auto-verified \u21d2 every unadorned claim is grounded.\n"
+        + "  review flow \u2014 except D7's tolerated prose claims (ADR-0018\n"
+        + "  amendment 2026-11-24): ungrounded prose inside ceil(0.10 \u00d7\n"
+        + "  the claims D7 examined, at least one) is annotated\n"
+        + "  [severity=quality] and subtracted by the gate, while a claim\n"
+        + "  whose digit-bearing word is absent from the parents always\n"
+        + "  stays fatal (TOLERATED_SHARE = 0 restores the old gate).\n"
+        + "  Invariant: auto-verified \u21d2 every unadorned claim is grounded,\n"
+        + "  or is ungrounded prose inside the tolerated share (annotated).\n"
         + "  Trust state is set by the CLI caller (checks.py only reports failures).\n"
         + "```\n"
         + "\n"
