@@ -37,7 +37,10 @@ Soglia al posto di tutto-o-niente, con i numeri che restano hard (la classe di #
 2. la si classifica **numeric** se contiene un token con una cifra che non compare nel contenuto di
    nessun parent, altrimenti **prose**;
 3. il nodo resta `draft` se esiste almeno una claim numeric, **oppure** se le claim prose non fondate
-   superano `max(1, ceil(TOLERATED_SHARE × supported_claims))` con `TOLERATED_SHARE = 0.10`;
+   superano il tetto `-(-round(TOLERATED_SHARE*100) * claim_esaminate // 100)` con
+   `TOLERATED_SHARE = 0.10` (intero: nessun errore di uno sui float; vale `max(1, ceil(…))` per ogni
+   popolazione con almeno una claim, e `0` quando la share è 0, cioè il ponte si spegne con una
+   costante);
 4. altrimenti il nodo passa, e le claim prose non fondate restano **annotate** in `check_failures`
    con il tag non-fatale già esistente (`quality`), quindi visibili e non bloccanti.
 
@@ -71,6 +74,13 @@ copertura fidandosi di un numero inventato. Il ponte è **reversibile**: `TOLERA
 al comportamento di #164. Destinazione: il resolver estrattivo (PRD #152), che sceglie lo span invece
 di sperare nel lessico.
 
+**Correzione dopo la review (2026-11-24)**: la prima classificazione usava `content_tokens`, che scarta
+i token alfanumerici misti più corti di 3 caratteri — `5G`, `V2`, `A4` — quindi una cifra inventata in
+quella forma sarebbe stata classificata *prosa* e tollerata. Ora la classificazione passa da
+`digit_tokens()` (tutte le parole con una cifra, sia nella claim sia nei parent), così "una parola con
+una cifra assente dai parent è sempre fatale" è letteralmente vero; il prezzo è un falso-fatalità su
+nomi propri (`IMO25`), già dichiarato come accettato.
+
 ## Premises
 
 | # | Premise | Command | Output | Verdict |
@@ -101,4 +111,4 @@ stato nuovo, nessuna transizione.
 
 ## Delivery
 
-- #169 — PR: da aprire · Model: n/a — aggregazione di un gate, nessuna entità · Mutation: n/a — da eseguire in questa sessione
+- #169 — PR: https://github.com/salvatorebottiglieri/memex/pull/170 · Model: n/a — aggregazione di un gate, nessuna entità · Mutation: 169-d7-threshold-mutation-r2
