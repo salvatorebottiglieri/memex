@@ -89,6 +89,10 @@ _Avoid_: quote, anchor
 A node whose validity has been put in doubt by a contestation event awaiting human adjudication. Orthogonal to trust state: a node can be `contested` regardless of whether it is `draft`, `auto-verified`, `human-approved`, or `stale`. The agent may not stop on a contested node.
 _Avoid_: pending, flagged, under review
 
+**Frozen**:
+A node kept in the graph as historical reference but excluded from active views because one of its locators no longer resolves (missing content file, dead source). Orthogonal to trust state, like `contested`; it records `frozen_at` and `frozen_reason`. `memex check` reports the broken locator, a human runs `memex freeze`, and `memex thaw` is the only way back. Frozen nodes are hidden from `list`/`search` by default and counted by `sync`.
+_Avoid_: deleted, archived, inactive
+
 **Contestation event**:
 An occurrence that has caused one or more nodes to become `contested` and that requires human adjudication to resolve. Examples: a newly-written `contradicts` association edge; a future deterministic check that fails in a contestable way.
 _Avoid_: incident, complaint, dispute

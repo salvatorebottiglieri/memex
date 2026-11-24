@@ -31,9 +31,9 @@ memex exposes a JSON-only CLI (one command per operation, all output is structur
 
 | Command | Description |
 |---------|-------------|
-| `memex list [--kind --tier --trust-state --confidence --limit --offset]` | List nodes with optional filters (URL-nodes hidden unless `--kind url`) |
+| `memex list [--kind --tier --trust-state --confidence --include-frozen --limit --offset]` | List nodes with optional filters (URL-nodes hidden unless `--kind url`; frozen nodes hidden unless `--include-frozen`) |
 | `memex show <node-id>` | Show node details: URL-node = metadata only; extracted/derivation = content + trust state + check failures |
-| `memex search <query>` | Keyword search over derivations AND L0 metadata (title/URL/key) |
+| `memex search <query> [--include-frozen]` | Keyword search over derivations AND L0 metadata (title/URL/key); frozen nodes are skipped by default |
 | `memex ideas [query]` | Search across extracted ideas (empty query = all ideas) |
 
 #### Derivazione
@@ -67,12 +67,20 @@ memex exposes a JSON-only CLI (one command per operation, all output is structur
 | Command | Description |
 |---------|-------------|
 | `memex delete <node-id> [--cascade]` | Remove a node (logical delete, no file removal). Cascade removes descendants |
-| `memex stats` | Vault statistics dashboard (counts by kind/tier/trust/confidence, coverage) |
+| `memex stats` | Vault statistics dashboard (counts by kind/tier/trust/confidence, coverage, frozen) |
 | `memex render` | Project SQLite graph -> YAML frontmatter + wikilinks on markdown files |
 | `memex list --synthesis-statement "<substring>"` | Substring match against derivation synthesis statements |
 | `memex backfill-synthesis [--dry-run]` | One-shot migration: parse `> Synthesis:` markers from existing derivation files into the structured column |
 | `memex ontology [--check]` | Generate docs/ONTOLOGY.md from the Rule registry |
-| `memex sync [--no-push] [--install-hooks]` | Commit vault state: render → git add → commit → push in one shot. `--install-hooks` writes a git post-merge hook that auto-renders after pull |
+| `memex sync [--no-push] [--install-hooks]` | Commit vault state: render → git add → commit → push in one shot; the summary includes the frozen-node count. `--install-hooks` writes a git post-merge hook that auto-renders after pull |
+
+#### Integrità & frozen
+
+| Command | Description |
+|---------|-------------|
+| `memex check` | Re-validate every locator (content files, `derived_from` targets, dead sources). Read-only; exit 1 on findings |
+| `memex freeze <node-id> --reason <text>` | Keep a node as historical reference but exclude it from `list`/`search` active views |
+| `memex thaw <node-id>` | Return a frozen node to active views |
 
 #### Diagnostica
 

@@ -7,12 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Vault-wide locator integrity and frozen nodes (issue #120, ADR-0019):
+  `memex check` re-validates every `content_path` and `derived_from` locator
+  against the current vault (read-only, exit 1 on findings);
+  `memex freeze <id> --reason` keeps a node as historical reference while
+  excluding it from `list`/`search` (visible again with `list
+  --include-frozen`), and `memex thaw <id>` reverses it. `sync` and `stats`
+  report the frozen count.
+
 ### Changed
 
 - CI now enforces `mypy` on `src` and a coverage gate (`--cov`, fail under
   85%; subprocess CLI runs are measured). Fixed the 57 type errors this
   surfaced; no behaviour change except `parse_derive_response`, which now
   falls back to the regex path when the JSON `prose` is not a string.
+- `render` (and therefore `sync`) keeps writing markdown for frozen nodes, as
+  ADR-0019 requires; only `list`/`search` exclude them.
 - Removed the work-in-progress `Status` line from the README.
 
 ## [0.2.0] — 2026-10-27

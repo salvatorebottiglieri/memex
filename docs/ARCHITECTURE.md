@@ -52,6 +52,7 @@ This metaphor captures the two key invariants:
 | `memex backfill-synthesis` migration | **built** | One-shot CLI for legacy vaults |
 | Cross-device vault sharing (git + env vars) | **built** | `MEMEX_VAULT` / `MEMEX_DB` env vars (ADR-0015) |
 | Telegram capture + inbox ingest (ADR-0006/0007) | **built** | `memex capture` / `memex ingest --from-inbox` |
+| Locator integrity check + frozen nodes (ADR-0019) | **built** | `memex check` / `memex freeze` / `memex thaw` |
 
 ## Map (as built)
 
@@ -102,6 +103,7 @@ flowchart TB
 - [0014](adr/0014-synthesis-tier-and-trust-cascade.md) — Synthesis tier command and trust state cascade on parent regression
 - [0016](adr/0016-adversarial-validation-gate.md) — Adversarial validation gate for derivation quality
 - [0017](adr/0017-agent-rpc-service.md) — Agent as a long-lived RPC service
+- [0019](adr/0019-frozen-nodes-orthogonal-to-trust-state.md) — Vault-wide locator integrity check; broken/stale nodes are frozen, not deleted
 ## Open questions (deferred)
 
 - **Model choice & cost:** `AnthropicAgent` currently defaults to `claude-opus-4-5`. Switch to Sonnet for bulk derivation once cost matters; keep Opus for higher-tier synthesis. Tune when real volume arrives.

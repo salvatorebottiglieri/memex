@@ -29,7 +29,7 @@ def render(db_path: str | Path, vault_path: str | Path) -> list[dict[str, str]]:
     vault_path = Path(vault_path)
 
     with Store.open(db_path) as store:
-        for node in store.list_nodes():
+        for node in store.list_nodes(include_frozen=True):
             node_id = node["id"]
 
             if not node.get("content_path"):

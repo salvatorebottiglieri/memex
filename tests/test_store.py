@@ -45,6 +45,8 @@ class TestSchema:
         }
         assert "is_contested" in cols_node
         assert "contested_at" in cols_node
+        assert "frozen_at" in cols_node
+        assert "frozen_reason" in cols_node
         cols_edge = {
             r[1] for r in store._con.execute("PRAGMA table_info(edge)").fetchall()
         }
