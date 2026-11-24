@@ -19,6 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The derivation prompt asks for the source's own words: every body sentence
+  must be a quote or near-quote, anything in the model's own words belongs in
+  `## Synthesis` (issue #167). The three derivers' common prompt rules now live
+  in one constant (`memex/derivers/prompts.py`), using the strictest rule 2, so
+  `anthropic` and `claude_code` also forbid preambles and meta-claims about a
+  source.
+
 - CI now enforces `mypy` on `src` and a coverage gate (`--cov`, fail under
   85%; subprocess CLI runs are measured). Fixed the 57 type errors this
   surfaced; no behaviour change except `parse_derive_response`, which now

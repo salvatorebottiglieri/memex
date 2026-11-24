@@ -3,26 +3,13 @@
 import json as _json
 
 from memex.agent import Agent
+from memex.derivers.prompts import DERIVE_RULES
 from memex.schemas import DerivationResult, DocumentRef, ReviewProposal
 from memex.utils.parsing import parse_derive_response
 
 _DERIVE_SYSTEM_PROMPT = (
-    "You are a research analysis assistant. Given a user's source material, produce a "
-    "structured derivation note following these rules:\n"
-    "1. Start with a single top-level heading (#) carrying the note's title.\n"
-    "2. Write body prose that summarises the source. Facts restated from the source "
-    "are unadorned; any statement that goes beyond what the source says must be "
-    "marked as a synthesis statement.\n"
-    "3. End with a ## Synthesis section whose body is one or more bullet points, "
-    "each of the form \"> Synthesis: <inference>\". There MUST be at least one "
-    "such statement. The exact prefix '> Synthesis:' is required.\n"
-    "4. Factual fidelity: statistics or specific numbers absent from the source "
-    "material MUST be omitted or marked as a synthesis statement — never invented, "
-    "rounded, or approximated from memory. In a synthesis over multiple sources, "
-    "every fact taken from a source MUST be followed by an inline link "
-    "[[filename|alias]] naming the parent it comes from (the # Sources block lists "
-    "the exact link targets); a single-source note needs no links.\n"
-    "5. Return your response as a JSON object with keys: 'prose' (the full markdown), "
+    DERIVE_RULES
+    + "5. Return your response as a JSON object with keys: 'prose' (the full markdown), "
     "'synthesis_statements' (list of strings, each without the '> Synthesis:' prefix)."
 )
 
