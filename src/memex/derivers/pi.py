@@ -21,7 +21,7 @@ import json as _json
 import threading
 
 from memex.agent import Agent
-from memex.derivers.prompts import DERIVE_RULES
+from memex.derivers.prompts import DERIVE_HEADER, derive_rules
 from memex.derivers.subprocess import (
     CLEAN_STOP_REASONS,
     SubprocessClient,
@@ -34,7 +34,7 @@ from memex.schemas import DerivationResult, DocumentRef, ReviewProposal
 from memex.utils.parsing import parse_derive_response
 
 _DERIVE_SYSTEM_PROMPT = (
-    DERIVE_RULES
+    DERIVE_HEADER + derive_rules()
     + "5. Return your response as a JSON object with keys: 'prose' (the full markdown), "
     "'synthesis_statements' (list of strings, each without the '> Synthesis:' prefix).\n"
     "6. Submit the result by calling the submit_derivation tool with "
@@ -58,29 +58,8 @@ _DERIVE_READER_SYSTEM_PROMPT = (
     "2. Content passes: read each WHOLE document in chunks of ~150 lines (read tool: "
     "1-based offset/limit) until you have covered it end to end. Never skip the middle.\n"
     "3. Read ONLY the listed files — never any other file, never any other tool.\n"
-    "4. Start with a single top-level heading (#) carrying the note's title.\n"
-    "5. Write body prose that summarises the source. Start DIRECTLY with "
-    "the first source-derived fact. NEVER write a preamble or intro "
-    "(\"This note …\", \"The following …\", \"We summarize …\", \"This "
-    "document covers …\"), NEVER a statement about the note's own "
-    "structure (\"All body statements …\", \"Cross-source comparisons appear "
-    "in the Synthesis section\"), and NEVER a meta-claim ABOUT a source "
-    "(\"P1 presents three techniques\", \"source X argues\") — restate the "
-    "fact itself instead. Every body sentence restates a fact FROM a "
-    "source (each linked per rule 6); any statement that goes beyond the "
-    "source — a cross-source comparison, a generalization, a judgment, or "
-    "an inference — MUST go in the ## Synthesis section as a '> Synthesis:' "
-    "bullet (rule 7), never in the body prose.\n"
-    "6. Factual fidelity: statistics or specific numbers absent from the source "
-    "material MUST be omitted or marked as a synthesis statement — never invented, "
-    "rounded, or approximated from memory. In a synthesis over multiple sources, "
-    "every fact taken from a source MUST be followed by an inline link "
-    "[[link_key|alias]] naming the parent it comes from (the link target is the "
-    "link_key listed for that document, e.g. P1); a single-source note needs no links.\n"
-    "7. End with a ## Synthesis section whose body is one or more bullet points, "
-    "each of the form \"> Synthesis: <inference>\". There MUST be at least one "
-    "such statement. The exact prefix '> Synthesis:' is required.\n"
-    "8. Return your response as a JSON object with keys: 'prose' (the full markdown), "
+    + derive_rules(first=4)
+    + "8. Return your response as a JSON object with keys: 'prose' (the full markdown), "
     "'synthesis_statements' (list of strings, each without the '> Synthesis:' prefix).\n"
     "9. Submit the result by calling the submit_derivation tool with "
     "{prose: <the full markdown>, synthesis_statements: <the list>}. The tool call "

@@ -3,12 +3,12 @@
 import json as _json
 
 from memex.agent import Agent
-from memex.derivers.prompts import DERIVE_RULES
+from memex.derivers.prompts import DERIVE_HEADER, derive_rules
 from memex.schemas import DerivationResult, DocumentRef, ReviewProposal
 from memex.utils.parsing import parse_derive_response
 
 _DERIVE_SYSTEM_PROMPT = (
-    DERIVE_RULES
+    DERIVE_HEADER + derive_rules()
     + "5. Return your response as a JSON object with keys: 'prose' (the full markdown), "
     "'synthesis_statements' (list of strings, each without the '> Synthesis:' prefix)."
 )
