@@ -353,8 +353,10 @@ def _d7_resolve_grounding(
                 "not correlate to any presented claim; no claim text to ground"
             )
             continue
-        # candidate = evidence_hint or the claim itself (PRD cascade).
-        candidate = hint_text.strip() or claim
+        # The gate judges the CLAIM; the evidence_hint is only the preferred
+        # locator — tried first because its span is the tightest (best
+        # provenance), the claim's own span second (#164).
+        candidates = [hint_text.strip(), claim]
         if tier == "synthesis":
             pk = v.get("parent_key", "")
             sources = [key_to_parent[pk]] if pk in key_to_parent else []
@@ -372,8 +374,12 @@ def _d7_resolve_grounding(
             content = source.get("content")
             if content is None:
                 continue
-            evidence = resolve_evidence(candidate, content)
-            if evidence is not None and grounding_gate(claim, evidence):
+            for candidate in candidates:
+                evidence = (
+                    resolve_evidence(candidate, content) if candidate else None
+                )
+                if evidence is None or not grounding_gate(claim, evidence):
+                    continue
                 grounded = {
                     "claim_index": idx,
                     "parent_key": source["key"],
@@ -381,6 +387,8 @@ def _d7_resolve_grounding(
                     "confidence": evidence.confidence,
                     "resolver": evidence.resolver,
                 }
+                break
+            if grounded is not None:
                 break
         if grounded is not None:
             records.append(grounded)

@@ -27,6 +27,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ADR-0019 requires; only `list`/`search` exclude them.
 - Removed the work-in-progress `Status` line from the README.
 
+### Fixed
+
+- D7 grounding gate (issue #164): a SUPPORTED claim is grounded against the
+  claim's own span — the `evidence_hint` is only the preferred locator (its
+  tighter span is tried first, best provenance), so a claim longer than the
+  hint's sentence no longer drafts every real derivation, while a fabricated
+  claim still fails the gate.
+
 ## [0.2.0] — 2026-10-27
 
 ### Added
