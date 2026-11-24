@@ -8,7 +8,8 @@ Covers the dispatch paths of the always-on adversarial validations:
   - synthesis claim without an inline link → UNSUPPORTED (missing declaration)
   - claim linked to a parent that does not support it → failure
   - D7: SUPPORTED verdict whose claim is not grounded in the cited parent
-    (fabricated hint or claim absent from the parent) → draft (I1, I6)
+    (claim absent from the parent — the evidence_hint is only a locator,
+    tried first and never the text that is gated) → draft (I1, I6)
   - D7: a SUPPORTED verdict without an evidence_hint still grounds when the
     claim itself is token-covered by the parent (missing hint alone is no
     longer a failure)
@@ -60,6 +61,53 @@ _DEFAULT_PARENT = (
     f"{_PARENT_SENTENCE_1} {_PARENT_SENTENCE_2} {_PARENT_SENTENCE_3} "
 )
 _PAD = _PARENT_SENTENCE_3 + " "
+
+# The real claim/hint pair of #164: a claim (~20 content tokens) whose
+# evidence_hint is a single sentence of the passage that states it — the
+# hint's span covers 0.30 of the claim, the claim's own span 0.95.
+_LONG_API_CLAIM = (
+    "To the developers who use them, APIs are tools for accomplishing some "
+    "other goal, and any time spent thinking about the API instead of that "
+    "goal is wasted, so an ideal API should be familiar enough that users "
+    "more or less know how to use it before reading documentation."
+)
+_LONG_API_HINT = (
+    "Any time they spend thinking about the API instead of about that goal "
+    "is time wasted"
+)
+_API_SOURCE = (
+    "APIs are hard to get right. To the developers who use them, APIs are "
+    "tools for accomplishing some other goal. Any time they spend thinking "
+    "about the API instead of about that goal is time wasted. So an ideal API "
+    "should be familiar enough that users more or less know how to use it "
+    "before reading any documentation. That is the whole trick."
+)
+
+# A5 of #164: BOTH candidates ground, so the recorded span must come from the
+# evidence_hint — its one sentence — and never from the claim's own wider
+# window (the claim's extra words need a second sentence to be covered).
+_HINT_PREFERRED_SENTENCE = (
+    "Any time they spend thinking about the API instead of about that goal "
+    "is time wasted."
+)
+_HINT_PREFERRED_CLAIM = (
+    "Any time they spend thinking about the API instead of about that goal "
+    "is time wasted, and interface designers know it."
+)
+_HINT_PREFERRED_SOURCE = f"{_HINT_PREFERRED_SENTENCE} Interface designers know this."
+
+# The counter-case of #164: a fabricated claim whose evidence_hint IS in the
+# source (gate(hint) = 1.0) — only gating the claim itself rejects it.
+_FABRICATED_CLAIM = (
+    "Zendesk wrote WE DO NOT BREAK USERSPACE into its API guidelines in "
+    "2014, and the policy has prevented 4,200 breaking changes."
+)
+_FABRICATED_HINT = "WE DO NOT BREAK USERSPACE"
+_FABRICATED_SOURCE = (
+    "Zendesk publishes API guidelines for its partners. Its first rule reads "
+    "WE DO NOT BREAK USERSPACE. Breaking a public API strands every "
+    "integration built on it, so deprecation is always preferred over removal."
+)
 
 
 def _setup(
@@ -557,9 +605,10 @@ class TestRunValidations:
         assert not any("TOKEN-ALPHA" in f and "Unsupported" in f for f in result.failures)
         assert not any(f.startswith("D7:") for f in result.failures)
 
-    def test_d7_fabricated_hint_goes_draft(self, tmp_path):
-        """D7: a SUPPORTED verdict whose evidence_hint is fabricated (absent
-        from the source) cannot ground the claim → fatal D7 failure (I6)."""
+    def test_d7_fabricated_hint_falls_back_to_the_claim_span(self, tmp_path):
+        """D7: an evidence_hint the resolver cannot place is only a bad
+        locator, not a verdict — the claim's own span is tried second and a
+        genuinely covered claim still grounds (#164)."""
         con, node_id, node_path = _setup(
             tmp_path,
             prose=(
@@ -570,11 +619,9 @@ class TestRunValidations:
         )
         result = run_validations(_FabricatedHintJudge(), con, node_id, node_path)
         con.close()
-        assert result.passed is False
-        d7_failures = [f for f in result.failures if f.startswith("D7:")]
-        assert d7_failures
-        assert any("[severity=fatal]" in f for f in d7_failures)
-        assert any("not grounded" in f for f in d7_failures)
+        assert result.passed is True, result.failures
+        assert len(result.evidence) == 1
+        assert result.evidence[0]["span_text"] == _PARENT_SENTENCE_2
 
     def test_d7_claim_absent_from_parent_goes_draft(self, tmp_path):
         """I1: a SUPPORTED verdict on a claim the cited parent does not
@@ -691,6 +738,90 @@ class TestRunValidations:
         assert result.evidence[0]["claim_index"] == 1
         assert result.evidence[0]["parent_key"] == "P1"
         assert result.evidence[0]["resolver"] == "deterministic"
+
+    def test_d7_long_claim_grounds_against_the_claim_span(self, tmp_path):
+        """#164: a claim longer than its evidence_hint's sentence grounds.
+
+        The hint is only the preferred locator (tightest span, best
+        provenance): the gate judges the CLAIM, so when the hint's span
+        covers too little of it D7 falls back to the claim's own span.
+        """
+        con, node_id, node_path = _setup(
+            tmp_path,
+            prose=f"# Note\n\n{_LONG_API_CLAIM}\n\n> Synthesis: inf\n",
+            statements=["inf"],
+            parents={"parent.md": _API_SOURCE},
+        )
+        judge = _SupportedJudge()
+
+        def _call(prompt, *, allow_read=False):
+            return json.dumps(
+                {"verdicts": [_supported(1, "P1", hint=_LONG_API_HINT)]}
+            )
+
+        judge.call_llm = _call  # type: ignore[method-assign]
+        result = run_validations(judge, con, node_id, node_path)
+        con.close()
+        assert result.passed is True, result.failures
+        assert len(result.evidence) == 1
+        assert result.evidence[0]["claim_index"] == 1
+        assert result.evidence[0]["parent_key"] == "P1"
+        assert result.evidence[0]["resolver"] == "deterministic"
+
+    def test_d7_hint_span_is_preferred_when_it_covers_the_claim(self, tmp_path):
+        """A5 of #164: the evidence_hint is the PREFERRED locator.
+
+        Both candidates ground here (the hint's sentence covers 0.7 of the
+        claim, the claim's own two-sentence window 1.0), so the recorded
+        span must still be the hint's tight sentence: resolving the claim
+        first would record the wider passage instead.
+        """
+        con, node_id, node_path = _setup(
+            tmp_path,
+            prose=f"# Note\n\n{_HINT_PREFERRED_CLAIM}\n\n> Synthesis: inf\n",
+            statements=["inf"],
+            parents={"parent.md": _HINT_PREFERRED_SOURCE},
+        )
+        judge = _SupportedJudge()
+
+        def _call(prompt, *, allow_read=False):
+            if "Synthesis statements:" in prompt:
+                return json.dumps({"passes": True, "reason": "ok"})
+            return json.dumps(
+                {"verdicts": [_supported(1, "P1", hint=_HINT_PREFERRED_SENTENCE)]}
+            )
+
+        judge.call_llm = _call  # type: ignore[method-assign]
+        result = run_validations(judge, con, node_id, node_path)
+        con.close()
+        assert result.passed is True, result.failures
+        assert len(result.evidence) == 1
+        assert result.evidence[0]["span_text"] == _HINT_PREFERRED_SENTENCE
+
+    def test_d7_fabrication_with_genuine_hint_goes_draft(self, tmp_path):
+        """#164: a fabricated claim whose evidence_hint IS in the source
+        still goes D7-fatal — gating the hint instead of the claim would
+        auto-verify an injected number."""
+        con, node_id, node_path = _setup(
+            tmp_path,
+            prose=f"# Note\n\n{_FABRICATED_CLAIM}\n\n> Synthesis: inf\n",
+            statements=["inf"],
+            parents={"parent.md": _FABRICATED_SOURCE},
+        )
+        judge = _SupportedJudge()
+
+        def _call(prompt, *, allow_read=False):
+            return json.dumps(
+                {"verdicts": [_supported(1, "P1", hint=_FABRICATED_HINT)]}
+            )
+
+        judge.call_llm = _call  # type: ignore[method-assign]
+        result = run_validations(judge, con, node_id, node_path)
+        con.close()
+        assert result.passed is False
+        d7_failures = [f for f in result.failures if f.startswith("D7:")]
+        assert any("[severity=fatal]" in f and "not grounded" in f for f in d7_failures)
+        assert result.evidence == []
 
     def test_d7_uncorrelated_claim_index_goes_draft_without_record(self, tmp_path):
         """A SUPPORTED verdict whose claim_index does not correlate to a
