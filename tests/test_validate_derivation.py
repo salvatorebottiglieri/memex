@@ -83,6 +83,19 @@ _API_SOURCE = (
     "before reading any documentation. That is the whole trick."
 )
 
+# A5 of #164: BOTH candidates ground, so the recorded span must come from the
+# evidence_hint — its one sentence — and never from the claim's own wider
+# window (the claim's extra words need a second sentence to be covered).
+_HINT_PREFERRED_SENTENCE = (
+    "Any time they spend thinking about the API instead of about that goal "
+    "is time wasted."
+)
+_HINT_PREFERRED_CLAIM = (
+    "Any time they spend thinking about the API instead of about that goal "
+    "is time wasted, and interface designers know it."
+)
+_HINT_PREFERRED_SOURCE = f"{_HINT_PREFERRED_SENTENCE} Interface designers know this."
+
 # The counter-case of #164: a fabricated claim whose evidence_hint IS in the
 # source (gate(hint) = 1.0) — only gating the claim itself rejects it.
 _FABRICATED_CLAIM = (
@@ -754,6 +767,36 @@ class TestRunValidations:
         assert result.evidence[0]["claim_index"] == 1
         assert result.evidence[0]["parent_key"] == "P1"
         assert result.evidence[0]["resolver"] == "deterministic"
+
+    def test_d7_hint_span_is_preferred_when_it_covers_the_claim(self, tmp_path):
+        """A5 of #164: the evidence_hint is the PREFERRED locator.
+
+        Both candidates ground here (the hint's sentence covers 0.7 of the
+        claim, the claim's own two-sentence window 1.0), so the recorded
+        span must still be the hint's tight sentence: resolving the claim
+        first would record the wider passage instead.
+        """
+        con, node_id, node_path = _setup(
+            tmp_path,
+            prose=f"# Note\n\n{_HINT_PREFERRED_CLAIM}\n\n> Synthesis: inf\n",
+            statements=["inf"],
+            parents={"parent.md": _HINT_PREFERRED_SOURCE},
+        )
+        judge = _SupportedJudge()
+
+        def _call(prompt, *, allow_read=False):
+            if "Synthesis statements:" in prompt:
+                return json.dumps({"passes": True, "reason": "ok"})
+            return json.dumps(
+                {"verdicts": [_supported(1, "P1", hint=_HINT_PREFERRED_SENTENCE)]}
+            )
+
+        judge.call_llm = _call  # type: ignore[method-assign]
+        result = run_validations(judge, con, node_id, node_path)
+        con.close()
+        assert result.passed is True, result.failures
+        assert len(result.evidence) == 1
+        assert result.evidence[0]["span_text"] == _HINT_PREFERRED_SENTENCE
 
     def test_d7_fabrication_with_genuine_hint_goes_draft(self, tmp_path):
         """#164: a fabricated claim whose evidence_hint IS in the source
