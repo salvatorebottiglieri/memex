@@ -107,4 +107,4 @@ costante; nessuno stato nuovo, nessuna transizione.
 
 ## Delivery
 
-- #167 — PR: da aprire · Model: n/a — testo di prompt, nessuna entità · Mutation: n/a — da eseguire in questa sessione
+- #167 — PR: https://github.com/salvatorebottiglieri/memex/pull/168 · Model: n/a — testo di prompt, nessuna entità · Mutation: 167-wording-mutation
