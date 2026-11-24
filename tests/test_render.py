@@ -615,3 +615,24 @@ class TestContestedRender:
         assert node_map[node_a]["contested_at"] == now
         assert node_map[node_b]["is_contested"] is False
         assert node_map[node_b]["contested_at"] is None
+
+
+# ── Frozen nodes ──────────────────────────────────────────────────────
+
+
+class TestFrozenRender:
+    """Frozen nodes stay in the rendered vault (ADR-0019)."""
+
+    def test_frozen_node_is_still_rendered(self, store):
+        """A frozen node keeps getting its markdown frontmatter written."""
+        node_id, md_path = _make_node(store, kind="raw_source")
+        con = sqlite3.connect(store["db"])
+        Store(con).mark_frozen(node_id=node_id, reason="historical", at=_now())
+        con.commit()
+        con.close()
+
+        results = _render(store)
+
+        assert {r["node_id"]: r["status"] for r in results} == {node_id: "rendered"}
+        fm, _ = _read_frontmatter(md_path)
+        assert fm["id"] == node_id

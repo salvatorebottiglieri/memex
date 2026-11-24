@@ -23,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   85%; subprocess CLI runs are measured). Fixed the 57 type errors this
   surfaced; no behaviour change except `parse_derive_response`, which now
   falls back to the regex path when the JSON `prose` is not a string.
+- `render` (and therefore `sync`) keeps writing markdown for frozen nodes, as
+  ADR-0019 requires; only `list`/`search` exclude them.
 - Removed the work-in-progress `Status` line from the README.
 
 ## [0.2.0] — 2026-10-27

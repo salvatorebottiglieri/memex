@@ -1008,7 +1008,7 @@ def search(db_path: Path, vault_path: Path, query: str,
 
     Each result has: id, snippet, canonical_key, l0_node_id, match_type.
     """
-    from memex.store import Store
+    from memex.store import ACTIVE_PREDICATE, Store
 
     
     CONTEXT_CHARS = 120
@@ -1065,7 +1065,7 @@ def search(db_path: Path, vault_path: Path, query: str,
             WHERE s.title LIKE ? OR s.source_url LIKE ? OR s.canonical_key LIKE ?
         """
         if not include_frozen:
-            meta_sql += " AND n.frozen_at IS NULL"
+            meta_sql += " AND " + ACTIVE_PREDICATE
         meta_rows = store._con.execute(
             meta_sql, (query_param, query_param, query_param)
         ).fetchall()
