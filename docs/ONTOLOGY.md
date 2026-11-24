@@ -243,8 +243,14 @@ Rule D0 — Auto-verified gate
   tag is an informational annotation guiding human review: both
   severities gate to draft (there is no separate quality_failed
   state) and draft nodes are human-promotable via the existing
-  review flow.
-  Invariant: auto-verified ⇒ every unadorned claim is grounded.
+  review flow — except D7's tolerated prose claims (ADR-0018
+  amendment 2026-11-24): ungrounded prose inside ceil(0.10 ×
+  the claims D7 examined, at least one) is annotated
+  [severity=quality] and subtracted by the gate, while a claim
+  whose digit-bearing word is absent from the parents always
+  stays fatal (TOLERATED_SHARE = 0 restores the old gate).
+  Invariant: auto-verified ⇒ every unadorned claim is grounded,
+  or is ungrounded prose inside the tolerated share (annotated).
   Trust state is set by the CLI caller (checks.py only reports failures).
 ```
 

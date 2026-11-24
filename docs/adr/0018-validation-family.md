@@ -97,3 +97,26 @@ V1 (grounding) ──> D7 (deterministic grounding resolution over V1's verdicts
 - **Negative**: the judge is the derivation agent by default — the
   ADR-0011 rejection of "same model that produced the derivation" is
   explicitly reversed (bounded by D7's deterministic grounding resolution).
+
+## Amendment 2026-11-24 — proportional D7 tolerance for prose (#169)
+
+The decision above made every ungrounded SUPPORTED claim fatal. Measured on
+six real derivations (0/6 `auto-verified`, 20 ungrounded claims: 18 prose, 2
+with numbers absent from the source) that gate measured lexical luck, not
+faithfulness. Amended:
+
+- an ungrounded SUPPORTED claim is **numeric** when any of its digit-bearing
+  words is absent from the content of the parents D7 examined, else **prose**;
+- the node stays `draft` when any ungrounded claim is numeric, or when the
+  ungrounded prose claims exceed `ceil(TOLERATED_SHARE × claims examined)`
+  (`TOLERATED_SHARE = 0.10`, at least one claim);
+- within that share the prose claims persist in `check_failures` tagged
+  `[severity=quality]` and do not gate. The "both severities gate to draft"
+  rule above therefore holds for every failure **except** those annotations,
+  which the gate subtracts by identity — V2's quality failures still draft;
+- a digit-bearing word absent from the parents is always fatal: the tolerance
+  never buys coverage with an invented figure (#145);
+- `TOLERATED_SHARE = 0` restores the all-or-nothing behaviour above.
+
+Destination: the extractive resolver (PRD #152), which chooses the span
+instead of hoping for lexical overlap. This tolerance is a reversible bridge.

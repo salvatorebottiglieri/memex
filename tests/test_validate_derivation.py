@@ -778,6 +778,26 @@ class TestRunValidations:
         assert result.tolerated == []
         assert any("[severity=fatal]" in f for f in result.failures)
 
+    def test_ungrounded_short_mixed_token_stays_fatal(self, tmp_path):
+        """#169: a digit-bearing word shorter than content_tokens' 3-char floor
+        (``5G``) is still numeric — a fabricated short token must never read
+        as toleratable prose."""
+        con, node_id, node_path = _setup(
+            tmp_path,
+            prose=_claims_prose(
+                "The rollout brings 5G coverage to the whole region."
+            ),
+            statements=["inf"],
+        )
+        result = run_validations(_SupportedJudge(), con, node_id, node_path)
+        con.close()
+        assert result.passed is False
+        assert result.tolerated == []
+        assert any(
+            "[severity=fatal]" in f and "5G coverage" in f
+            for f in result.failures
+        )
+
     def test_tolerance_ceiling_is_exact_at_a_ten_multiple(self, tmp_path):
         """#169: 3 ungrounded prose claims of 30 examined sit exactly on the
         10% budget — the ceiling is computed exactly (0.1 * 30 is

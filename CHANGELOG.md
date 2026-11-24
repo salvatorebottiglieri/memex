@@ -22,8 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - D7 tolerates a proportional share of ungrounded *prose* claims (issue
   #169): up to `max(1, 10%)` of the claims D7 examined — `TOLERATED_SHARE` —
   ride `check_failures` with the non-fatal `quality` tag instead of drafting
-  the node, while a claim carrying a number absent from its parent stays
-  fatal. The bridge is reversible: `TOLERATED_SHARE = 0` restores the
+  the node, while a claim whose digit-bearing word of any length (`5G`,
+  `2024`) is absent from its parent stays fatal. The bridge is reversible: `TOLERATED_SHARE = 0` restores the
   pre-#169 all-or-nothing gate.
 
 - The derivation prompt asks for the source's own words: every body sentence

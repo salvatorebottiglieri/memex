@@ -101,7 +101,11 @@ threshold (latency economy).
 
 ### 6. Failure semantics
 
-- `SUPPORTED` + not grounded → `D7: [severity=fatal]` (system overrides judge).
+- `SUPPORTED` + not grounded → `D7` failure (system overrides judge):
+  `[severity=fatal]`, except ungrounded **prose** inside
+  `ceil(0.10 × the claims D7 examined, at least one)`, which is
+  `[severity=quality]`, annotated and non-gating (#169). A claim whose
+  digit-bearing word is absent from the parents is always fatal.
 - `SUPPORTED` + no hint + no grounding → same.
 - `UNSUPPORTED` + missing `parent_key`/`absence_explanation` → `V1` fatal
   (negative contract, unchanged).

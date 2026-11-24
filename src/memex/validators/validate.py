@@ -57,7 +57,7 @@ from memex.utils.parsing import (
 from memex.validators.evidence import (
     TOLERATED_SHARE,
     _warn,
-    content_tokens,
+    digit_tokens,
     grounding_gate,
     resolve_evidence,
 )
@@ -319,9 +319,9 @@ def _d7_resolve_grounding(
     carries no inline link is backstopped as a missing declaration.
 
     Not grounded is fatal, with one proportional exception (#169): an
-    ungrounded claim is **numeric** when one of its content tokens carries a
-    digit and does not appear in the content of any checked parent, else
-    **prose**; the node stays fatal when any ungrounded claim is numeric or
+    ungrounded claim is **numeric** when one of its digit-bearing words does
+    not appear in the content of any checked parent, else **prose**; the node
+    stays fatal when any ungrounded claim is numeric or
     when the ungrounded prose claims exceed ``ceil(TOLERATED_SHARE ×
     gated_claims)`` — = ``max(1, …)`` for any positive share, 0 (the
     pre-#169 gate) when the share is 0. Within the share, the prose claims
@@ -438,19 +438,16 @@ def _d7_resolve_grounding(
         )
         if hint_text:
             message += f" [evidence_hint: {hint_text!r}]"
-        # Numeric: a digit-bearing content token absent from every checked
-        # parent — an invented figure is the defect the gate exists for
-        # (#145), never tolerated.
-        parent_tokens = {
-            t
+        # Numeric: a digit-bearing word absent from every checked parent — an
+        # invented figure is the defect the gate exists for (#145), never
+        # tolerated, down to short mixed tokens like ``5G``/``V2``.
+        parent_digits = {
+            token
             for s in sources
             if s.get("content") is not None
-            for t in content_tokens(s["content"])
+            for token in digit_tokens(s["content"])
         }
-        numeric = any(
-            any(c.isdigit() for c in token) and token not in parent_tokens
-            for token in content_tokens(claim)
-        )
+        numeric = bool(digit_tokens(claim) - parent_digits)
         ungrounded.append((numeric, message))
     # Integer percent: the ceiling is exact (0.1 * 30 is 3.0000000000000004
     # in binary floating point) and 0 disables the bridge — the pre-#169

@@ -137,6 +137,22 @@ def content_tokens(text: str) -> list[str]:
     return tokens
 
 
+def digit_tokens(text: str) -> set[str]:
+    """Every word carrying a digit, normalized; wikilink markup dropped.
+
+    The numeric half of D7's tolerance (#169) classifies at WORD level, not on
+    ``content_tokens``: that helper drops non-numeric words shorter than 3
+    characters, so a fabricated ``5G``/``V2``/``A4`` would read as toleratable
+    prose. A digit-bearing word absent from the parents is always fatal.
+    """
+    surface = _WIKILINK_RE.sub(" ", normalize_surface(text or ""))
+    return {
+        word
+        for word in _WORD_RE.findall(surface.lower())
+        if any(c.isdigit() for c in word)
+    }
+
+
 def _sentence_spans(text: str) -> list[tuple[int, int]]:
     """(start, end) offsets of the sentence-aligned passages of *text*.
 
