@@ -997,6 +997,58 @@ def synthesize(db_path: Path, vault_path: Path, node_ids: tuple[str, ...]) -> No
         _fail("error", detail=result.get("detail") or "")
     click.echo(json.dumps(result))
 
+
+@cli.command()
+@_db_options
+@click.argument("node_id", required=False)
+@click.option("--all", "revalidate_all", is_flag=True, default=False, help="Re-judge every summary node.")
+@click.option("--limit", default=None, type=int, help="Max nodes per run with --all (default: unlimited).")
+def revalidate(db_path: Path, vault_path: Path, node_id: str | None = None,
+               revalidate_all: bool = False, limit: int | None = None) -> None:
+    """Re-run today's validation gate on existing nodes (no prose rewrite).
+
+    Single node:  memex revalidate --db DB --vault V <node-id>
+    Batch:        memex revalidate --db DB --vault V --all [--limit N]
+
+    Loads the node's content file and its provenance parents exactly as derive
+    does, runs the deterministic checks (D1-D6) and the validation DAG (V1 ->
+    D7 -> V2), and writes back only trust_state, check_failures and evidence —
+    the markdown file is never touched. One JSON object per node is printed;
+    --all adds a final summary line. Exit 1 when a node left a trusted state
+    for draft, 0 otherwise (usable from a migration script).
+    """
+    from memex.agent import load_agent
+    from memex.services.revalidate import RevalidatorService
+    from memex.store import Store
+
+    agent = load_agent(os.environ.get("MEMEX_AGENT"))
+
+    if revalidate_all:
+        with Store.open(db_path) as store:
+            results = RevalidatorService(store, agent).revalidate_all(limit=limit)
+        for result in results:
+            click.echo(json.dumps(dataclasses.asdict(result)))
+        demoted = [r for r in results if r.demoted]
+        click.echo(json.dumps({
+            "revalidated": len(results),
+            "demoted": len(demoted),
+            "regressed": bool(demoted),
+        }))
+        if demoted:
+            raise SystemExit(1)
+        return
+
+    if not node_id:
+        _fail("missing_node_id", detail="Provide a node_id or use --all for batch mode.")
+    with Store.open(db_path) as store:
+        result = RevalidatorService(store, agent).revalidate(node_id)
+    if result.status == "error":
+        _fail("error", detail=result.detail or "")
+    click.echo(json.dumps(dataclasses.asdict(result)))
+    if result.demoted:
+        raise SystemExit(1)
+
+
 @cli.command()
 @_db_options
 @click.argument("query")

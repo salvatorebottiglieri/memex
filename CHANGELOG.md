@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `memex revalidate [<node-id> | --all] [--limit N]` re-runs today's
+  deterministic checks and validation DAG on an existing node (issue #171).
+  It loads the node's content file and its provenance parents exactly as
+  `derive` does, then writes back only `trust_state`, `check_failures` and
+  `evidence` — the markdown file is never touched, so the re-judgement is a
+  measurement, not a rewrite. One JSON object per node plus a `--all`
+  summary; exit 1 when a trusted node falls to `draft`, 0 otherwise.
+
 - Vault-wide locator integrity and frozen nodes (issue #120, ADR-0019):
   `memex check` re-validates every `content_path` and `derived_from` locator
   against the current vault (read-only, exit 1 on findings);
