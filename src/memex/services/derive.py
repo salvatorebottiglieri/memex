@@ -8,6 +8,8 @@ updates.
 
 from __future__ import annotations
 
+import os
+import tempfile
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -31,7 +33,7 @@ class DeriveResult:
     """Result of a single derive operation."""
 
     id: str
-    # "derived" | "already_derived" | "no_content" | "error"
+    # "derived" | "re_derived" | "already_derived" | "no_content" | "error"
     status: str
     l0_node_id: str
     trust_state: str | None = None
@@ -61,12 +63,22 @@ class DeriverService:
     # Public API
     # ------------------------------------------------------------------
 
-    def derive(self, l0_node_id: str, *, use_retry: bool = False) -> DeriveResult:
+    def derive(
+        self,
+        l0_node_id: str,
+        *,
+        use_retry: bool = False,
+        force: bool = False,
+    ) -> DeriveResult:
         """Derive a single L0 node.
 
         Loads content from the vault, checks idempotency, runs the agent,
         validates, writes markdown, creates the node and provenance edge,
         sets confidence, runs content checks, and updates trust state.
+
+        An already-derived L0 comes back ``already_derived`` without writing
+        anything; ``force=True`` re-derives it in place instead — same node
+        id, same ``content_path``, status ``re_derived`` (issue #175).
 
         Returns a ``DeriveResult`` — never raises for agent failures
         (those are captured in the result status).
@@ -95,7 +107,7 @@ class DeriverService:
 
         # --- Idempotency check ---
         existing = self._store.find_derived_from(l0_node_id)
-        if existing is not None:
+        if existing is not None and not force:
             return DeriveResult(
                 id=existing["from_node"],
                 status="already_derived",
@@ -115,30 +127,42 @@ class DeriverService:
             )
 
         return self._do_derive(
-            l0_node_id, content, reference, use_retry=use_retry
+            l0_node_id,
+            content,
+            reference,
+            use_retry=use_retry,
+            existing=existing,
         )
 
-    def derive_all(self, limit: int | None = None) -> list[DeriveResult]:
+    def derive_all(
+        self, limit: int | None = None, *, force: bool = False
+    ) -> list[DeriveResult]:
         """Derive all un-derived L0 nodes, capped at *limit* when given.
 
         ``limit=None`` or ``limit <= 0`` means unlimited (derive everything).
 
         Returns results for already-derived L0s (status="already_derived")
-        alongside newly derived ones.  Never raises; individual failures
-        are captured per-node in the result list.
+        alongside newly derived ones.  ``force=True`` re-derives the existing
+        derivations in place (status="re_derived") and *limit* caps the total
+        number of nodes processed.  Never raises; individual failures are
+        captured per-node in the result list.
         """
         all_nodes = self._store.list_nodes()
         results: list[DeriveResult] = []
-        seen_derived: set[str] = set()
+        pending: list[tuple[dict, dict | None]] = []
 
-        # Phase 1 — report already-derived L0s (extracted roots are the
-        # content-bearing L0 of the url+extracted model; legacy raw_source
-        # rows remain derivable during the transition).
+        # Phase 1 — sort the L0 set (extracted roots are the content-bearing L0
+        # of the url+extracted model; legacy raw_source rows remain derivable
+        # during the transition) into already-derived vs. pending work.
         for node in all_nodes:
             if node.get("kind") not in ("raw_source", "extracted"):
                 continue
             existing = self._store.find_derived_from(node["id"])
-            if existing is not None:
+            if existing is None:
+                pending.append((node, None))
+            elif force:
+                pending.append((node, existing))
+            else:
                 results.append(
                     DeriveResult(
                         id=node["id"],
@@ -146,15 +170,10 @@ class DeriverService:
                         l0_node_id=node["id"],
                     )
                 )
-                seen_derived.add(node["id"])
 
-        # Phase 2 — derive un-derived L0s (same L0 set as phase 1)
+        # Phase 2 — derive / re-derive the pending L0s
         count = 0
-        for node in all_nodes:
-            if node.get("kind") not in ("raw_source", "extracted"):
-                continue
-            if node["id"] in seen_derived:
-                continue
+        for node, existing in pending:
             if limit is not None and limit > 0 and count >= limit:
                 break
             count += 1
@@ -175,7 +194,11 @@ class DeriverService:
                     )
                     continue
                 result = self._do_derive(
-                    node["id"], content, reference, use_retry=True
+                    node["id"],
+                    content,
+                    reference,
+                    use_retry=True,
+                    existing=existing,
                 )
                 results.append(result)
             except Exception as e:
@@ -237,8 +260,14 @@ class DeriverService:
         reference: DocumentRef | None,
         *,
         use_retry: bool = False,
+        existing: dict | None = None,
     ) -> DeriveResult:
-        """Core derivation pipeline (assumes caller owns idempotency)."""
+        """Core derivation pipeline (assumes caller owns idempotency).
+
+        ``existing`` is the ``find_derived_from`` row of a derivation to
+        regenerate in place: the node id and its ``content_path`` are reused,
+        so provenance edges and syntheses citing it stay valid.
+        """
         from memex.checks import run_checks
 
         def _agent_derive():
@@ -262,49 +291,62 @@ class DeriverService:
                 detail=str(e),
             )
 
-        deriv_id = str(uuid.uuid4())
+        deriv_id = (
+            existing["from_node"] if existing is not None else str(uuid.uuid4())
+        )
+        reuse = self._store.get_node(deriv_id) if existing is not None else None
 
         # --- Write markdown file ---
         self._vault_path.mkdir(parents=True, exist_ok=True)
-        first_line = deriv.prose.split("\n")[0].strip()
-        head_name = (
-            first_line.lstrip("# ").strip().strip('"').strip("'") or deriv_id
-        )
-        md_path = self._human_path(head_name)
+        if reuse is not None:
+            md_path = Path(reuse["content_path"])
+        else:
+            first_line = deriv.prose.split("\n")[0].strip()
+            head_name = (
+                first_line.lstrip("# ").strip().strip('"').strip("'")
+                or deriv_id
+            )
+            md_path = self._human_path(head_name)
         # Ticket #143: the file renders the column — canonicalize its markers
         # from synthesis_statements so D3's exact file-vs-column check passes.
         prose = canonicalize_synthesis_markers(
             deriv.prose, deriv.synthesis_statements
         )
-        md_path.write_text(prose, encoding="utf-8")
+        self._write_markdown(md_path, prose)
 
-        # --- Create node and provenance edge ---
-        now = datetime.now(timezone.utc).isoformat()
-        parent = self._store.get_node(l0_node_id)
-        parent_depth = parent["depth"] if parent else 0
-        self._store.create_node(
-            node_id=deriv_id,
-            kind="summary",
-            tier="notes",
-            trust_state="draft",
-            depth=parent_depth + 1,
-            content_path=str(md_path),
-            created_at=now,
-            synthesis_statements=deriv.synthesis_statements,
-        )
-        self._store.create_edge(
-            edge_id=str(uuid.uuid4()),
-            type="provenance",
-            relation="derived_from",
-            from_node=deriv_id,
-            to_node=l0_node_id,
-            written_by="llm",
-        )
+        if reuse is None:
+            # --- Create node and provenance edge ---
+            now = datetime.now(timezone.utc).isoformat()
+            parent = self._store.get_node(l0_node_id)
+            parent_depth = parent["depth"] if parent else 0
+            self._store.create_node(
+                node_id=deriv_id,
+                kind="summary",
+                tier="notes",
+                trust_state="draft",
+                depth=parent_depth + 1,
+                content_path=str(md_path),
+                created_at=now,
+                synthesis_statements=deriv.synthesis_statements,
+            )
+            self._store.create_edge(
+                edge_id=str(uuid.uuid4()),
+                type="provenance",
+                relation="derived_from",
+                from_node=deriv_id,
+                to_node=l0_node_id,
+                written_by="llm",
+            )
 
-        # Notes-tier with 1 parent → medium confidence
-        self._store._con.execute(
-            "UPDATE node SET confidence = 'medium' WHERE id = ?", (deriv_id,)
-        )
+            # Notes-tier with 1 parent → medium confidence
+            self._store._con.execute(
+                "UPDATE node SET confidence = 'medium' WHERE id = ?", (deriv_id,)
+            )
+        else:
+            # Same node: only the LLM-owned columns change.
+            self._store.update_synthesis_statements(
+                deriv_id, deriv.synthesis_statements
+            )
 
         # --- Content checks (D1–D6) ---
         check_result = run_checks(self._store._con, deriv_id, md_path)
@@ -332,12 +374,30 @@ class DeriverService:
 
         return DeriveResult(
             id=deriv_id,
-            status="derived",
+            status="re_derived" if reuse is not None else "derived",
             l0_node_id=l0_node_id,
             trust_state=trust_state,
             content_path=str(md_path),
             check_failures=failures,
         )
+
+    def _write_markdown(self, md_path: Path, prose: str) -> None:
+        """Write *prose* atomically: temp file beside it, then ``os.replace``.
+
+        A rewrite interrupted mid-write leaves the previous derivation intact
+        instead of a truncated file — the vault has no history to restore it
+        from (issue #175).
+        """
+        fd, tmp = tempfile.mkstemp(
+            dir=md_path.parent, prefix=".derive-", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(prose)
+            os.replace(tmp, md_path)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
 
     def _human_path(self, name: str, suffix: str = ".md") -> Path:
         """Return a human-readable file path, appending a suffix on collision.

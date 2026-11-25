@@ -1311,6 +1311,20 @@ class Store:
             (evidence_json, node_id),
         )
 
+    def update_synthesis_statements(
+        self, node_id: str, statements: list[str] | None
+    ) -> None:
+        """Replace a node's LLM synthesis statements (JSON, NULL when empty).
+
+        Used when a derivation is regenerated in place: the column must match
+        the rewritten markdown, or D3's file-vs-column check fails.
+        """
+        synth_json = json.dumps(statements) if statements else None
+        self._con.execute(
+            "UPDATE node SET synthesis_statements = ? WHERE id = ?",
+            (synth_json, node_id),
+        )
+
     def update_extracted_fetcher(
         self, node_id: str, fetcher_type: str, content_path: str | None = None
     ) -> None:

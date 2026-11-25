@@ -12,6 +12,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from memex.store import Store as _Store
 from tests.conftest import _run_memex, register_node
 
@@ -1426,3 +1428,227 @@ class TestDeriveCanonicalizeMarkers:
             "A canonical statement",
             "Another canonical statement",
         ]
+
+
+class TestDeriveForce:
+    """Issue #175 — ``derive --force`` regenerates an existing derivation in
+    place: same node id, same content_path, atomic markdown write.
+
+    Exercises the full service path in-process (agent → prose → file → gate),
+    plus one CLI test that the flag is wired.
+    """
+
+    @staticmethod
+    def _ingest(store, url: str = "https://example.com/article") -> str:
+        filename = f"{uuid.uuid4().hex}.md"
+        p = register_node(store, Path(store["vault"]), filename, url)
+        assert p.returncode == 0, p.stderr
+        return json.loads(p.stdout)["id"]
+
+    @staticmethod
+    def _derive(store, node_id: str, agent, **kwargs):
+        from memex.services.derive import DeriverService
+
+        with _Store.open(store["db"]) as s:
+            return DeriverService(s, Path(store["vault"]), agent).derive(
+                node_id, **kwargs
+            )
+
+    @staticmethod
+    def _derive_all(store, agent, **kwargs):
+        from memex.services.derive import DeriverService
+
+        with _Store.open(store["db"]) as s:
+            return DeriverService(s, Path(store["vault"]), agent).derive_all(
+                **kwargs
+            )
+
+    def _existing(self, store):
+        """One L0 with a good derivation: auto-verified, file on disk."""
+        from tests.fake_llm_client import FakeAgent
+
+        first = self._derive(store, self._ingest(store), FakeAgent())
+        assert first.status == "derived"
+        assert first.trust_state == "auto-verified"
+        return first
+
+    def test_force_regenerates_the_prose_of_the_same_node(self, store):
+        """--force rewrites the prose and re-runs the gate on the new text."""
+        from tests.fake_llm_client_failing import FakeLLMClientFailing
+
+        first = self._existing(store)
+        path = Path(first.content_path)
+        before = path.read_text(encoding="utf-8")
+
+        again = self._derive(
+            store, first.l0_node_id, FakeLLMClientFailing(), force=True
+        )
+
+        assert again.status == "re_derived"
+        assert again.id == first.id
+        assert again.content_path == first.content_path
+        assert again.trust_state == "draft"  # the gate re-ran on the new prose
+        assert again.check_failures, "the gate must report the new prose's defects"
+        after = path.read_text(encoding="utf-8")
+        assert after != before
+        assert "no synthesis marker" in after  # the new agent's prose landed
+
+        con = sqlite3.connect(store["db"])
+        rows = con.execute(
+            "SELECT id FROM node WHERE kind = 'summary' AND tier = 'notes'"
+        ).fetchall()
+        con.close()
+        assert [r[0] for r in rows] == [first.id], "no second node was created"
+
+    def test_force_keeps_the_node_id_and_its_edges(self, store):
+        """Same node id, so derived_from edges and citing syntheses stay valid."""
+        from tests.fake_llm_client import FakeAgent
+
+        first = self._existing(store)
+        synth_id = str(uuid.uuid4())
+        con = sqlite3.connect(store["db"])
+        st = _Store(con)
+        st.create_node(
+            node_id=synth_id,
+            kind="summary",
+            tier="synthesis",
+            depth=3,
+            content_path=str(Path(store["vault"]) / "synthesis.md"),
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+        # A synthesis citing this derivation (the edge a new node id would break).
+        st.create_edge(
+            edge_id=str(uuid.uuid4()),
+            type="provenance",
+            relation="derived_from",
+            from_node=synth_id,
+            to_node=first.id,
+            written_by="llm",
+        )
+        con.commit()
+        edges_before = [
+            tuple(r)
+            for r in con.execute(
+                "SELECT id, type, relation, from_node, to_node FROM edge ORDER BY id"
+            ).fetchall()
+        ]
+        con.close()
+
+        again = self._derive(store, first.l0_node_id, FakeAgent(), force=True)
+
+        assert again.id == first.id
+        con = sqlite3.connect(store["db"])
+        edges_after = [
+            tuple(r)
+            for r in con.execute(
+                "SELECT id, type, relation, from_node, to_node FROM edge ORDER BY id"
+            ).fetchall()
+        ]
+        con.close()
+        assert edges_after == edges_before
+        deriv_edges = [e for e in edges_after if first.id in (e[3], e[4])]
+        assert len(deriv_edges) == 2  # L0 -> derivation, derivation <- synthesis
+
+    def test_failing_agent_leaves_the_previous_markdown_untouched(self, store):
+        """A failed --force is a no-op on disk: byte-identical file, no temp left."""
+        from tests.fake_llm_client_throws import FakeLLMClientThrows
+
+        first = self._existing(store)
+        path = Path(first.content_path)
+        before = path.read_bytes()
+        names_before = sorted(p.name for p in path.parent.iterdir())
+
+        failed = self._derive(
+            store, first.l0_node_id, FakeLLMClientThrows(), force=True
+        )
+
+        assert failed.status == "error"
+        assert failed.id == first.l0_node_id
+        assert path.read_bytes() == before, "the old markdown must survive intact"
+        assert sorted(p.name for p in path.parent.iterdir()) == names_before
+
+        con = sqlite3.connect(store["db"])
+        row = con.execute(
+            "SELECT trust_state FROM node WHERE id = ?", (first.id,)
+        ).fetchone()
+        con.close()
+        assert row[0] == "auto-verified", "a failed re-derive does not demote"
+
+    def test_interrupted_rename_keeps_the_old_markdown_and_no_temp_file(
+        self, store, monkeypatch
+    ):
+        """A write that dies before the rename leaves the old file and no temp."""
+        import memex.services.derive as derive_mod
+        from tests.fake_llm_client import FakeAgent
+
+        first = self._existing(store)
+        path = Path(first.content_path)
+        before = path.read_bytes()
+        names_before = sorted(p.name for p in path.parent.iterdir())
+
+        def boom(*args, **kwargs):
+            raise OSError("simulated crash before the rename")
+
+        monkeypatch.setattr(derive_mod.os, "replace", boom)
+        with pytest.raises(OSError):
+            self._derive(store, first.l0_node_id, FakeAgent(), force=True)
+
+        assert path.read_bytes() == before
+        assert sorted(p.name for p in path.parent.iterdir()) == names_before
+
+    def test_without_force_the_previous_markdown_is_never_written(self, store):
+        """No flag → today's behaviour: already_derived, no write at all."""
+        from tests.fake_llm_client_failing import FakeLLMClientFailing
+
+        first = self._existing(store)
+        path = Path(first.content_path)
+        before = path.read_bytes()
+
+        again = self._derive(store, first.l0_node_id, FakeLLMClientFailing())
+
+        assert again.status == "already_derived"
+        assert again.id == first.id
+        assert path.read_bytes() == before
+
+    def test_derive_all_force_regenerates_at_most_limit(self, store):
+        """--all --force --limit N re-derives N existing derivations, no more."""
+        from tests.fake_llm_client import FakeAgent
+        from tests.fake_llm_client_failing import FakeLLMClientFailing
+
+        l0s = [
+            self._ingest(store, f"https://example.com/article-{i}")
+            for i in range(3)
+        ]
+        for l0 in l0s:
+            assert self._derive(store, l0, FakeAgent()).status == "derived"
+
+        results = self._derive_all(
+            store, FakeLLMClientFailing(), limit=2, force=True
+        )
+
+        assert len(results) == 2
+        assert all(r.status == "re_derived" for r in results)
+        assert all(r.trust_state == "draft" for r in results)
+        con = sqlite3.connect(store["db"])
+        states = con.execute(
+            "SELECT trust_state FROM node WHERE kind = 'summary' AND tier = 'notes'"
+        ).fetchall()
+        con.close()
+        # the third derivation was left alone
+        assert sorted(s[0] for s in states) == ["auto-verified", "draft", "draft"]
+
+    def test_cli_force_flag_regenerates_in_place(self, store):
+        first = self._existing(store)
+        result = _run_memex(
+            [
+                "derive", "--db", str(store["db"]),
+                "--vault", str(store["vault"]), "--force", first.l0_node_id,
+            ],
+            env={"MEMEX_AGENT": FAKE_AGENT},
+        )
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        assert data["status"] == "re_derived"
+        assert data["id"] == first.id
+        assert data["content_path"] == first.content_path
+        assert data["trust_state"] == "auto-verified"

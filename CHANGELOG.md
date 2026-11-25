@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `memex derive --force [<node-id> | --all] [--limit N]` regenerates an
+  existing derivation in place (issue #175): same node id and same
+  `content_path`, so the `derived_from` edge and any synthesis citing it stay
+  valid, but the prose is rewritten atomically (temp file + `os.replace`, a
+  failed run leaves the old markdown byte-identical and no temp file behind)
+  and the deterministic checks plus the validation DAG re-run as for a fresh
+  derivation. Status `re_derived` carries the new `trust_state`. Without the
+  flag the command still answers `already_derived` and writes nothing.
+
 - `memex revalidate [<node-id> | --all] [--limit N]` re-runs today's
   deterministic checks and validation DAG on an existing node (issue #171).
   It loads the node's content file and its provenance parents exactly as
