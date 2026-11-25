@@ -932,8 +932,10 @@ def show(db_path: Path, vault_path: Path, node_id: str) -> None:
 @click.argument("node_id", required=False)
 @click.option("--all", "derive_all", is_flag=True, default=False, help="Derive all un-derived extracted/L0 nodes.")
 @click.option("--limit", "limit", default=None, type=int, help="Max derivations per run (default: unlimited).")
+@click.option("--force", "force", is_flag=True, default=False, help="Regenerate an existing derivation in place (same node, same file).")
 def derive(db_path: Path, vault_path: Path, node_id: str | None = None,
-           derive_all: bool = False, limit: int | None = None) -> None:
+           derive_all: bool = False, limit: int | None = None,
+           force: bool = False) -> None:
     """Generate a notes-tier derivation from an L0 node using an LLM.
 
     Single node:  memex derive --db DB --vault V <node-id>
@@ -943,6 +945,10 @@ def derive(db_path: Path, vault_path: Path, node_id: str | None = None,
     (kind=summary, tier=notes, trust_state=draft, depth=parent depth+1), records a
     derived_from provenance edge, and runs deterministic checks (D1–D6) plus the
     validation DAG (V1 → D7 → V2) to transition draft -> auto-verified.
+
+    An already-derived L0 answers already_derived and nothing is written. With
+    --force it is re-derived in place instead: same node id and content_path,
+    prose rewritten atomically, checks re-run, status re_derived.
     """
     from memex.agent import load_agent
     from memex.store import Store
@@ -953,14 +959,14 @@ def derive(db_path: Path, vault_path: Path, node_id: str | None = None,
     if derive_all:
         with Store.open(db_path) as store:
             svc = DeriverService(store, vault_path, agent)
-            results = svc.derive_all(limit=limit)
+            results = svc.derive_all(limit=limit, force=force)
         click.echo(json.dumps([dataclasses.asdict(r) for r in results]))
     else:
         if not node_id:
             _fail("missing_node_id", detail="Provide a node_id or use --all for batch mode.")
         with Store.open(db_path) as store:
             svc = DeriverService(store, vault_path, agent)
-            result = svc.derive(node_id)
+            result = svc.derive(node_id, force=force)
         if result.status == "error":
             _fail("error", detail=result.detail or "")
         click.echo(json.dumps(dataclasses.asdict(result)))
